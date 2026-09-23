@@ -71,9 +71,8 @@ with scheme.render_pass("triangle", rt, goldy.TargetLoad.clear(goldy.Color(0.1, 
 
 scheme.copy_to_texture(rt, readback)
 memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw_texture(scheme, readback)
 submission = scheme.submit()
-pixels = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
+pixels = np.frombuffer(submission.take_texture(readback), dtype=np.uint8).reshape(100, 100, 4)
 ```
 
 ## NumPy Integration
@@ -104,13 +103,11 @@ parcel = device.acquire_buffer(vertices, goldy.BufferKind.SCATTERED)
 
 ### Reading Results Back to NumPy
 
-Use `MemoryExchange.bind_withdraw` / `bind_withdraw_texture`, then claim and consume after submit:
+Use `SchemeSubmission.take` / `take_texture` after submit:
 
 ```python
-memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+output = np.frombuffer(submission.take(parcel), dtype=np.float32)
 ```
 
 ### Performance Tips
@@ -154,9 +151,8 @@ scheme.node("double", pipeline).with_parcel(
     parcel, goldy.NodeAccess.READ_WRITE
 ).dispatch(4, 1, 1)
 memory = goldy.MemoryExchange(ctx)
-withdraw = memory.bind_withdraw(scheme, parcel)
 submission = scheme.submit()
-output = np.frombuffer(withdraw.claim(submission).consume(), dtype=np.float32)
+output = np.frombuffer(submission.take(parcel), dtype=np.float32)
 ```
 
 ### Ping-Pong Buffers
@@ -176,7 +172,7 @@ Hybrid compute + render workflows use a single `Scheme` with both compute nodes 
 | Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `device.acquire_buffer(numpy_array, access)` → `Parcel` |
 | Render pass | `scheme.render_pass(...)` | `with scheme.render_pass(...) as rp:` |
 | Compute node | `scheme.node(...).dispatch(...)` | `scheme.node(...).with_parcel(...).dispatch(...)` |
-| Readback | `grant.consume(&submission)` | `grant.consume(submission)` |
+| Update retained buffer | `(&deposit << &data)?` | `deposit << numpy_bytes` |
 | Resource lifetime | Explicit `Arc<Runtime>` ownership | Managed by Python GC via PyO3 |
 
 ## Backend Selection
@@ -211,6 +207,23 @@ device = instance.request_adapter().request_runtime()
 ctx = device.create_context()
 parcel = device.acquire_buffer(data, access)  # data: numpy array or bytes
 parcel.byte_size                            # int (bytes)
+```
+
+#### `Tensor` / `TensorKernels`
+
+Dense tensor algebra records into the same `Scheme`. NumPy conversion copies through
+acquire and `MemoryExchange` — there is no zero-copy host view of GPU storage.
+
+```python
+a = device.acquire_tensor(np.array([1.0, 2.0], dtype=np.float32), shape=[2])
+b = device.zeros_tensor([2], goldy.TensorDType.F32)
+kernels = goldy.TensorKernels(device)
+scheme = goldy.Scheme(ctx)
+kernels.fill_f32(scheme, "fill", b, 10.0)
+c = kernels.add(scheme, "add", a, b)
+memory = goldy.MemoryExchange(ctx)
+submission = scheme.submit()
+out = np.frombuffer(submission.take(c.parcel()), dtype=np.float32)
 ```
 
 #### `Scheme`

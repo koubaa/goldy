@@ -12,6 +12,7 @@ use goldy::{
     RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
     TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 
 fn try_cuda_instance() -> Option<Instance> {
@@ -123,16 +124,8 @@ fn draw_and_readback(
         pass.finish();
     }
     scheme.copy_to_texture(&rt, readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec()
+    (&mut submission >> &readback).take::<u8>().expect("host take").to_vec()
 }
 
 #[test]
@@ -330,11 +323,8 @@ fn compute_then_raster_lands_native_and_twin() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume");
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take");
     let (r, g, b) = sample_centroid(&pixels);
     assert!(r > 0.5 && g < 0.25 && b < 0.25, "got ({r},{g},{b})");
     assert_eq!(
@@ -414,11 +404,8 @@ fn shared_then_kernel_promotes_without_invalidating_schemes() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit after promote");
-    let pixels = grant.claim(&mut submission).expect("claim").consume().expect("consume");
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take");
     // Recolor rotates R→G channel into R slot from previous G(=0) — expect dark/greenish.
     // Original red (1,0,0) → (0,0,1) blue after one rotate of (r,g,b)->(g,b,r).
     let (r, g, b) = sample_centroid(&pixels);
@@ -511,11 +498,8 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     }
     draw.copy_to_texture(&rt, &readback).expect("copy");
     {
-        let grant = MemoryExchange::new(draw.context())
-            .bind_withdraw(&mut draw, &readback)
-            .expect("withdraw");
         let mut submission = draw.submit().expect("warm draw");
-        let _ = grant.claim(&mut submission).expect("claim").consume();
+        let _ = (&mut submission >> &readback).take::<u8>().expect("claim");
     }
     assert_eq!(
         test_support::cuda_buffer_phys_kind(&device, &vertex_buffer),
@@ -561,16 +545,8 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
         upload.submit().expect("upload");
         drop(upload);
 
-        let grant = MemoryExchange::new(draw.context())
-            .bind_withdraw(&mut draw, &readback)
-            .expect("withdraw");
         let mut submission = draw.submit().expect("draw resubmit");
-        let pixels = grant
-            .claim(&mut submission)
-            .expect("claim")
-            .consume()
-            .expect("consume")
-            .to_vec();
+        let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
         let (r, g, b) = sample_centroid(&pixels);
         assert!(expect(r, g, b), "frame {frame_i}: stale Shared content ({r},{g},{b})");
         assert_eq!(

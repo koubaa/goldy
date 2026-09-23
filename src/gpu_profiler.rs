@@ -72,9 +72,9 @@ pub fn gpu_profile_enabled() -> bool {
 }
 
 /// GPU duration for one dispatch (nanoseconds).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DispatchGpuNs {
-    pub label: &'static str,
+    pub label: crate::SchemeLabel,
     pub gpu_ns: u64,
 }
 
@@ -96,9 +96,9 @@ pub fn log_dispatch_timings(backend: &str, timeline: u64, dispatches: &[Dispatch
         total_ns = total_ns.saturating_add(d.gpu_ns);
         tracing::info!(
             "[GPU] backend={backend} timeline={timeline} dispatch={:?} gpu={ms:.3}ms",
-            d.label
+            d.label.as_str()
         );
-        chrome_record_complete(backend, timeline, Some(d.label), ms * 1_000_000.0);
+        chrome_record_complete(backend, timeline, Some(d.label.as_str()), ms * 1_000_000.0);
     }
     let total_ms = total_ns as f64 / 1_000_000.0;
     tracing::info!("[GPU] backend={backend} timeline={timeline} total_dispatch_gpu={total_ms:.3}ms");
@@ -127,7 +127,7 @@ fn escape_json_str(s: &str) -> String {
     out
 }
 
-fn chrome_record_complete(backend: &str, timeline: u64, dispatch_label: Option<&'static str>, dur_us: f64) {
+fn chrome_record_complete(backend: &str, timeline: u64, dispatch_label: Option<&str>, dur_us: f64) {
     let Some(path) = GPU_PROFILE_CONFIG.chrome_path.clone() else {
         return;
     };

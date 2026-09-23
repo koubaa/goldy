@@ -21,6 +21,8 @@ mod scheme;
 mod shader_module;
 mod surface_exchange;
 mod sys;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod texture;
 mod types;
 
@@ -31,9 +33,7 @@ pub use context::Context;
 pub use error::{GoldyError, Result};
 pub use exchange::{Claim, Transaction};
 pub use instance::{AdapterInfo, Instance};
-pub use memory_exchange::{
-    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
-};
+pub use memory_exchange::{DepositTarget, DepositTransaction, HostView, MemoryExchange};
 pub use parcel::Parcel;
 pub use pipeline::RenderPipeline;
 pub use retained_pool::{RecordBuilder, RecordField};
@@ -44,6 +44,8 @@ pub use scheme::{
 };
 pub use shader_module::ShaderModule;
 pub use surface_exchange::SurfaceExchange;
+#[cfg(feature = "tensor")]
+pub use tensor::{Tensor, TensorDType, TensorKernels, TensorShape};
 pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceType, IndexFormat, NodeAccess,

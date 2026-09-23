@@ -3,11 +3,6 @@
 
 import goldy_exp;
 
-struct ViewUniforms {
-    float2 center;
-    float zoom;
-    float _padding;
-};
 
 [goldy_vertex]
 FullscreenVarying vs_main(VertexId vertex_id) {

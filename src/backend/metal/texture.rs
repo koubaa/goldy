@@ -297,6 +297,7 @@ pub(super) fn write(
 }
 
 /// Write data to a subregion of a texture (synchronous: staging buffer + blit, then wait).
+#[allow(dead_code)]
 pub(super) fn write_region(
     state: &mut MetalState,
     texture_handle: TextureHandle,

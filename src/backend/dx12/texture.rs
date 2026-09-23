@@ -680,6 +680,7 @@ pub(super) fn write(
 }
 
 /// Write data to a subregion of a texture (synchronous).
+#[allow(dead_code)]
 pub(super) fn write_region(
     state: &mut Dx12State,
     texture_handle: TextureHandle,

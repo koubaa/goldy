@@ -120,7 +120,7 @@ pub(super) struct MaterializedHostWrite {
 #[derive(Clone)]
 pub(super) enum CudaOp {
     Launch {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         function: CudaFunction,
         module: Arc<CudaModule>,
         workgroup_size: [u32; 3],
@@ -135,7 +135,7 @@ pub(super) enum CudaOp {
     /// GPU-driven dispatch: graph path uses a device-updatable consumer node; fallback
     /// path resolves the shape via DtoH on the worker stream.
     LaunchIndirect {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         function: CudaFunction,
         module: Arc<CudaModule>,
         workgroup_size: [u32; 3],
@@ -261,6 +261,15 @@ pub(super) enum CudaOp {
         dst_ptr: u64,
         dst_row_pitch: u32,
     },
+    /// cuBLAS GEMM/GEMV captured on the submit stream.
+    MatMul {
+        label: Option<crate::SchemeLabel>,
+        desc: crate::ops::MatMulDesc,
+        a: super::matmul::BlasOperand,
+        b: super::matmul::BlasOperand,
+        c: super::matmul::BlasOperand,
+        handle: std::sync::Arc<super::matmul::CublasHandle>,
+    },
 }
 
 /// `CUexternalSemaphore` is a driver handle; Goldy only uses it from the submission worker.
@@ -295,6 +304,7 @@ pub(super) fn op_is_graph_safe(op: &CudaOp) -> bool {
             ..
         } => *graph_capture_ok && !keep_alive_textures.iter().any(|tex| tex.is_imported()),
         CudaOp::Clear { .. } | CudaOp::WriteFromHost { .. } => true,
+        CudaOp::MatMul { .. } => true,
         // Same-allocation copies allocate scratch during execute, which is not capturable.
         CudaOp::Copy { src, dst, .. } => !Arc::ptr_eq(src, dst),
         CudaOp::WriteTextureFromHost { texture, .. } | CudaOp::CopyBufferToTexture { texture, .. } => {
@@ -624,6 +634,11 @@ pub(super) fn collect_pins(
                 textures.push(Arc::clone(texture));
                 buffers.push(Arc::clone(dst));
             }
+            CudaOp::MatMul { a, b, c, .. } => {
+                buffers.push(Arc::clone(&a.memory));
+                buffers.push(Arc::clone(&b.memory));
+                buffers.push(Arc::clone(&c.memory));
+            }
         }
     }
     (buffers, modules, textures, hosts)
@@ -656,7 +671,15 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 args,
                 ..
             } => {
-                launch_direct(stream, *label, function, *workgroup_size, *grid, args, validate)?;
+                launch_direct(
+                    stream,
+                    label.as_deref(),
+                    function,
+                    *workgroup_size,
+                    *grid,
+                    args,
+                    validate,
+                )?;
             }
             CudaOp::LaunchIndirect {
                 label,
@@ -689,7 +712,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 } else {
                     launch_indirect_fallback(
                         stream,
-                        *label,
+                        label.as_deref(),
                         function,
                         *workgroup_size,
                         args,
@@ -926,6 +949,12 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "CopyTextureToReadback")?;
                 }
             }
+            CudaOp::MatMul { .. } => {
+                super::matmul::execute(op)?;
+                if validate {
+                    maybe_validate_sync(stream, "MatMul")?;
+                }
+            }
         }
     }
     Ok(())
@@ -933,7 +962,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
 
 fn launch_direct(
     stream: &Arc<CudaStream>,
-    label: Option<&'static str>,
+    label: Option<&str>,
     function: &CudaFunction,
     workgroup_size: [u32; 3],
     grid: (u32, u32, u32),
@@ -1022,7 +1051,7 @@ fn launch_indirect_for_capture(
 
 fn launch_indirect_fallback(
     stream: &Arc<CudaStream>,
-    label: Option<&'static str>,
+    label: Option<&str>,
     function: &CudaFunction,
     workgroup_size: [u32; 3],
     args: &[CudaLaunchArg],
@@ -1113,7 +1142,8 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::WriteTextureFromHost { .. }
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
-            | CudaOp::CopyTextureToBuffer { .. } => {}
+            | CudaOp::CopyTextureToBuffer { .. }
+            | CudaOp::MatMul { .. } => {}
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {}
         }

@@ -56,9 +56,8 @@ def main():
     scheme.node("double", pipeline).with_parcel(
         parcel, goldy.NodeAccess.READ_WRITE
     ).dispatch(4, 1, 1)
-    grant = goldy.MemoryExchange(ctx).bind_withdraw(scheme, parcel)
     frame = scheme.submit()
-    output = np.frombuffer(grant.claim(frame).consume(), dtype=np.float32)
+    output = np.frombuffer(frame.take(parcel), dtype=np.float32)
     print("Dispatched compute shader")
 
     expected = input_data * 2.0

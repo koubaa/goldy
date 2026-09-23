@@ -49,6 +49,9 @@ Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`
 | `&[T]` / `gpu::BufRO<T>` | `BufRO<T>`, `NodeAccess::Read` |
 | `&mut [T]` | `Scattered<T>`, `NodeAccess::ReadWrite` |
 | `gpu::Scattered<T>` | `Scattered<T>`, `NodeAccess::Write` |
+| `gpu::Tensor<T>` | parent `BufRO<T>` + packed layout, `NodeAccess::Read` |
+| `gpu::TensorMut<T>` | parent `Scattered<T>` + packed layout, `NodeAccess::ReadWrite` |
+| `gpu::TensorWrite<T>` | parent `Scattered<T>` + packed layout, `NodeAccess::Write` |
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
 | `gpu::DirectSpatial<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
@@ -60,9 +63,74 @@ Hidden builtins (appended to the Slang signature when used):
 | `gpu::global_id()` | `ThreadId` |
 | `gpu::local_id()` | `GroupThreadId` |
 | `gpu::workgroup_id()` | `GroupId` |
+| `gpu::workgroup_barrier()` | `GroupMemoryBarrierWithGroupSync` |
+| `let mut s = gpu::workgroup_array::<T, N>()` | file-scope `groupshared T s[N]` |
+| `gpu::workgroup_sum::<N>(val, scratch)` | tree-reduce sum; every lane gets the total |
+| `gpu::workgroup_max::<N>(val, scratch)` | tree-reduce max; every lane gets the max |
+| `gpu::workgroup_softmax_in_place::<N>(buf, base, count, scratch)` | in-place softmax over `buf[base .. base+count)` |
 
 `workgroup_size` is fixed on the attribute / `KernelDef`. `.groups` / `.over_*`
 only control the grid. A different workgroup size is a different pipeline.
+
+Workgroup arrays are a **fixed** size known at compile time (not dynamic shared
+memory). Declare them at the kernel top level, then index them like a buffer.
+
+`workgroup_sum` / `workgroup_max` / `workgroup_softmax_in_place` are 1D
+collectives. `N` must be a power of two (typically `workgroup_size.x`). They
+return the reduced value to **every** lane and include a trailing barrier, so
+the result is immediately usable. Softmax writes `buf[base + t]` for
+`t < count`; unused lanes contribute identity (`-1e30` / `0`). All threads in
+the workgroup must execute the call (no divergent branches around it).
+`workgroup_sum`/`workgroup_max` must be a `let` or simple assignment, not nested
+in a larger expression. Omit `::<N>` to use `workgroup_size.x`. When `buf` is a
+tensor parameter, softmax indexes through the view (logical `base + t`).
+
+## Logical tensors vs physical buffers
+
+`gpu::Tensor<T>` / `TensorMut<T>` / `TensorWrite<T>` bind a [`TensorView`](../compute/tensor.md):
+the shader receives the **parent** parcel plus a scheme-owned packed metadata
+parcel (`GoldyTensorLayout` per tensor, one buffer for the dispatch). Indexing
+is logical-view-relative:
+
+- `view[i]` delinearizes `i` through rank/shape, then applies offset and strides
+- `view.len()` is the logical `numel`
+- `view.dim(axis)` and `view.rank()` read checked layout facts
+
+Ordinary `&[T]` / `&mut [T]` / `gpu::Scattered<T>` stay the physical-index escape
+hatch: `buf[i]` is an element index in the parent buffer, and `.len()` is the
+buffer length. Tensor `record` methods take `TensorView` arguments, validate
+dtype, writeability, and optional shape contracts, and return `Result` because
+packing the layout (or a contract miss) can fail.
+
+### Shape contracts
+
+Annotate tensor parameters with `#[tensor(shape = [...])]` to fix rank and to
+require equal extents at record time. Dimensions may be `_` (any extent), an
+integer literal (exact), or an identifier (symbolic equality within one `record`
+call):
+
+```rust
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn rmsnorm(
+    #[tensor(shape = [dim])] x: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] weight: gpu::Tensor<f32>,
+    #[tensor(shape = [dim])] out: gpu::TensorWrite<f32>,
+) { /* ... */ }
+```
+
+Unannotated tensor parameters keep today's any-shape behavior. The generated
+`record` method checks every tensor argument against the contract **before**
+binding parcels or appending GraphIR. Failures name the kernel, parameter, axis,
+expected spec, and actual shape. Shader parameter order, the 48-byte
+`GoldyTensorLayout` ABI, and `KERNEL_ABI_VERSION` are unchanged.
+
+Relationships that are not dimension equality — for example query-head /
+KV-head divisibility — stay explicit kernel or domain checks, not part of this
+DSL.
+
+Goldy only has eight user scalar words, so layouts are **not** push constants.
+The metadata parcel is interned on the scheme, read-only in GraphIR, and does
+not need an external `TensorKernels` keepalive.
 
 ## Architecture
 
@@ -94,9 +162,10 @@ PushLayout lowering.
 
 Allowed: scalar arithmetic/comparisons, `let` / `let mut`, assignment,
 field/index access, `if`/`else`, `while`, `for i in 0..n`, casts, selected math
-intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`length`), vector
-constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, `return`,
-and the ID builtins above.
+intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`cos`/`exp`/`pow`/`length`),
+vector constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, tensor
+`.len()` / `.dim(axis)` / `.rank()`, `return`,
+workgroup shared arrays + barriers, workgroup sum/max/softmax collectives, and the ID builtins above.
 
 `#[goldy::gpu]` structs may be passed as `&[T]` uniforms; `prepare` prepends
 the generated Slang struct.

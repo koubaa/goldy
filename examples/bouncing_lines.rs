@@ -9,8 +9,8 @@ use goldy::{
     Buffer, BufferKind, Color, ComputePipeline, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
     ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
-    WithdrawTransaction,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -24,20 +24,14 @@ use common::CaptureDump;
 
 const NUM_LINES: u32 = 20;
 
-/// Line structure matching the shader layout
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Line {
     p1: [f32; 2],
     v1: [f32; 2],
     p2: [f32; 2],
     v2: [f32; 2],
     color_index: u32,
-    _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 }
-impl goldy::StructuredBufferElement for Line {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -80,7 +74,6 @@ struct RenderState {
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -114,15 +107,15 @@ impl RenderState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -179,14 +172,13 @@ impl RenderState {
                 &self.line_buffer,
                 &self.scene_rt,
             );
-            if let Ok((present, withdraw)) = Self::bind_frame(
+            if let Ok(present) = Self::bind_frame(
                 &mut scheme,
                 &self.scene_rt,
                 self.surface.as_ref(),
                 self.readback.as_ref(),
             ) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -220,8 +212,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/bouncing_lines_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/bouncing_lines_update.slang"),
+            &[Line::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/bouncing_lines_render.slang"),
+            &[Line::GPU_TYPE],
+        )?;
 
         let mut lines = Vec::with_capacity(NUM_LINES as usize);
         for idx in 0..NUM_LINES {
@@ -232,9 +232,6 @@ impl RenderState {
                 p2: [-angle.cos() * 0.3, -angle.sin() * 0.3],
                 v2: [-0.011 * (idx as f32 * 1.1).cos(), 0.009 * (idx as f32 * 1.3).sin()],
                 color_index: idx,
-                _pad1: 0,
-                _pad2: 0,
-                _pad3: 0,
             });
         }
 
@@ -252,7 +249,7 @@ impl RenderState {
             &line_buffer,
             &scene_rt,
         );
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         println!("Created bouncing lines with {} lines", NUM_LINES);
 
@@ -264,7 +261,6 @@ impl RenderState {
             capture,
             readback,
             present,
-            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -281,9 +277,11 @@ impl RenderState {
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

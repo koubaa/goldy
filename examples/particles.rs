@@ -9,8 +9,9 @@ use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
+    Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -24,27 +25,18 @@ use common::CaptureDump;
 
 const NUM_PARTICLES: u32 = 1000;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Particle {
     position: [f32; 2],
     velocity: [f32; 2],
     size: f32,
-    _pad1: f32,
-    _pad2: f32,
-    _pad3: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct ParticleParams {
     is_snow: f32,
     frame: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
-impl goldy::StructuredBufferElement for Particle {}
-impl goldy::StructuredBufferElement for ParticleParams {}
 
 static mut SEED: u32 = 42;
 fn random() -> f32 {
@@ -96,7 +88,6 @@ struct RenderState {
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -134,15 +125,15 @@ impl RenderState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -216,14 +207,13 @@ impl RenderState {
                 &self.scene_rt,
                 Self::background_color(self.is_snow),
             );
-            if let Ok((present, withdraw)) = Self::bind_frame(
+            if let Ok(present) = Self::bind_frame(
                 &mut scheme,
                 &self.scene_rt,
                 self.surface.as_ref(),
                 self.readback.as_ref(),
             ) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -257,8 +247,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/rain_snow_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/rain_snow_update.slang"),
+            &[Particle::GPU_TYPE, ParticleParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/rain_snow_render.slang"),
+            &[Particle::GPU_TYPE, ParticleParams::GPU_TYPE],
+        )?;
 
         let particles = Self::create_particles(false);
         let particle_buffer = device.acquire_buffer_with_data(&particles, BufferKind::Scattered)?;
@@ -279,12 +277,12 @@ impl RenderState {
             &scene_rt,
             Self::background_color(false),
         );
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<ParticleParams>() as u64),
+            DepositTarget::buffer_elements::<ParticleParams>(&params_buffer, 1),
         )?;
 
         println!("Created rain/snow simulation with {NUM_PARTICLES} particles (Scheme + Present)");
@@ -297,7 +295,6 @@ impl RenderState {
             capture,
             readback,
             present,
-            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -337,9 +334,6 @@ impl RenderState {
                 position: [x, y],
                 velocity: [vx, vy],
                 size,
-                _pad1: 0.0,
-                _pad2: 0.0,
-                _pad3: 0.0,
             });
         }
         particles
@@ -349,13 +343,12 @@ impl RenderState {
         self.is_snow = !self.is_snow;
 
         let particles = Self::create_particles(self.is_snow);
-        let particle_capacity = (NUM_PARTICLES as u64) * std::mem::size_of::<Particle>() as u64;
         let mut particle_upload = Scheme::new(&self.ctx);
         let particle_deposit = MemoryExchange::new(&self.ctx).bind_deposit(
             &mut particle_upload,
-            DepositTarget::buffer(&self.particle_buffer, particle_capacity),
+            DepositTarget::buffer_elements::<Particle>(&self.particle_buffer, NUM_PARTICLES as u64),
         )?;
-        particle_deposit.write(0, bytemuck::cast_slice(&particles))?;
+        (&particle_deposit << particles.as_slice())?;
         particle_upload.submit()?;
 
         if let Some(window) = &self.window {
@@ -375,18 +368,18 @@ impl RenderState {
         let params = ParticleParams {
             is_snow: if self.is_snow { 1.0 } else { 0.0 },
             frame: self.frame_count,
-            _pad1: 0.0,
-            _pad2: 0.0,
         };
 
-        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
+        (&self.params_deposit << &params)?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

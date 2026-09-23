@@ -487,6 +487,7 @@ pub(super) fn write(
 
 /// Write data to a subregion of a texture.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(super) fn write_region(
     instance: &ash::Instance,
     devices: &HashMap<DeviceHandle, types::SharedLogicalDevice>,

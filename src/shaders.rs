@@ -138,12 +138,20 @@ mod tests {
 
         let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
 
+        // Examples inject this via `from_slang_with_gpu_types`; the raw shader
+        // no longer embeds the struct definition.
+        #[goldy::gpu]
+        struct TimeUniforms {
+            time: f32,
+        }
+        let source = format!("{}\n{}", TimeUniforms::GPU_TYPE.to_slang_source().unwrap(), PLASMA);
+
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let shader_path = manifest_dir.join("shaders");
         let shader_path_str = shader_path.to_string_lossy();
 
         let result = compiler.compile_bindless_with_reflection_and_defines(
-            PLASMA,
+            &source,
             ShaderTarget::Spirv,
             &[],
             &[&shader_path_str],
@@ -157,7 +165,7 @@ mod tests {
         #[cfg(windows)]
         {
             let result = compiler.compile_bindless_with_reflection_and_defines(
-                PLASMA,
+                &source,
                 ShaderTarget::Dxil,
                 &[],
                 &[&shader_path_str],
@@ -171,7 +179,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             let result = compiler.compile_bindless_with_reflection_and_defines(
-                PLASMA,
+                &source,
                 ShaderTarget::Metal,
                 &[],
                 &[&shader_path_str],
@@ -273,7 +281,7 @@ mod tests {
         let shader_path_str = shader_path.as_str();
 
         let result = compiler.compile_bindless_with_reflection_and_defines(
-            test_shader,
+            &test_shader,
             ShaderTarget::Spirv,
             &[],
             &[shader_path_str],
@@ -306,7 +314,7 @@ mod tests {
         }
 
         let result = compiler.compile_bindless_with_reflection_and_defines(
-            test_shader,
+            &test_shader,
             ShaderTarget::Metal,
             &[],
             &[shader_path_str],
@@ -682,7 +690,23 @@ mod tests {
 
         let compiler = SlangCompiler::new().expect("Failed to create Slang compiler");
 
-        let test_shader = include_str!("../shaders/rain_snow_update.slang");
+        #[goldy::gpu]
+        struct Particle {
+            position: [f32; 2],
+            velocity: [f32; 2],
+            size: f32,
+        }
+        #[goldy::gpu]
+        struct ParticleParams {
+            is_snow: f32,
+            frame: f32,
+        }
+        let test_shader = format!(
+            "{}{}\n{}",
+            Particle::GPU_TYPE.to_slang_source().unwrap(),
+            ParticleParams::GPU_TYPE.to_slang_source().unwrap(),
+            include_str!("../shaders/rain_snow_update.slang")
+        );
         let shader_path = std::env::current_dir()
             .unwrap()
             .join("shaders")
@@ -692,7 +716,7 @@ mod tests {
 
         let entry = &[("cs_main", SlangStage::Compute)];
         let result = compiler.compile_bindless_with_reflection_and_defines(
-            test_shader,
+            &test_shader,
             ShaderTarget::Spirv,
             entry,
             &[shader_path_str],
@@ -709,7 +733,7 @@ mod tests {
         #[cfg(windows)]
         {
             let result = compiler.compile_bindless_with_reflection_and_defines(
-                test_shader,
+                &test_shader,
                 ShaderTarget::Dxil,
                 entry,
                 &[shader_path_str],

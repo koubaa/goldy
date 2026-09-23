@@ -15,7 +15,7 @@ libc = "0.2"
 libloading = "0.9"
 
 [build-dependencies]
-goldy-ffi = { path = "../ffi", default-features = false, features = ["vulkan", "dx12", "metal"] }
+goldy-ffi = { path = "../ffi", default-features = false, features = ["vulkan", "dx12", "metal", "tensor"] }
 
 [dev-dependencies]
 anyhow = "1.0"
@@ -25,8 +25,9 @@ winit = "0.30"
 raw-window-handle = "0.6"
 
 [features]
-default = ["vulkan", "dx12", "metal", "graphics"]
+default = ["vulkan", "dx12", "metal", "graphics", "tensor"]
 graphics = []
+tensor = []
 vulkan = []
 dx12 = []
 metal = []

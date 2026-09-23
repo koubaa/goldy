@@ -174,7 +174,7 @@ pub struct CrossSubmitSync {
 
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
-        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } => UsageKindFlags::COMPUTE,
+        NodeKind::Dispatch { .. } | NodeKind::TraceRays { .. } | NodeKind::MatMul(_) => UsageKindFlags::COMPUTE,
         NodeKind::RenderPass { .. } => UsageKindFlags::RENDER,
         NodeKind::ClearBuffer { .. }
         | NodeKind::WriteBuffer { .. }
@@ -185,7 +185,6 @@ fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
         | NodeKind::CopyTexture { .. }
         | NodeKind::CopyTextureRegion { .. }
         | NodeKind::CopyRenderTarget { .. } => UsageKindFlags::TRANSFER,
-        NodeKind::WithdrawRead { .. } => UsageKindFlags::empty(),
         NodeKind::BuildAccelerationStructure(_) => UsageKindFlags::TRANSFER,
         // The device-visible footprint of a CPU dispatch is its staging copies.
         NodeKind::CpuDispatch { .. } => UsageKindFlags::TRANSFER,
@@ -243,9 +242,6 @@ pub fn net_access_for_waves(ir: &GraphIR, waves: &[super::ir::Wave]) -> Resource
 }
 
 fn absorb_node_net_access(net: &mut ResourceKeyMap<NetAccess>, node: &super::ir::TaskNode) {
-    if matches!(node.kind, NodeKind::WithdrawRead { .. }) {
-        return;
-    }
     for binding in &node.bindings {
         let Some(key) = ResourceKey::from_resource_id(binding.resource) else {
             continue;
@@ -907,7 +903,8 @@ mod tests {
     fn single_binding_ir(resource: ResourceId, access: NodeAccess) -> GraphIR {
         GraphIR {
             nodes: vec![TaskNode {
-                label: "n",
+                group: None,
+                label: "n".into(),
                 bindings: vec![ResourceBinding { resource, access }],
                 kind: NodeKind::Dispatch {
                     pipeline: 1,
@@ -916,6 +913,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         }
     }
 
@@ -931,7 +929,8 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "write_tex",
+            group: None,
+            label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
                 access: NodeAccess::Write,
@@ -969,7 +968,8 @@ mod tests {
 
         let mut ir = GraphIR::default();
         ir.nodes.push(TaskNode {
-            label: "write_tex",
+            group: None,
+            label: "write_tex".into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Texture(4),
                 access: NodeAccess::Write,
@@ -1234,7 +1234,8 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 1);
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "draw",
+                group: None,
+                label: "draw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
                     access: NodeAccess::Read,
@@ -1245,6 +1246,7 @@ mod tests {
                     commands: vec![],
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         assert!(net[&key].read_pipeline_kinds.contains(UsageKindFlags::RENDER));
@@ -1293,7 +1295,8 @@ mod tests {
         let ledger = ledger_with_write(producer, key, 2);
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "read_tail",
+                group: None,
+                label: "read_tail".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::BufferRange {
                         parent,
@@ -1309,6 +1312,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, consumer);
@@ -1333,7 +1337,8 @@ mod tests {
         ledger.insert(key, LedgerEntry { sync: sync_state });
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "rw",
+                group: None,
+                label: "rw".into(),
                 bindings: vec![ResourceBinding {
                     resource: ResourceId::Buffer(10),
                     access: NodeAccess::ReadWrite,
@@ -1345,6 +1350,7 @@ mod tests {
                     dispatch: super::super::ir::DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
+            ..Default::default()
         };
         let net = net_access_per_resource(&ir);
         let sync = compute_cross_submit_sync(&net, &ledger, ctx);

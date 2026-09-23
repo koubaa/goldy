@@ -338,10 +338,10 @@ pub(super) struct Dx12GpuProfileResources {
     heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     query_count: u32,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
 }
 
-fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for c in commands {
         match c {
@@ -349,7 +349,7 @@ fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&
             | GpuCommand::DispatchIndirect { label, .. }
             | GpuCommand::DispatchBatch { label, .. }
             | GpuCommand::TraceRays { label, .. } => {
-                labels.push(*label);
+                labels.push(label.clone());
             }
             _ => {}
         }
@@ -358,7 +358,7 @@ fn dx12_collect_dispatch_labels(commands: &[GpuCommand]) -> (usize, Vec<Option<&
     (n, labels)
 }
 
-fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for gc in commands {
         if let GraphCommand::Compute(
@@ -368,7 +368,7 @@ fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<
             | GpuCommand::TraceRays { label, .. },
         ) = gc
         {
-            labels.push(*label);
+            labels.push(label.clone());
         }
     }
     let n = labels.len();
@@ -378,7 +378,7 @@ fn dx12_collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<
 fn dx12_try_create_gpu_profile(
     device: &ID3D12Device10,
     dispatch_count: usize,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
 ) -> Result<Option<Dx12GpuProfileResources>> {
     if !crate::gpu_profiler::gpu_profile_enabled() {
         return Ok(None);
@@ -473,7 +473,9 @@ pub(super) fn dx12_readback_gpu_profile(
         for i in 0..n {
             let si = 2 + 2 * i;
             let ns = dx12_decode_duration_ns(vals[si], vals[si + 1], freq);
-            let label = profile.dispatch_labels[i].unwrap_or("dispatch");
+            let label = profile.dispatch_labels[i]
+                .clone()
+                .unwrap_or_else(|| crate::SchemeLabel::from("dispatch"));
             dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
         }
         gpu_profiler::log_dispatch_timings("dx12", fence_value, &dispatches);
@@ -1809,6 +1811,36 @@ fn record_gpu_command(
             }
             unsafe { cl.CopyBufferRegion(&dst_resource, dst_off, &src_resource, src_off, *size) };
         }
+        GpuCommand::CopyToCpuReadableTwin { src, src_offset, size } => {
+            let _tz = tracy_zone!("dx12.copy_to_cpu_readable_twin");
+            let (src_resource, dst_resource, src_off) = {
+                let buffers_read = scope.buffers().read().unwrap();
+                let src_buf = buffers_read
+                    .entries
+                    .get(src)
+                    .context("CopyToCpuReadableTwin: invalid src")?;
+                if src_offset.saturating_add(*size) > src_buf.size {
+                    anyhow::bail!("CopyToCpuReadableTwin: size exceeds buffer bounds");
+                }
+                let dst = src_buf
+                    .coherent_readback
+                    .clone()
+                    .context("CopyToCpuReadableTwin: buffer has no CPU_READABLE twin")?;
+                (src_buf.resource.clone(), dst, *src_offset)
+            };
+            let mut b_to_copy = [barriers::buffer_barrier_full(
+                &src_resource,
+                D3D12_BARRIER_SYNC_ALL,
+                D3D12_BARRIER_SYNC_COPY,
+                D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                D3D12_BARRIER_ACCESS_COPY_SOURCE,
+            )];
+            unsafe {
+                barriers::barrier_buffers(cl7, &b_to_copy);
+                barriers::drop_buffer_barriers(&mut b_to_copy);
+            }
+            unsafe { cl.CopyBufferRegion(&dst_resource, src_off, &src_resource, src_off, *size) };
+        }
         GpuCommand::CopyTextureToReadback { src, dst, layout } => {
             let _tz = tracy_zone!("dx12.copy_texture_to_readback");
             super::texture::record_copy_texture_to_readback(
@@ -1946,6 +1978,9 @@ fn record_gpu_command(
                     super::rt_pipeline::dispatch_rays(&cl4, ps, *width, *height, *depth);
                 }
             }
+        }
+        GpuCommand::MatMul { .. } => {
+            anyhow::bail!("DX12 backend expected MatMul to be lowered to a stdlib dispatch");
         }
     }
     Ok(())

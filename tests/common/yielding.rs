@@ -4,6 +4,7 @@ use goldy::{
     Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, MemoryExchange, NodeAccess, Parcel,
     Petition, Promised, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, YieldPoint,
 };
+use std::ops::Shr;
 use std::sync::{Arc, Mutex};
 
 #[repr(C)]
@@ -40,11 +41,8 @@ pub fn make_device() -> Runtime {
 
 fn read_u32(ctx: &Context, parcel: &Parcel) -> Vec<u32> {
     let mut scheme = Scheme::new(ctx);
-    let w = MemoryExchange::new(ctx)
-        .bind_withdraw(&mut scheme, parcel)
-        .expect("withdraw");
     let mut sub = scheme.submit().expect("submit");
-    let bytes = w.claim(&mut sub).expect("claim").consume().expect("consume");
+    let bytes = (&mut sub >> parcel).take::<u8>().expect("host take");
     bytemuck::cast_slice(&bytes).to_vec()
 }
 
@@ -708,11 +706,8 @@ void cs_main(Scattered<uint> d, uint count, ThreadId t) { if (t.x < count) d[t.x
         .with_parcel(&data, NodeAccess::ReadWrite)
         .with_param(n)
         .dispatch(n.div_ceil(64), 1, 1);
-    let w = MemoryExchange::new(&ctx)
-        .bind_withdraw(&mut scheme, &data)
-        .expect("withdraw");
     let mut sub = scheme.submit().expect("submit");
-    let bytes = w.claim(&mut sub).expect("claim").consume().expect("consume");
+    let bytes = (&mut sub >> &data).take::<u8>().expect("host take");
     let out: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
     for i in 0..n {
         let v = i + 1;

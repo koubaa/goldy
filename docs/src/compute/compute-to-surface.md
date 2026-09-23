@@ -51,10 +51,10 @@ Each frame, submit the scheme and consume the surface claim:
 
 ```rust
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
-`submit` resolves transient resources, compiles the scheme into a command stream, and submits to the GPU. Presentation happens when you call `claim(...).consume()` — the compute shader has already written the pixels.
+`submit` resolves transient resources, compiles the scheme into a command stream, and submits to the GPU. Presentation happens when you call `(&mut submission >> &present).take()?` — the compute shader has already written the pixels. The explicit `&mut` borrow is required by operator semantics and leaves other claims on the submission untouched.
 
 ## The compute shader
 
@@ -140,14 +140,11 @@ let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
     &mut upload,
     goldy::DepositTarget::buffer_elements::<Uniforms>(&uniform_buffer, 1),
 )?;
-uniform_deposit.write_data(
-    0,
-    &[Uniforms { width, height, time: elapsed }],
-)?;
+(&uniform_deposit << &Uniforms { width, height, time: elapsed })?;
 upload.submit()?;
 
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 See [`examples/compute_to_surface.rs`](../examples/compute_to_surface.md) for the complete winit application.

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Deposit `<<`** — `(&deposit << &data)?` tenders a per-submission memory-exchange occurrence (`Shl` on `&DepositTransaction`, offset 0). `write` / `write_data` remain for offsets and partial fills. Mirrored in Python (`deposit << bytes`), C++ (`deposit << vector`), C# (`deposit << byte[]`), and ffi-client (`&deposit << &[u8]`).
+
+- **Host claims** — `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`) realizes a public CPU read of a parcel after the submission gate. Host-coherent media map in place; others copy through a context staging pool. `BufferFlags::CPU_READABLE` is a placement hint that backends may honor with a mapped pointer (`RuntimeCapabilities::has_zero_copy_storage_readback`).
+
+- **Dense tensor layer** (`tensor` feature, default-on, independent of `graphics`) —
+  shapes, dtypes (`F32`/`U32`/`I32`), checked views, broadcasting, and a `TensorRecorder`
+  that records general tensor algebra into the existing Scheme. Semantic MatMul stays the
+  native GEMM/GEMV path; remaining ops are portable `#[goldy::compute]` kernels. This is
+  tensor algebra over Goldy, not an ML framework. C / C++ / Python / ffi-client expose
+  acquire, add, matmul, and fill; NumPy conversion copies through memory exchanges.
+
+- **Semantic MatMul** — `scheme.matmul(label, MatMulDesc)` records a backend-neutral
+  GEMM/GEMV node. CUDA realizes it with cuBLAS (`cublasSgemv` / `cublasSgemm`) by
+  default; Metal uses MPS; every other backend (and `GOLDY_MATMUL=fallback`) runs
+  Goldy's portable stdlib kernel. Realization happens on first submit and is retained.
+
+### Removed
+
+- **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
+
+- Deprecated `Instance::create_runtime` / `create_runtime_for_adapter`,
+  `Runtime::flush_texture_uploads`, `Scheme::lease_*` / `lease_handle` /
+  `lease_buffer_handle`, `Texture::write` / `write_region`, and the
+  `goldy_scheme_lease_render_target` C/C++/Python/.NET forwarders. Mint leases
+  from `Context`, construct runtimes with `request_adapter` → `request_runtime`,
+  and upload textures with `MemoryExchange::bind_deposit` or
+  `Runtime::acquire_texture(..., init)`.
+
+### Changed
+
+- **Breaking:** `TensorContext` is now `TensorKernels` (C `GoldyTensorKernels` /
+  `goldy_tensor_kernels_*`, C++ / Python / ffi-client same name). It is prepared portable
+  tensor pipelines for a runtime, not a Goldy `Context`.
+
+- **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
+
 ## [0.3.0] - 2026-09-19
 
 ### Changed
@@ -31,10 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Context::lease_texture` / `lease_buffer` / `lease_render_target`. Schemes
   intern a clone on first use (`with_parcel`, `render_pass`, `copy_to_present`,
   …) so the backing outlives IR handles. Pool return happens when the last clone
-  is dropped, epoch-gated by `parcel.last_referenced()`. `Scheme::lease_*`
-  remains as deprecated forwarders. A lease may be bound by more than one scheme
-  on the same context. FFI adds `goldy_context_lease_render_target` and keeps
-  `goldy_scheme_lease_render_target` as a forwarder.
+  is dropped, epoch-gated by `parcel.last_referenced()`. A lease may be bound by
+  more than one scheme on the same context. FFI adds
+  `goldy_context_lease_render_target`.
 
 ### Added
 

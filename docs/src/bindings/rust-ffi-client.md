@@ -13,7 +13,7 @@ This is the same native boundary used by the [C++](./cpp.md) and [.NET](./dotnet
 | Validating the C ABI from Rust | `goldy-ffi-client` |
 | Swapping the native library without recompiling the client | `goldy-ffi-client` |
 
-The ffi-client API mirrors the core Rust crate: `Instance`, `Runtime`, `Scheme`, `MemoryExchange`, `SurfaceExchange`, and the rest of the Fondaco programming model are available with the same names and patterns.
+The ffi-client API mirrors the core Rust crate: `Instance`, `Runtime`, `Scheme`, `MemoryExchange`, `SurfaceExchange`, `Tensor` / `TensorKernels` (behind the `tensor` feature), and the rest of the Fondaco programming model are available with the same names and patterns.
 
 ## Installation
 
@@ -111,9 +111,8 @@ fn main() -> goldy_ffi_client::Result<()> {
     scheme.copy_to_texture(&rt, &readback)?;
 
     let memory = goldy_ffi_client::MemoryExchange::new(&ctx)?;
-    let withdraw = memory.bind_withdraw_texture(&mut scheme, &readback)?;
     let mut submission = scheme.submit()?;
-    let pixels = withdraw.claim(&mut submission)?.consume()?;
+    let pixels = submission.take_texture(&readback)?;
 
     println!("Rendered {} bytes", pixels.len());
     Ok(())
@@ -137,9 +136,11 @@ node.with_buffer(&buf, NodeAccess::ReadWrite);
 node.dispatch(1, 1, 1);
 
 let memory = MemoryExchange::new(&ctx)?;
-let withdraw = memory.bind_withdraw(&mut scheme, &buf.field(0)?)?;
+let parcel = buf.field(0)?;
+let deposit = memory.bind_deposit(&mut scheme, goldy_ffi_client::DepositTarget::buffer(&parcel, 16))?;
+(&deposit << &[1u8, 2, 3, 4])?;
 let mut submission = scheme.submit()?;
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+let bytes = submission.take(&parcel)?;
 ```
 
 See `ffi-client/examples/compute_simple.rs`.

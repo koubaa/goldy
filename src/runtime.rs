@@ -181,6 +181,7 @@ impl Instance {
         Ok(adapter.clone())
     }
 
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
     fn adapter_for_id(&self, adapter_id: u32) -> Result<Adapter> {
         let info = self
             .backend
@@ -191,60 +192,6 @@ impl Instance {
             .find(|a| a.id == adapter_id)
             .with_context(|| format!("Invalid adapter ID: {adapter_id}"))?;
         Ok(self.adapter_from_info(info))
-    }
-
-    /// Create a device on the first adapter matching the given type.
-    ///
-    /// On Windows with the DX12 backend, set `GOLDY_DX12_FORCE_WARP=1` to create the device on
-    /// the WARP software adapter instead, even if a real GPU is present (WARP is still listed via
-    /// `GOLDY_DX12_ALLOW_WARP=1` or by setting `GOLDY_DX12_FORCE_WARP=1` alone, which also
-    /// registers the WARP adapter). Ignored for non-DX12 backends.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use Instance::request_adapter(...).request_runtime(...) instead"
-    )]
-    pub fn create_runtime(&self, preferred_type: DeviceType) -> Result<Runtime> {
-        #[cfg(all(feature = "dx12", target_os = "windows"))]
-        {
-            if self.backend_type() == BackendType::Dx12 && crate::backend::dx12::env_force_warp() {
-                tracing::info!("GOLDY_DX12_FORCE_WARP=1 — using WARP adapter");
-                return self
-                    .adapter_for_id(crate::backend::dx12::WARP_ADAPTER_ID)?
-                    .request_runtime(&RuntimeDescriptor::default());
-            }
-        }
-
-        tracing::info!(?preferred_type, "Requesting GPU device");
-        let adapters = self.enumerate_adapters();
-
-        let adapter = adapters
-            .iter()
-            .find(|a| a.inner.info.device_type == preferred_type)
-            .or_else(|| adapters.first())
-            .context("No GPU adapters available")?;
-
-        tracing::info!(
-            adapter_id = adapter.inner.info.id,
-            adapter_name = %adapter.inner.info.name,
-            adapter_type = ?adapter.inner.info.device_type,
-            "Selected GPU adapter"
-        );
-
-        adapter.request_runtime(&RuntimeDescriptor::default())
-    }
-
-    /// Create a device on a specific adapter by ID.
-    ///
-    /// The device is automatically configured with the built-in `goldy_exp`
-    /// (experimental) shader library registered. You can register additional
-    /// libraries using [`Runtime::register_library`].
-    #[deprecated(
-        since = "0.2.0",
-        note = "use Adapter::request_runtime(...) after enumerate_adapters or request_adapter"
-    )]
-    pub fn create_runtime_for_adapter(&self, adapter_id: u32) -> Result<Runtime> {
-        self.adapter_for_id(adapter_id)?
-            .request_runtime(&RuntimeDescriptor::default())
     }
 
     /// Get the backend type (Vulkan, Metal, DX12).
@@ -361,6 +308,7 @@ impl Adapter {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
+                stdlib_matmul: Mutex::new(None),
             }),
         })
     }
@@ -549,6 +497,8 @@ pub(crate) struct DeviceInner {
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
+    /// Lazily compiled stdlib MatMul kernel (fallback path).
+    pub(crate) stdlib_matmul: Mutex<Option<Arc<crate::compute::ComputePipeline>>>,
 }
 
 impl Clone for Runtime {
@@ -701,6 +651,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
+                stdlib_matmul: Mutex::new(None),
             }),
         }
     }
@@ -855,6 +806,11 @@ impl Runtime {
         self.inner.adapter.id()
     }
 
+    /// Identity of this handle's device substrate. Clones of the same [`Runtime`] share it.
+    pub fn substrate_ptr(&self) -> *const () {
+        Arc::as_ptr(&self.inner).cast()
+    }
+
     /// Get the device type (discrete GPU, integrated GPU, CPU/software, etc.).
     pub fn device_type(&self) -> DeviceType {
         self.inner.adapter.device_type()
@@ -863,6 +819,19 @@ impl Runtime {
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
     pub fn backend_type(&self) -> BackendType {
         self.inner.backend.lock().unwrap().backend_type()
+    }
+
+    pub(crate) fn stdlib_matmul_f32(&self) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
+        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap().clone() {
+            return Ok(pipeline);
+        }
+        let pipeline = crate::ops::matmul::prepare_stdlib(self).map_err(GoldyError::Backend)?;
+        let mut slot = self.inner.stdlib_matmul.lock().unwrap();
+        if let Some(existing) = slot.as_ref() {
+            return Ok(Arc::clone(existing));
+        }
+        *slot = Some(Arc::clone(&pipeline));
+        Ok(pipeline)
     }
 
     /// Check if the device is still valid.
@@ -1155,15 +1124,6 @@ impl Runtime {
         self.inner.backend.lock().unwrap().release_idle_shader_compiler();
     }
 
-    /// No-op: texture uploads are scheduled via [`crate::Scheme`].
-    #[deprecated(
-        since = "0.1.0",
-        note = "Texture uploads are batched via MemoryExchange::bind_deposit; there is nothing to flush."
-    )]
-    pub fn flush_texture_uploads(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Query the platform row-pitch and staging buffer layout for an UPLOAD from a 2-D texture region.
     ///
     /// On DX12 rows are padded to 256-byte alignment; on Vulkan and Metal rows are tight
@@ -1252,6 +1212,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
+                stdlib_matmul: Mutex::new(None),
             }),
         })
     }

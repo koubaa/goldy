@@ -24,6 +24,7 @@ pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub(crate) mod handles;
 pub mod kernel;
+pub mod ops;
 #[cfg(feature = "graphics")]
 pub mod pipeline;
 #[cfg(feature = "graphics")]
@@ -36,6 +37,8 @@ pub mod shaders;
 #[cfg(feature = "graphics")]
 pub(crate) mod surface;
 pub mod task_graph;
+#[cfg(feature = "tensor")]
+pub mod tensor;
 pub mod texture;
 pub mod types;
 
@@ -43,6 +46,8 @@ pub mod cpu_dispatch;
 pub mod cpu_shaders;
 pub(crate) mod deposit_pool;
 pub(crate) mod host_access;
+pub(crate) mod host_claim;
+pub(crate) mod host_read_pool;
 pub mod shader_cache;
 pub(crate) mod shader_timing;
 pub mod slang;
@@ -57,6 +62,7 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub(crate) mod allocation_policy;
+#[cfg(test)]
 mod buffer_alloc_tests;
 pub mod exchange;
 #[cfg(test)]
@@ -66,6 +72,7 @@ pub mod petition;
 pub(crate) mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
+pub mod scheme_label;
 pub mod signal;
 pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
@@ -76,18 +83,19 @@ pub(crate) mod vram_allocator;
 pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
-pub use exchange::{Claim, SurfaceExchange};
-pub use exchange::{
-    DepositTarget, DepositTransaction, MemoryExchange, WithdrawBytes, WithdrawClaim, WithdrawTransaction,
-};
+pub use exchange::{Claim, PendingClaim, SurfaceExchange};
+pub use exchange::{DepositTarget, DepositTransaction, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
+pub use host_claim::{HostView, PendingHostRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
-    Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder, SchemeNodeBuilder, Submission,
+    GroupBuilder, GroupId, Lease, LeaseBuffer, LeaseTexture, NodeId, ReplayStats, Scheme, SchemeCpuNodeBuilder,
+    SchemeNodeBuilder, Submission,
 };
 #[cfg(feature = "graphics")]
 pub use scheme::{LeaseRenderTarget, SchemeRenderPassBuilder, ShaderBinding, Transaction};
+pub use scheme_label::SchemeLabel;
 pub use shader_timing::{dump_totals, reset_totals};
 #[cfg(feature = "graphics")]
 pub use swapchain_pool::{AcquiredPresent, PresentLease};
@@ -119,9 +127,12 @@ pub mod __private {
 }
 pub use kernel::gpu;
 pub use kernel::{
-    prepare_kernel, AccessKind, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef, KernelParam,
-    KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, KERNEL_ABI_VERSION,
+    prepare_kernel, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef,
+    KernelParam, KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, TensorDimSpec,
+    TensorShapeEnv, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES,
+    TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
+pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
 #[cfg(feature = "graphics")]
 pub use pipeline::{
     MeshPipeline, MeshPipelineBuilder, MeshPipelineDesc, RenderPipeline, RenderPipelineBuilder, RenderPipelineDesc,
@@ -137,6 +148,11 @@ pub use slang::{
     StageIoField, StructFieldLayout, StructLayout,
 };
 pub use task_graph::NodeAccess;
+#[cfg(feature = "tensor")]
+pub use tensor::{
+    GoldyTensorLayout, ScatterMode, Tensor, TensorDType, TensorKernels, TensorLayout, TensorRecorder, TensorScalar,
+    TensorShape, TensorView, MAX_TENSOR_RANK,
+};
 pub use texture::TextureCopyFootprint;
 
 pub use handles::{SamplerHandle, TextureHandle};
@@ -192,6 +208,16 @@ pub mod test_support {
 
     pub fn mock_runtime() -> Arc<Runtime> {
         Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
+    }
+
+    /// Realize a host claim as `u32` elements (test helper replacing withdraw consume).
+    pub fn take_u32(submission: &mut crate::Submission, parcel: &crate::Parcel) -> Vec<u32> {
+        (submission >> parcel).take::<u32>().expect("host take u32").to_vec()
+    }
+
+    /// Realize a host claim as raw bytes (test helper replacing withdraw consume).
+    pub fn take_bytes(submission: &mut crate::Submission, parcel: &crate::Parcel) -> Vec<u8> {
+        (submission >> parcel).take::<u8>().expect("host take bytes").into_vec()
     }
 
     #[allow(private_bounds)]

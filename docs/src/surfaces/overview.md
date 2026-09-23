@@ -35,7 +35,7 @@ Depth testing uses an offscreen scheme-leased render target, not the swapchain d
 | `bind(scheme, texture)` | Texture → surface copy |
 | `bind_destination(scheme)` | Compute or other direct writes via `with_present(&lease)` |
 
-Each bind returns a reusable [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). After `scheme.submit()`, extract the per-frame claim with `transaction.claim(&mut submission)?` and settle with `claim.consume()`.
+Each bind returns a reusable [`Transaction`](https://docs.rs/goldy/latest/goldy/struct.Transaction.html). After `scheme.submit()`, present with `(&mut submission >> &transaction).take()?`. The explicit `&mut` borrow is required by operator semantics and leaves other claims on the submission untouched. `transaction.claim(&mut submission)?` followed by `claim.consume()` remains for explicit multi-step settlement.
 
 ## SurfaceConfig
 
@@ -82,7 +82,7 @@ let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 For pure compute-to-surface, use `bind_destination` and bind the returned lease in a compute node with `with_present(&lease)` instead of a render pass + copy.
@@ -124,11 +124,11 @@ surface.resize(width, height)?;
 ## Transaction Lifetime
 
 - Record a bind (`bind_render_target`, `bind`, or `bind_destination`) once when building the scheme.
-- Each frame: `scheme.submit()` then `transaction.claim(&mut submission)?.consume()?`.
+- Each frame: `scheme.submit()` then `(&mut submission >> &transaction).take()?`.
 - Each submission may be claimed at most once per transaction.
 
 ```rust
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 // claim consumed — do not reuse this submission's claim slot
 ```

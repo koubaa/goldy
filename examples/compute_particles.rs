@@ -9,8 +9,9 @@ use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
+    Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -24,20 +25,16 @@ use common::CaptureDump;
 
 const NUM_PARTICLES: u32 = 1024;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Particle {
     position: [f32; 2],
     velocity: [f32; 2],
 }
-impl goldy::StructuredBufferElement for Particle {}
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct SimParams {
     delta_time: f32,
 }
-impl goldy::StructuredBufferElement for SimParams {}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -77,7 +74,6 @@ struct RenderState {
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -115,15 +111,15 @@ impl RenderState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -183,14 +179,13 @@ impl RenderState {
                 &self.params_buffer,
                 &self.scene_rt,
             );
-            if let Ok((present, withdraw)) = Self::bind_frame(
+            if let Ok(present) = Self::bind_frame(
                 &mut scheme,
                 &self.scene_rt,
                 self.surface.as_ref(),
                 self.readback.as_ref(),
             ) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -224,8 +219,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/particle_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/particle_update.slang"),
+            &[Particle::GPU_TYPE, SimParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/particle_render.slang"),
+            &[Particle::GPU_TYPE],
+        )?;
 
         let mut particles = Vec::with_capacity(NUM_PARTICLES as usize);
         for i in 0..NUM_PARTICLES {
@@ -261,12 +264,12 @@ impl RenderState {
             &params_buffer,
             &scene_rt,
         );
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<SimParams>() as u64),
+            DepositTarget::buffer_elements::<SimParams>(&params_buffer, 1),
         )?;
 
         println!("Created compute particles example with {NUM_PARTICLES} particles (Scheme + Present)");
@@ -279,7 +282,6 @@ impl RenderState {
             capture,
             readback,
             present,
-            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -306,15 +308,16 @@ impl RenderState {
         .min(0.05);
         self.last_frame_time = std::time::Instant::now();
 
-        self.params_deposit
-            .write(0, bytemuck::bytes_of(&SimParams { delta_time: dt }))?;
+        (&self.params_deposit << &SimParams { delta_time: dt })?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

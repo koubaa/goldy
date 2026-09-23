@@ -5,14 +5,14 @@
 //!
 //! Run with: `cargo run --example gradient`
 //!
-//! Optional layout validation: `GOLDY_VALIDATE_LAYOUTS=1 cargo run --example gradient`
 
 use goldy::{
-    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, LayoutCheckable,
-    Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
+    shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease,
+    LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexBufferLayout, WithdrawTransaction,
+    Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -25,13 +25,10 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-/// Uniform buffer data — fields must match `struct TimeUniforms` in `shaders/gradient.slang`.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, LayoutCheckable)]
+#[goldy::gpu]
 struct TimeUniforms {
     time: f32,
 }
-impl goldy::StructuredBufferElement for TimeUniforms {}
 
 struct App {
     instance: Instance,
@@ -45,7 +42,6 @@ struct App {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     upload_scheme: Option<Scheme>,
@@ -68,7 +64,6 @@ impl App {
             present: None,
             capture: None,
             readback: None,
-            withdraw: None,
             scene_rt: None,
             scheme: None,
             upload_scheme: None,
@@ -112,15 +107,15 @@ impl App {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -151,14 +146,7 @@ impl App {
             )
         };
 
-        let shader = ShaderModule::from_slang_with_options(
-            &device,
-            shaders::GRADIENT,
-            &[],
-            &[],
-            Default::default(),
-            &[TimeUniforms::LAYOUT_CHECK],
-        )?;
+        let shader = ShaderModule::from_slang_with_gpu_types(&device, shaders::GRADIENT, &[TimeUniforms::GPU_TYPE])?;
 
         let pipeline = Self::create_pipeline(&device, &shader, format)?;
 
@@ -167,12 +155,12 @@ impl App {
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &uniform, &scene_rt);
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
         let uniform_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&uniform, std::mem::size_of::<TimeUniforms>() as u64),
+            DepositTarget::buffer_elements::<TimeUniforms>(&uniform, 1),
         )?;
 
         self.ctx = Some(ctx);
@@ -184,7 +172,6 @@ impl App {
         self.present = present;
         self.capture = capture;
         self.readback = readback;
-        self.withdraw = withdraw;
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         self.upload_scheme = Some(upload_scheme);
@@ -211,17 +198,16 @@ impl App {
             .unwrap_or_else(|| self.start_time.elapsed().as_secs_f32());
         let uniforms = TimeUniforms { time };
         let upload = self.upload_scheme.as_mut().unwrap();
-        self.uniform_deposit
-            .as_ref()
-            .unwrap()
-            .write(0, bytemuck::bytes_of(&uniforms))?;
+        (self.uniform_deposit.as_ref().unwrap() << &uniforms)?;
         upload.submit()?;
 
         let mut submission = scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())
@@ -253,11 +239,10 @@ impl App {
                     let mut scheme = Scheme::new(ctx);
                     if let Ok(rt) = ctx.lease_render_target(width.max(1), height.max(1), format, None) {
                         Self::record_pass(&mut scheme, pipeline, uniform, &rt);
-                        if let Ok((present, withdraw)) =
+                        if let Ok(present) =
                             Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
                         {
                             self.present = present;
-                            self.withdraw = withdraw;
                             self.scheme = Some(scheme);
                             self.scene_rt = Some(rt);
                         }

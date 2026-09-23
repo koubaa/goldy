@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 #[path = "common/submission.rs"]
 mod submission;
 

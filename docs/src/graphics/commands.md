@@ -87,10 +87,9 @@ For fullscreen or procedurally-generated geometry (no vertex buffer at all), ski
 
 ## Offscreen-Only (Tests, Readback)
 
-Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then withdraws pixels through [`MemoryExchange`](../resources/runtime-owned-memory.md):
+Headless rendering — no window, no `SurfaceExchange` — records the same render pass node, then host-claims pixels from a copy destination:
 
 ```rust
-let memory = MemoryExchange::new(&ctx);
 let mut scheme = Scheme::new(&ctx);
 let rt = ctx.lease_render_target(800, 600, TextureFormat::Rgba8Unorm, None)?;
 
@@ -98,9 +97,8 @@ let mut pass = scheme.render_pass("clear", &rt, TargetLoad::Clear(Color::RED));
 pass.finish();
 
 scheme.copy_to_texture(&rt, &readback_texture);
-let withdraw = memory.bind_withdraw(&mut scheme, &readback_texture)?;
 let mut submission = scheme.submit()?;
-let pixels = withdraw.claim(&mut submission)?.consume()?;
+let pixels = (&mut submission >> &readback_texture).take::<u8>()?.to_vec();
 ```
 
 ## Windowed Rendering
@@ -121,7 +119,7 @@ let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 
 // Each frame:
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 The graph is recorded once; every frame just resubmits it and settles the present claim. See [`examples/triangle.rs`](../examples/triangle.md) for the full loop, including resize handling (rebuild the scheme and transaction when the surface size changes).
@@ -133,7 +131,7 @@ Because render pass nodes and compute nodes live in the same graph, a hybrid fra
 ```rust
 let memory = MemoryExchange::new(&ctx);
 let deposit = memory.bind_deposit(&mut scheme, goldy::DepositTarget::buffer(&staging, data.len() as u64))?;
-deposit.write(0, &data)?;
+(&deposit << data.as_slice())?;
 
 scheme.node("sim", &compute_pipeline)
     .with_parcel(&state_buf, NodeAccess::ReadWrite)
@@ -148,7 +146,7 @@ pass.finish();
 
 let present = surface.bind_render_target(&mut scheme, &scene_rt)?;
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 Goldy derives the ordering between the compute node and the render pass node from their declared parcel accesses — the simulation's write to `state_buf` is ordered before the pass's read, with no barrier authored by hand.

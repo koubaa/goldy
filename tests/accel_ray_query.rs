@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 #[path = "common/submission.rs"]
 mod submission;
 
@@ -105,11 +103,8 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, hits.whole())
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(value, 1, "expected a closest-hit on the unit triangle");
     }
@@ -174,11 +169,8 @@ void cs_main(Accel scene, Scattered<uint> hits, ThreadId id)
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, hits.whole())
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(value, 1, "expected a closest-hit on the indexed mesh");
     }
@@ -297,11 +289,8 @@ void cs_main(Accel scene, BufRO<float> verts, BufRO<uint> indices, Scattered<uin
             .with_parcel(&out, NodeAccess::Write)
             .dispatch(2, 1, 1);
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, out.whole())
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> out.whole()).take::<u8>().expect("host take");
         let vals: [u32; 4] = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(vals[0], 0, "ray 0 should hit triangle 0, got prim={}", vals[0]);
         assert_eq!(vals[1], 1, "ray 0 interpolated pos must match hit");

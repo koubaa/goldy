@@ -39,7 +39,7 @@ Each frame submits the retained scheme and consumes the surface claim:
 
 ```rust
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 ## Walkthrough
@@ -99,7 +99,7 @@ let present = record_scheme(&mut scheme, &surface, &pipeline, &vertex_buffer, &s
 
 // Each frame:
 let mut submission = scheme.submit()?;
-present.claim(&mut submission)?.consume()?;
+(&mut submission >> &present).take()?;
 ```
 
 `SurfaceExchange` manages the OS swapchain. Scene color is rendered to a scheme-leased offscreen target, copied to the drawable, and displayed when the claim is consumed. Rendering stays on the GPU — no CPU readback.

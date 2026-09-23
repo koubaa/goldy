@@ -1,6 +1,6 @@
 # Motivation
 
-Goldy implements the **Fondaco Machine** on modern GPUs: programs describe parcels and schemes; the runtime manages the physical medium, derives precedences from ownership, and mediates present/readback through exchanges. For the normative machine spec see the [Machine Specification](../fondaco/specification.md); for what Goldy ships today see the [runtime mapping](../fondaco/goldy-runtime.md).
+Goldy implements the **Fondaco Machine** on modern GPUs: programs describe parcels and schemes; the runtime manages the physical medium, derives precedences from ownership, mediates present through exchanges, and realizes host reads as public claims. For the normative machine spec see the [Machine Specification](../fondaco/specification.md); for what Goldy ships today see the [runtime mapping](../fondaco/goldy-runtime.md).
 
 ## The Problem with "Modern" Graphics APIs
 

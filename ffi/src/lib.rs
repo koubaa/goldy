@@ -6,6 +6,7 @@
 mod compute;
 mod context;
 mod error;
+mod host_claim;
 mod instance;
 mod memory_exchange;
 mod pipeline;
@@ -15,11 +16,14 @@ mod sampler;
 mod scheme;
 mod shader;
 mod surface_exchange;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod types;
 
 pub use compute::*;
 pub use context::*;
 pub use error::*;
+pub use host_claim::*;
 pub use instance::*;
 pub use memory_exchange::*;
 pub use pipeline::*;
@@ -29,4 +33,6 @@ pub use sampler::*;
 pub use scheme::*;
 pub use shader::*;
 pub use surface_exchange::*;
+#[cfg(feature = "tensor")]
+pub use tensor::*;
 pub use types::*;

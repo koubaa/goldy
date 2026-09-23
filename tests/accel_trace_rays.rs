@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 #[path = "common/submission.rs"]
 mod submission;
 
@@ -125,11 +123,8 @@ void rchit_main(inout HitPayload p) { p.hit = 1; }
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, hits.whole())
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(value, 1, "expected a closest-hit on the unit triangle");
     }
@@ -234,13 +229,10 @@ void rchit_main(inout HitPayload p) {
             .with_parcel(&hits, NodeAccess::Write)
             .dispatch(1, 1, 1);
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, hits.whole())
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
         drop(blas);
         drop(tlas);
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> hits.whole()).take::<u8>().expect("host take");
         let value: u32 = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(value, 1, "expected a closest-hit with a 20-byte payload");
     }

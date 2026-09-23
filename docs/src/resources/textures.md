@@ -68,31 +68,32 @@ bitflags! {
 
 | Flag | Purpose |
 |------|---------|
-| `COPY_SRC` | Texture can be a copy source (needed for withdraw / GPU copies) |
+| `COPY_SRC` | Texture can be a copy source (needed for host claims / GPU copies) |
 | `COPY_DST` | Texture can be a copy destination (needed for deposits / copies) |
 | `RENDER_TARGET` | Texture can be used as a color attachment |
 
 ## Writing Data
 
-Prefer `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads. The synchronous methods below are deprecated and stall the GPU:
-
-```rust
-#[allow(deprecated)]
-texture.write(&pixels)?;
-
-#[allow(deprecated)]
-texture.write_region(x, y, width, height, &region_pixels)?;
-```
-
-## Reading Data
-
-Use a memory exchange withdraw bound into a scheme. The texture must have been created with `TextureFlags::COPY_SRC` and a storage-writable kind:
+Use `MemoryExchange::bind_deposit` with `DepositTarget::texture` for batched, non-blocking uploads:
 
 ```rust
 let memory = MemoryExchange::new(&ctx);
-let withdraw = memory.bind_withdraw(&mut scheme, &texture)?;
+let deposit = memory.bind_deposit(
+    &mut scheme,
+    DepositTarget::texture(&texture, 0, 0, width, height, pixels.len() as u64, 0),
+)?;
+(&deposit << pixels.as_slice())?;
+```
+
+For a one-shot fill at acquire time, pass `init` to [`Runtime::acquire_texture`].
+
+## Reading Data
+
+Use a host claim after submit. The texture must have been created with `TextureFlags::COPY_SRC`:
+
+```rust
 let mut submission = scheme.submit()?;
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+let bytes = (&mut submission >> &texture).take::<u8>()?.to_vec();
 ```
 
 ## Texture Queries

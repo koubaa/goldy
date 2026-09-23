@@ -9,11 +9,11 @@
 
 use anyhow::Result;
 use goldy::{
-    field, Buffer, ComputePipeline, Context, Init, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme,
-    ShaderModule, Submission, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction,
-    VertexBufferLayout, WithdrawTransaction,
+    field, Buffer, ComputePipeline, Context, Init, Instance, Lease, LeaseRenderTarget, NodeAccess, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, Submission,
+    SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -62,22 +62,21 @@ struct FrameBind<'a> {
 struct Recorded {
     scheme: Scheme,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
 }
 
 fn bind_frame(
     scheme: &mut Scheme,
     scene_rt: &Lease<LeaseRenderTarget>,
     bind: &FrameBind<'_>,
-) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+) -> anyhow::Result<Option<Transaction>> {
     if let Some(surface) = bind.surface {
         let present = surface.bind_render_target(scheme, scene_rt)?;
-        Ok((Some(present), None))
+        Ok(Some(present))
     } else {
         let readback = bind.readback.expect("capture readback");
         scheme.copy_to_texture(scene_rt, readback)?;
-        let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-        Ok((None, Some(withdraw)))
+
+        Ok(None)
     }
 }
 
@@ -101,12 +100,8 @@ fn build_scheme(
         render_pipeline,
         &scene_rt,
     );
-    let (present, withdraw) = bind_frame(&mut scheme, &scene_rt, bind)?;
-    Ok(Recorded {
-        scheme,
-        present,
-        withdraw,
-    })
+    let present = bind_frame(&mut scheme, &scene_rt, bind)?;
+    Ok(Recorded { scheme, present })
 }
 
 fn build_schemes(
@@ -227,8 +222,6 @@ struct RenderState {
     scheme_ba: Scheme,
     present_ab: Option<Transaction>,
     present_ba: Option<Transaction>,
-    withdraw_ab: Option<WithdrawTransaction>,
-    withdraw_ba: Option<WithdrawTransaction>,
     compute_pipeline: ComputePipeline,
     render_pipeline: RenderPipeline,
     cells: Buffer,
@@ -272,10 +265,8 @@ impl RenderState {
         )?;
         self.scheme_ab = ab.scheme;
         self.present_ab = ab.present;
-        self.withdraw_ab = ab.withdraw;
         self.scheme_ba = ba.scheme;
         self.present_ba = ba.present;
-        self.withdraw_ba = ba.withdraw;
         Ok(())
     }
 
@@ -352,8 +343,6 @@ impl RenderState {
             scheme_ba: ba.scheme,
             present_ab: ab.present,
             present_ba: ba.present,
-            withdraw_ab: ab.withdraw,
-            withdraw_ba: ba.withdraw,
             compute_pipeline,
             render_pipeline,
             cells,
@@ -366,14 +355,16 @@ impl RenderState {
 
     fn settle(
         present: Option<&Transaction>,
-        withdraw: Option<&WithdrawTransaction>,
+        readback: Option<&Texture>,
         capture: Option<&mut CaptureDump>,
         submission: &mut Submission,
     ) -> Result<()> {
         if let Some(present) = present {
-            present.claim(submission)?.consume()?;
+            (submission >> present).take()?;
         } else {
-            let pixels = withdraw.expect("capture withdraw").claim(submission)?.consume()?;
+            let pixels = (submission >> readback.expect("capture readback"))
+                .take::<u8>()?
+                .to_vec();
             capture.expect("capture dump").write_rgba(&pixels)?;
         }
         Ok(())
@@ -384,7 +375,7 @@ impl RenderState {
             let mut submission = self.scheme_ab.submit()?;
             Self::settle(
                 self.present_ab.as_ref(),
-                self.withdraw_ab.as_ref(),
+                self.readback.as_ref(),
                 self.capture.as_mut(),
                 &mut submission,
             )?;
@@ -392,7 +383,7 @@ impl RenderState {
             let mut submission = self.scheme_ba.submit()?;
             Self::settle(
                 self.present_ba.as_ref(),
-                self.withdraw_ba.as_ref(),
+                self.readback.as_ref(),
                 self.capture.as_mut(),
                 &mut submission,
             )?;

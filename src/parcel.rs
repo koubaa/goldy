@@ -46,6 +46,8 @@ pub(crate) struct ParcelStamp {
     pub(crate) interaction_set: Arc<Mutex<InteractionSet>>,
     pub(crate) pending: Arc<Mutex<Vec<TimelinePromise>>>,
     pub(crate) home_device: Weak<DeviceInner>,
+    /// Live host-read views (`HostView`) holding a public CPU claim on this parcel.
+    host_claims: Arc<std::sync::atomic::AtomicU32>,
     /// Cleared when the owning retained-pool [`Buffer`]/[`Texture`] is dropped.
     /// Schemes that still bind this stamp must fail submit with [`crate::GoldyError::StaleResource`].
     alive: Arc<std::sync::atomic::AtomicBool>,
@@ -58,6 +60,7 @@ impl ParcelStamp {
             interaction_set: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             home_device,
+            host_claims: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -68,8 +71,21 @@ impl ParcelStamp {
             interaction_set: Arc::clone(&self.interaction_set),
             pending: Arc::clone(&self.pending),
             home_device: self.home_device.clone(),
+            host_claims: Arc::clone(&self.host_claims),
             alive: Arc::clone(&self.alive),
         }
+    }
+
+    pub(crate) fn acquire_host_claim(&self) {
+        self.host_claims.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn release_host_claim(&self) {
+        self.host_claims.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn host_claim_count(&self) -> u32 {
+        self.host_claims.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn is_alive(&self) -> bool {
@@ -1066,28 +1082,6 @@ impl Texture {
         )
     }
 
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    #[allow(deprecated)]
-    pub fn write_region(&self, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> anyhow::Result<()> {
-        self.parcel
-            .grant_texture_keepalive()?
-            .write_region(x, y, width, height, data)
-    }
-
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use MemoryExchange::bind_deposit() for batched, non-blocking uploads. \
-                This method submits synchronously and stalls the GPU."
-    )]
-    #[allow(deprecated)]
-    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
-        self.parcel.grant_texture_keepalive()?.write(data)
-    }
-
     pub(crate) fn release_bookkeeping(&mut self) {
         self.bookkeeping = None;
         self.parcel.release_bookkeeping();
@@ -1354,11 +1348,8 @@ mod tests {
 
         // Original tex is still in scope and must still resolve in the backend.
         let mut scheme = Scheme::new(&ctx);
-        let grant = MemoryExchange::new(&ctx)
-            .bind_withdraw(&mut scheme, &tex)
-            .expect("bind");
         let mut submission = scheme.submit().expect("submit should not see destroyed src texture");
-        let _ = grant.claim(&mut submission).unwrap().consume().unwrap();
+        let _ = (&mut submission >> &tex).take::<u8>().expect("host take");
     }
 
     #[test]

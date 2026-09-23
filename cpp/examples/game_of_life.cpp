@@ -228,7 +228,7 @@ std::pair<goldy::Scheme, goldy::Transaction> build_scheme(
     width = std::max(width, 1u);
     height = std::max(height, 1u);
     goldy::SchemeRenderTargetLease scene_rt =
-        scheme.lease_render_target(width, height, exchange.format());
+        ctx.lease_render_target(width, height, exchange.format());
     goldy::Transaction present = record_scheme(
         scheme, cells, read_field, write_field, compute_pipeline, render_pipeline, scene_rt, exchange);
     return {std::move(scheme), std::move(present)};

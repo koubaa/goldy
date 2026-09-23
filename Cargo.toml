@@ -55,6 +55,7 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
     "std",
     "driver",
     "nvrtc",
+    "cublas",
     "cuda-13010",
     "dynamic-loading",
 ] }
@@ -132,10 +133,13 @@ png = "0.18"
 [features]
 # Default enables all platform-appropriate backends plus graphics
 # On macOS/iOS: metal is used, on Windows: dx12/vulkan, on Linux/Android: vulkan
-default = ["vulkan", "metal", "dx12", "instrumentation", "graphics"]
+default = ["vulkan", "metal", "dx12", "instrumentation", "graphics", "tensor"]
 # Raster, surfaces, render/present APIs. Native backends and `webgpu` imply this.
 # Textures and samplers stay available without this feature (GPGPU).
 graphics = ["dep:raw-window-handle"]
+# Dense tensor algebra over parcels (shapes, views, broadcasting, ops). Independent of
+# `graphics`; does not imply an ML framework (no autograd, modules, or NN operators).
+tensor = []
 # Implied by every real GPU backend (not mock). Gate Instance::new() integration
 # tests with `cfg(feature = "gpu")` instead of enumerating backends.
 gpu = []
@@ -271,6 +275,11 @@ required-features = ["examples"]
 name = "ray_query"
 path = "examples/ray_query.rs"
 required-features = ["examples"]
+
+[[example]]
+name = "tensor_algebra"
+path = "examples/tensor_algebra.rs"
+required-features = ["tensor"]
 
 [[bin]]
 name = "update-screenshots"

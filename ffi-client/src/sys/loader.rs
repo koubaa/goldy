@@ -73,26 +73,19 @@ pub(crate) struct GoldyFfi {
     pub goldy_scheme_submission_destroy: FnGoldySchemeSubmissionDestroy,
     pub goldy_scheme_submission_is_settled: FnGoldySchemeSubmissionIsSettled,
     pub goldy_scheme_submission_wait_until_settled: FnGoldySchemeSubmissionWaitUntilSettled,
+    pub goldy_scheme_submission_take: FnGoldySchemeSubmissionTake,
+    pub goldy_scheme_submission_take_texture: FnGoldySchemeSubmissionTakeTexture,
+    pub goldy_host_view_len: FnGoldyHostViewLen,
+    pub goldy_host_view_data: FnGoldyHostViewData,
+    pub goldy_host_view_copy: FnGoldyHostViewCopy,
+    pub goldy_host_view_destroy: FnGoldyHostViewDestroy,
     pub goldy_memory_exchange_create: FnGoldyMemoryExchangeCreate,
     pub goldy_memory_exchange_destroy: FnGoldyMemoryExchangeDestroy,
-    pub goldy_memory_exchange_bind_withdraw: FnGoldyMemoryExchangeBindWithdraw,
-    pub goldy_memory_exchange_bind_withdraw_texture: FnGoldyMemoryExchangeBindWithdrawTexture,
     pub goldy_memory_exchange_bind_deposit: FnGoldyMemoryExchangeBindDeposit,
-    pub goldy_withdraw_transaction_destroy: FnGoldyWithdrawTransactionDestroy,
-    pub goldy_withdraw_transaction_byte_size: FnGoldyWithdrawTransactionByteSize,
-    pub goldy_withdraw_transaction_claim: FnGoldyWithdrawTransactionClaim,
-    pub goldy_withdraw_claim_destroy: FnGoldyWithdrawClaimDestroy,
-    pub goldy_withdraw_claim_consume: FnGoldyWithdrawClaimConsume,
-    pub goldy_withdraw_claim_discard: FnGoldyWithdrawClaimDiscard,
-    pub goldy_withdraw_bytes_len: FnGoldyWithdrawBytesLen,
-    pub goldy_withdraw_bytes_data: FnGoldyWithdrawBytesData,
-    pub goldy_withdraw_bytes_copy: FnGoldyWithdrawBytesCopy,
-    pub goldy_withdraw_bytes_destroy: FnGoldyWithdrawBytesDestroy,
     pub goldy_deposit_transaction_destroy: FnGoldyDepositTransactionDestroy,
     pub goldy_deposit_transaction_capacity: FnGoldyDepositTransactionCapacity,
     pub goldy_deposit_transaction_id: FnGoldyDepositTransactionId,
     pub goldy_deposit_transaction_write: FnGoldyDepositTransactionWrite,
-    pub goldy_scheme_lease_render_target: FnGoldySchemeLeaseRenderTarget,
     pub goldy_scheme_render_target_lease_destroy: FnGoldySchemeRenderTargetLeaseDestroy,
     pub goldy_scheme_render_pass_begin: FnGoldySchemeRenderPassBegin,
     pub goldy_scheme_render_pass_with_buffer_unit: FnGoldySchemeRenderPassWithBufferUnit,
@@ -125,6 +118,24 @@ pub(crate) struct GoldyFfi {
     pub goldy_claim_destroy: FnGoldyClaimDestroy,
     pub goldy_claim_consume: FnGoldyClaimConsume,
     pub goldy_claim_discard: FnGoldyClaimDiscard,
+    #[cfg(feature = "tensor")]
+    pub goldy_runtime_acquire_tensor: FnGoldyRuntimeAcquireTensor,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_destroy: FnGoldyTensorDestroy,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_dtype: FnGoldyTensorDtype,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_shape: FnGoldyTensorShape,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_kernels_create: FnGoldyTensorKernelsCreate,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_kernels_destroy: FnGoldyTensorKernelsDestroy,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_add: FnGoldyTensorAdd,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_matmul: FnGoldyTensorMatmul,
+    #[cfg(feature = "tensor")]
+    pub goldy_tensor_fill_f32: FnGoldyTensorFillF32,
     #[cfg(windows)]
     pub goldy_surface_exchange_create_win32: FnGoldySurfaceExchangeCreateWin32,
     #[cfg(target_os = "macos")]
@@ -234,36 +245,21 @@ impl GoldyFfi {
                 "goldy_scheme_submission_wait_until_settled",
                 FnGoldySchemeSubmissionWaitUntilSettled
             ),
+            goldy_scheme_submission_take: sym!("goldy_scheme_submission_take", FnGoldySchemeSubmissionTake),
+            goldy_scheme_submission_take_texture: sym!(
+                "goldy_scheme_submission_take_texture",
+                FnGoldySchemeSubmissionTakeTexture
+            ),
+            goldy_host_view_len: sym!("goldy_host_view_len", FnGoldyHostViewLen),
+            goldy_host_view_data: sym!("goldy_host_view_data", FnGoldyHostViewData),
+            goldy_host_view_copy: sym!("goldy_host_view_copy", FnGoldyHostViewCopy),
+            goldy_host_view_destroy: sym!("goldy_host_view_destroy", FnGoldyHostViewDestroy),
             goldy_memory_exchange_create: sym!("goldy_memory_exchange_create", FnGoldyMemoryExchangeCreate),
             goldy_memory_exchange_destroy: sym!("goldy_memory_exchange_destroy", FnGoldyMemoryExchangeDestroy),
-            goldy_memory_exchange_bind_withdraw: sym!(
-                "goldy_memory_exchange_bind_withdraw",
-                FnGoldyMemoryExchangeBindWithdraw
-            ),
-            goldy_memory_exchange_bind_withdraw_texture: sym!(
-                "goldy_memory_exchange_bind_withdraw_texture",
-                FnGoldyMemoryExchangeBindWithdrawTexture
-            ),
             goldy_memory_exchange_bind_deposit: sym!(
                 "goldy_memory_exchange_bind_deposit",
                 FnGoldyMemoryExchangeBindDeposit
             ),
-            goldy_withdraw_transaction_destroy: sym!(
-                "goldy_withdraw_transaction_destroy",
-                FnGoldyWithdrawTransactionDestroy
-            ),
-            goldy_withdraw_transaction_byte_size: sym!(
-                "goldy_withdraw_transaction_byte_size",
-                FnGoldyWithdrawTransactionByteSize
-            ),
-            goldy_withdraw_transaction_claim: sym!("goldy_withdraw_transaction_claim", FnGoldyWithdrawTransactionClaim),
-            goldy_withdraw_claim_destroy: sym!("goldy_withdraw_claim_destroy", FnGoldyWithdrawClaimDestroy),
-            goldy_withdraw_claim_consume: sym!("goldy_withdraw_claim_consume", FnGoldyWithdrawClaimConsume),
-            goldy_withdraw_claim_discard: sym!("goldy_withdraw_claim_discard", FnGoldyWithdrawClaimDiscard),
-            goldy_withdraw_bytes_len: sym!("goldy_withdraw_bytes_len", FnGoldyWithdrawBytesLen),
-            goldy_withdraw_bytes_data: sym!("goldy_withdraw_bytes_data", FnGoldyWithdrawBytesData),
-            goldy_withdraw_bytes_copy: sym!("goldy_withdraw_bytes_copy", FnGoldyWithdrawBytesCopy),
-            goldy_withdraw_bytes_destroy: sym!("goldy_withdraw_bytes_destroy", FnGoldyWithdrawBytesDestroy),
             goldy_deposit_transaction_destroy: sym!(
                 "goldy_deposit_transaction_destroy",
                 FnGoldyDepositTransactionDestroy
@@ -274,7 +270,6 @@ impl GoldyFfi {
             ),
             goldy_deposit_transaction_id: sym!("goldy_deposit_transaction_id", FnGoldyDepositTransactionId),
             goldy_deposit_transaction_write: sym!("goldy_deposit_transaction_write", FnGoldyDepositTransactionWrite),
-            goldy_scheme_lease_render_target: sym!("goldy_scheme_lease_render_target", FnGoldySchemeLeaseRenderTarget),
             goldy_scheme_render_target_lease_destroy: sym!(
                 "goldy_scheme_render_target_lease_destroy",
                 FnGoldySchemeRenderTargetLeaseDestroy
@@ -343,6 +338,24 @@ impl GoldyFfi {
             goldy_claim_destroy: sym!("goldy_claim_destroy", FnGoldyClaimDestroy),
             goldy_claim_consume: sym!("goldy_claim_consume", FnGoldyClaimConsume),
             goldy_claim_discard: sym!("goldy_claim_discard", FnGoldyClaimDiscard),
+            #[cfg(feature = "tensor")]
+            goldy_runtime_acquire_tensor: sym!("goldy_runtime_acquire_tensor", FnGoldyRuntimeAcquireTensor),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_destroy: sym!("goldy_tensor_destroy", FnGoldyTensorDestroy),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_dtype: sym!("goldy_tensor_dtype", FnGoldyTensorDtype),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_shape: sym!("goldy_tensor_shape", FnGoldyTensorShape),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_kernels_create: sym!("goldy_tensor_kernels_create", FnGoldyTensorKernelsCreate),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_kernels_destroy: sym!("goldy_tensor_kernels_destroy", FnGoldyTensorKernelsDestroy),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_add: sym!("goldy_tensor_add", FnGoldyTensorAdd),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_matmul: sym!("goldy_tensor_matmul", FnGoldyTensorMatmul),
+            #[cfg(feature = "tensor")]
+            goldy_tensor_fill_f32: sym!("goldy_tensor_fill_f32", FnGoldyTensorFillF32),
             #[cfg(windows)]
             goldy_surface_exchange_create_win32: sym!(
                 "goldy_surface_exchange_create_win32",

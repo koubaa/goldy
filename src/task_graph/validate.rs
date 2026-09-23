@@ -25,6 +25,7 @@ pub(crate) fn validate_graph_with_prior_built_accels(
     prior_built_accels: &HashSet<u64>,
 ) -> Result<(), GoldyError> {
     let edges = build_edges(ir);
+    validate_extra_edges(ir)?;
     validate_acyclic(ir, &edges)?;
     validate_render_pass_commands(ir)?;
     validate_accel_kind_uses(ir)?;
@@ -36,6 +37,39 @@ pub(crate) fn validate_graph_with_prior_built_accels(
 
 fn validation(msg: String) -> GoldyError {
     GoldyError::Validation(msg)
+}
+
+fn validate_extra_edges(ir: &GraphIR) -> Result<(), GoldyError> {
+    for &(from, to) in &ir.extra_edges {
+        if from >= to || to >= ir.nodes.len() {
+            return Err(validation(format!(
+                "explicit precedence ({from} -> {to}) goes backward in record order. \
+                 hint: only forward precedences are admitted (record order is the total order)"
+            )));
+        }
+    }
+    for &(from, to) in &ir.extra_group_edges {
+        let from_info = ir.groups.get(from.0 as usize).ok_or_else(|| {
+            validation(format!(
+                "explicit group precedence: unknown prior group {}. hint: pass a GroupId returned by include/group",
+                from.0
+            ))
+        })?;
+        let to_info = ir.groups.get(to.0 as usize).ok_or_else(|| {
+            validation(format!(
+                "explicit group precedence: unknown later group {}. hint: pass a GroupId returned by include/group",
+                to.0
+            ))
+        })?;
+        if from_info.node_range.start >= to_info.node_range.start {
+            return Err(validation(format!(
+                "explicit group precedence ({} -> {}) goes backward in record order. \
+                 hint: only forward precedences are admitted (record order is the total order)",
+                from_info.label, to_info.label
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_acyclic(ir: &GraphIR, edges: &[(usize, usize)]) -> Result<(), GoldyError> {
@@ -66,7 +100,7 @@ fn validate_acyclic(ir: &GraphIR, edges: &[(usize, usize)]) -> Result<(), GoldyE
     }
     let leftover: Vec<&str> = (0..n)
         .filter(|&i| in_degree[i] > 0)
-        .map(|i| ir.nodes[i].label)
+        .map(|i| ir.nodes[i].label.as_str())
         .collect();
     Err(validation(format!(
         "scheme graph contains a dependency cycle involving nodes {leftover:?}. \
@@ -232,7 +266,8 @@ mod tests {
 
     fn dispatch_reading_accel(label: &'static str, accel: u64) -> TaskNode {
         TaskNode {
-            label,
+            group: None,
+            label: label.into(),
             bindings: vec![ResourceBinding {
                 resource: ResourceId::Accel(accel),
                 access: NodeAccess::Read,
@@ -256,7 +291,8 @@ mod tests {
         let ir = GraphIR {
             nodes: vec![
                 TaskNode {
-                    label: "build_blas",
+                    group: None,
+                    label: "build_blas".into(),
                     bindings: vec![ResourceBinding {
                         resource: ResourceId::Accel(7),
                         access: NodeAccess::Overwrite,
@@ -274,6 +310,7 @@ mod tests {
                 },
                 dispatch_reading_accel("trace", 7),
             ],
+            ..Default::default()
         };
         let err = validate_graph(&ir).expect_err("BLAS as Accel");
         let s = err.to_string();
@@ -286,7 +323,8 @@ mod tests {
     fn dispatch_mesh_without_pipeline_is_rejected() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "mesh",
+                group: None,
+                label: "mesh".into(),
                 bindings: vec![],
                 kind: NodeKind::RenderPass {
                     target: 1,
@@ -294,6 +332,7 @@ mod tests {
                     commands: vec![RenderCommand::DispatchMesh { x: 1, y: 1, z: 1 }],
                 },
             }],
+            ..Default::default()
         };
         let err = validate_graph(&ir).expect_err("mesh");
         let s = err.to_string();
@@ -305,7 +344,8 @@ mod tests {
     fn draw_after_mesh_pipeline_is_rejected() {
         let ir = GraphIR {
             nodes: vec![TaskNode {
-                label: "mesh",
+                group: None,
+                label: "mesh".into(),
                 bindings: vec![],
                 kind: NodeKind::RenderPass {
                     target: 1,
@@ -321,6 +361,7 @@ mod tests {
                     ],
                 },
             }],
+            ..Default::default()
         };
         let err = validate_graph(&ir).expect_err("draw after mesh");
         let s = err.to_string();
@@ -331,6 +372,7 @@ mod tests {
     fn scheme_strict_rejects_unbuilt_accel_read() {
         let ir = GraphIR {
             nodes: vec![dispatch_reading_accel("rays", 9)],
+            ..Default::default()
         };
         let err = validate_scheme_strict(&ir, &HashSet::new()).expect_err("unbuilt");
         let s = err.to_string();
@@ -341,6 +383,7 @@ mod tests {
     fn scheme_strict_accepts_prior_built_accel_read() {
         let ir = GraphIR {
             nodes: vec![dispatch_reading_accel("rays", 9)],
+            ..Default::default()
         };
         let prior = HashSet::from([9u64]);
         validate_scheme_strict(&ir, &prior).expect("prior built");

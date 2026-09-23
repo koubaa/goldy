@@ -34,16 +34,6 @@ pub struct GoldyScheme {
     pub(crate) inner: Scheme,
     active_compute: Option<ComputeNodeRecord>,
     pub(crate) active_render_pass: Option<RenderPassRecord>,
-    labels: Vec<String>,
-}
-
-impl GoldyScheme {
-    pub(crate) fn intern_label(&mut self, label: &str) -> &'static str {
-        self.labels.push(label.to_string());
-        let s = self.labels.last().unwrap();
-        // SAFETY: `labels` is cleared when the scheme is dropped alongside IR node labels.
-        unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) }
-    }
 }
 
 fn parse_label(label: *const libc::c_char) -> Result<String, GoldyResult> {
@@ -88,7 +78,6 @@ pub unsafe extern "C" fn goldy_scheme_create(ctx: *const GoldyContext) -> *mut G
         inner: Scheme::new(&(*ctx).inner),
         active_compute: None,
         active_render_pass: None,
-        labels: Vec::new(),
     }))
 }
 
@@ -168,7 +157,7 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_begin(
         return GoldyResult::InvalidArgument;
     }
     let label = match parse_label(label) {
-        Ok(l) => (*scheme).intern_label(&l),
+        Ok(l) => l,
         Err(e) => return e,
     };
     (*scheme).active_compute = Some(ComputeNodeRecord::new(label, &(*pipeline).inner));
@@ -317,8 +306,8 @@ pub unsafe extern "C" fn goldy_scheme_compute_node_dispatch(
 /// Submit the scheme and return a heap-allocated per-submission [`GoldySchemeSubmission`].
 ///
 /// Does not block. The caller owns `*out_submission` and must call
-/// [`goldy_scheme_submission_destroy`]. To read bytes from a recorded withdrawal, use
-/// [`crate::goldy_withdraw_transaction_claim`] then [`crate::goldy_withdraw_claim_consume`].
+/// [`goldy_scheme_submission_destroy`]. To read parcel bytes, use
+/// [`crate::goldy_scheme_submission_take`] then [`crate::goldy_host_view_copy`].
 ///
 /// # Safety
 /// `scheme` and `out_submission` must be valid; `*out_submission` is written on success.
@@ -371,7 +360,7 @@ pub unsafe extern "C" fn goldy_scheme_submission_is_settled(submission: *const G
 
 /// Block until the GPU work for `submission` has completed.
 ///
-/// Prefer [`crate::goldy_withdraw_claim_consume`] when verifying compute output through a withdrawal.
+/// Prefer [`crate::goldy_scheme_submission_take`] when verifying compute output.
 ///
 /// # Safety
 /// `submission` must be valid.

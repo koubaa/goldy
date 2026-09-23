@@ -41,6 +41,7 @@
 //! see [`WDDM_INTEROP.md`](WDDM_INTEROP.md) in this directory (internal; not user docs).
 
 mod capture_gate;
+mod matmul;
 mod pending_submit;
 mod pinned_host;
 mod retained_graph;
@@ -188,6 +189,8 @@ pub(crate) struct CudaBackend {
     next_slot: u32,
     next_shader: ShaderHandle,
     next_compute_pipeline: ComputePipelineHandle,
+    /// One cuBLAS handle per submission context (stream), created on first MatMul.
+    cublas: HashMap<ContextHandle, Arc<matmul::CublasHandle>>,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     next_surface: SurfaceHandle,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -729,6 +732,7 @@ impl CudaBackend {
             next_slot: 0,
             next_shader: 1,
             next_compute_pipeline: 1,
+            cublas: HashMap::new(),
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             next_surface: 1,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -1516,7 +1520,7 @@ impl CudaBackend {
         frame_table: Option<&[u32]>,
         arg_data: &[u8],
         count: u32,
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<Vec<CudaOp>> {
         let pipeline = self
             .compute_pipelines
@@ -1608,8 +1612,15 @@ impl CudaBackend {
             };
 
             ops.push(
-                self.materialize_launch(stream, pipeline_handle, &indices, &user, (wg_x, wg_y, wg_z), label)
-                    .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
+                self.materialize_launch(
+                    stream,
+                    pipeline_handle,
+                    &indices,
+                    &user,
+                    (wg_x, wg_y, wg_z),
+                    label.clone(),
+                )
+                .with_context(|| format!("CUDA: DispatchBatch entry {i} launch failed"))?,
             );
         }
         Ok(ops)
@@ -1622,7 +1633,7 @@ impl CudaBackend {
         indices: &[u32],
         user: &[u32],
         workgroups: (u32, u32, u32),
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<CudaOp> {
         let pipeline = self
             .compute_pipelines
@@ -1642,7 +1653,7 @@ impl CudaBackend {
             workgroups,
             pipeline.workgroup_size,
             0,
-            label,
+            label.as_deref(),
         )?;
         let launch_args = self.build_launch_args(stream, &pipeline.launch_layout, indices, user)?;
         let (keep_alive_buffers, keep_alive_textures) = self.collect_launch_pins(indices)?;
@@ -1670,7 +1681,7 @@ impl CudaBackend {
         user: &[u32],
         shape_buffer: BufferHandle,
         shape_offset: u64,
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
     ) -> Result<CudaOp> {
         let pipeline = self
             .compute_pipelines
@@ -1887,6 +1898,11 @@ impl CudaBackend {
                         }
                     }
                 }
+                GpuCommand::MatMul { a, b, c, .. } => {
+                    updates.push((a.buffer, CudaBufferReq::KERNEL));
+                    updates.push((b.buffer, CudaBufferReq::KERNEL));
+                    updates.push((c.buffer, CudaBufferReq::KERNEL));
+                }
                 GpuCommand::ClearBuffer { buffer, .. } => {
                     updates.push((*buffer, CudaBufferReq::TRANSFER | CudaBufferReq::HOST_WRITE));
                 }
@@ -1986,6 +2002,9 @@ impl CudaBackend {
                 CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
                     memories.extend(keep_alive_buffers.iter().cloned());
                 }
+                CudaOp::MatMul { c, .. } => {
+                    memories.push(Arc::clone(&c.memory));
+                }
                 _ => {}
             }
         }
@@ -2018,6 +2037,9 @@ impl CudaBackend {
                 CudaOp::Launch { keep_alive_buffers, .. } | CudaOp::LaunchIndirect { keep_alive_buffers, .. } => {
                     memories.extend(keep_alive_buffers.iter().cloned())
                 }
+                CudaOp::MatMul { c, .. } => {
+                    memories.push(Arc::clone(&c.memory));
+                }
                 _ => {}
             }
         }
@@ -2038,7 +2060,12 @@ impl CudaBackend {
             .collect()
     }
 
-    fn materialize_ops(&mut self, stream: &Arc<CudaStream>, commands: &[GpuCommand]) -> Result<Vec<CudaOp>> {
+    fn materialize_ops(
+        &mut self,
+        ctx: ContextHandle,
+        stream: &Arc<CudaStream>,
+        commands: &[GpuCommand],
+    ) -> Result<Vec<CudaOp>> {
         let _gate = capture_gate::lock_capture_alloc_gate();
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         {
@@ -2077,7 +2104,7 @@ impl CudaBackend {
                         &current_indices,
                         &current_user,
                         (*workgroups_x, *workgroups_y, *workgroups_z),
-                        *label,
+                        label.clone(),
                     )?);
                 }
                 GpuCommand::DispatchIndirect { label, buffer, offset } => {
@@ -2090,7 +2117,7 @@ impl CudaBackend {
                         &current_user,
                         *buffer,
                         *offset,
-                        *label,
+                        label.clone(),
                     )?);
                 }
                 GpuCommand::ClearBuffer { buffer, offset, size } => {
@@ -2199,7 +2226,7 @@ impl CudaBackend {
                         frame_table.as_deref(),
                         arg_data.as_ref(),
                         *count,
-                        *label,
+                        label.clone(),
                     )?;
                     ops.extend(batch_ops);
                 }
@@ -2355,6 +2382,9 @@ impl CudaBackend {
                         });
                     }
                 }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
+                }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let src_tex = self
                         .textures
@@ -2494,11 +2524,17 @@ impl CudaBackend {
                         anyhow::bail!("CUDA: CopyRenderTarget requires cuda+graphics+dx12 on Windows");
                     }
                 }
-                GpuCommand::BuildAccelerationStructure(_) => {
-                    anyhow::bail!("CUDA backend does not support acceleration structures");
-                }
-                GpuCommand::SetRayTracingPipeline(_) | GpuCommand::TraceRays { .. } => {
-                    anyhow::bail!("CUDA backend does not support ray tracing pipelines");
+                GpuCommand::MatMul { label, desc, a, b, c } => {
+                    ops.push(matmul::materialize(
+                        self,
+                        ctx,
+                        stream,
+                        label.clone(),
+                        *desc,
+                        *a,
+                        *b,
+                        *c,
+                    )?);
                 }
             }
         }
@@ -2519,7 +2555,7 @@ impl CudaBackend {
         let stream = Arc::clone(&self.context(ctx)?.stream);
         let ops = {
             let _tz = crate::tracy_zone!("cuda.submit.materialize");
-            self.materialize_ops(&stream, &effective)?
+            self.materialize_ops(ctx, &stream, &effective)?
         };
         let _tz = crate::tracy_zone!("cuda.submit.enqueue");
         self.enqueue_submit(
@@ -3308,7 +3344,7 @@ pub(super) fn validate_launch_config(
     grid: (u32, u32, u32),
     block: [u32; 3],
     shared_mem_bytes: u32,
-    label: Option<&'static str>,
+    label: Option<&str>,
 ) -> Result<()> {
     if !crate::backend::goldy_validation_enabled() {
         return Ok(());
@@ -3323,7 +3359,7 @@ fn validate_launch_config_unchecked(
     grid: (u32, u32, u32),
     block: [u32; 3],
     shared_mem_bytes: u32,
-    label: Option<&'static str>,
+    label: Option<&str>,
 ) -> Result<()> {
     let where_ = label.unwrap_or("<unnamed>");
     let (gx, gy, gz) = grid;
@@ -3820,6 +3856,7 @@ impl GpuBackend for CudaBackend {
     }
 
     fn detach_context_for_destroy(&mut self, ctx: ContextHandle) -> Option<Box<dyn ContextDestroyHandle>> {
+        self.cublas.remove(&ctx);
         let context = self.contexts.remove(&ctx)?;
         let keys: Vec<u64> = self
             .retained
@@ -5035,7 +5072,7 @@ impl GpuBackend for CudaBackend {
         let gpu_commands = Self::flatten_graph_commands(commands)?;
         let effective = commands_with_sync_prologue(&gpu_commands, sync);
         let stream = Arc::clone(&self.context(ctx)?.stream);
-        let ops = self.materialize_ops(&stream, &effective)?;
+        let ops = self.materialize_ops(ctx, &stream, &effective)?;
         #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
         let direct_present = effective.iter().find_map(|command| {
             let GpuCommand::CopyRenderTarget { src, dst } = command else {
@@ -5517,7 +5554,7 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -5571,9 +5608,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             .node("double", &pipeline)
             .with_parcel(&buffer, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buffer)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
         Ok(())
     }
@@ -5601,9 +5638,9 @@ void cs_main(BufRO<uint> input, Scattered<uint> output, ThreadId id) {
             .with_parcel(&input, crate::NodeAccess::Read)
             .with_parcel(&output, crate::NodeAccess::Write)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &output)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &output).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[2, 4, 6, 8]);
         Ok(())
     }
@@ -5700,9 +5737,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(EXPECTED)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[EXPECTED]);
         Ok(())
     }
@@ -5724,9 +5761,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(0u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0]);
         Ok(())
     }
@@ -5748,9 +5785,9 @@ void cs_main(Scattered<uint> out, uint value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(u32::MAX)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[u32::MAX]);
         Ok(())
     }
@@ -5786,9 +5823,9 @@ void cs_main(Scattered<float> out, float value, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(bits)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[bits]);
         Ok(())
     }
@@ -5824,9 +5861,9 @@ void cs_main(Scattered<uint> out, uint a, uint b, ThreadId id) {
             .with_param(A)
             .with_param(B)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[A, B]);
         Ok(())
     }
@@ -5863,9 +5900,9 @@ void cs_main(Scattered<uint> inp, Scattered<uint> out, uint offset, ThreadId id)
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(OFFSET)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         let expected: Vec<u32> = input.iter().map(|v| v + OFFSET).collect();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), expected.as_slice());
         Ok(())
@@ -5908,9 +5945,9 @@ void cs_main(Params cfg, Scattered<uint> values, ThreadId id) {
             .with_parcel(&cfg, crate::NodeAccess::Read)
             .with_parcel(&values, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &values)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &values).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[3, 6, 9, 12]);
         Ok(())
     }
@@ -6046,11 +6083,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::Write)
             .with_param(9u32)
             .dispatch(1, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+
         let mut submission = scheme.submit()?;
-        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b = (&mut submission >> &b).take::<u8>()?;
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes_a).iter().all(|&v| v == 7));
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes_b).iter().all(|&v| v == 9));
         Ok(())
@@ -6080,9 +6116,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("add_ten", &add_pipe)
             .with_parcel(&dst, crate::NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &dst).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, (i as u32) * 2 + 10, "element {i}");
         }
@@ -6113,19 +6149,14 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::Write)
             .with_param(99u32)
             .dispatch(1, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
+
         let mut submission = scheme.submit()?;
-        assert!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw_a.claim(&mut submission)?.consume()?)
-                .iter()
-                .all(|&v| v == 42)
-        );
-        assert!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw_b.claim(&mut submission)?.consume()?)
-                .iter()
-                .all(|&v| v == 99)
-        );
+        assert!(bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &a).take::<u8>()?)
+            .iter()
+            .all(|&v| v == 42));
+        assert!(bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &b).take::<u8>()?)
+            .iter()
+            .all(|&v| v == 99));
         Ok(())
     }
 
@@ -6169,9 +6200,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&z, crate::NodeAccess::Read)
             .with_parcel(&out, crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &out).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, (i as u32) * 4, "element {i}");
         }
@@ -6194,9 +6225,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("add_ten", &pipe)
             .with_parcel(&buf, crate::NodeAccess::ReadWrite)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buf).take::<u8>()?;
         assert!(bytemuck::cast_slice::<u8, u32>(&bytes).iter().all(|&v| v == 10));
         Ok(())
     }
@@ -6220,9 +6251,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&mid, crate::NodeAccess::Read)
             .with_parcel(&dst, crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &dst)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &dst).take::<u8>()?;
         for (i, &val) in bytemuck::cast_slice::<u8, u32>(&bytes).iter().enumerate() {
             assert_eq!(val, i as u32, "element {i}");
         }
@@ -6251,9 +6282,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&cells[0], crate::NodeAccess::Read)
             .with_parcel(&cells[1], crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &cells[1]).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), src.as_slice());
 
         // Isolation: doubling one field must leave the sibling untouched.
@@ -6272,15 +6303,14 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("double_work", &double)
             .with_parcel(&cells[1], crate::NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant_sentinel = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[0])?;
-        let grant_work = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &cells[1])?;
+
         let mut submission = scheme.submit()?;
         assert!(
-            bytemuck::cast_slice::<u8, u32>(&grant_sentinel.claim(&mut submission)?.consume()?)
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &cells[0]).take::<u8>()?)
                 .iter()
                 .all(|&v| v == 100)
         );
-        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&grant_work.claim(&mut submission)?.consume()?)
+        for (i, &val) in bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &cells[1]).take::<u8>()?)
             .iter()
             .enumerate()
         {
@@ -6462,7 +6492,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                     frame_table_base: 0,
                 },
                 GpuCommand::Dispatch {
-                    label: Some("double"),
+                    label: Some("double".into()),
                     workgroups_x: 4,
                     workgroups_y: 1,
                     workgroups_z: 1,
@@ -6496,7 +6526,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("a", &pipeline)
             .with_parcel(&buf_a, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw_a = crate::MemoryExchange::new(&ctx_a).bind_withdraw(&mut scheme_a, &buf_a)?;
+
         let mut submission_a = scheme_a.submit()?;
 
         let mut scheme_b = crate::Scheme::new(&ctx_b);
@@ -6504,11 +6534,11 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .node("b", &pipeline)
             .with_parcel(&buf_b, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
-        let withdraw_b = crate::MemoryExchange::new(&ctx_b).bind_withdraw(&mut scheme_b, &buf_b)?;
+
         let mut submission_b = scheme_b.submit()?;
 
-        let bytes_a = withdraw_a.claim(&mut submission_a)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission_b)?.consume()?;
+        let bytes_a = (&mut submission_a >> &buf_a).take::<u8>()?;
+        let bytes_b = (&mut submission_b >> &buf_b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[20, 40, 60, 80]);
         Ok(())
@@ -6535,9 +6565,9 @@ void cs_main(Scattered<uint> data, ThreadId id) {
         let buf = pool.acquire_buffer_with_data(&init, BufferKind::Scattered)?;
         let mut scheme = crate::Scheme::new(&ctx);
         scheme.clear_parcel(&buf, 16 * 4, 32 * 4)?;
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buf)?;
+
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &buf).take::<u8>()?;
         let words = bytemuck::cast_slice::<u8, u32>(&bytes);
         assert!(words[..16].iter().all(|&v| v == 0xAAAA_AAAA));
         assert!(words[16..48].iter().all(|&v| v == 0));
@@ -6619,9 +6649,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&buffer, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &buffer)?;
         let mut submission = scheme.submit()?;
-        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes1 = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -6638,7 +6667,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
         // Stable resubmit without rebinding withdraw (would dirty IR).
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &buffer).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
 
         let after_second = stats.snapshot();
@@ -6677,10 +6706,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(7u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
         assert_eq!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &out).take::<u8>()?)[0],
             7
         );
         let captures_after_first = stats.snapshot().captures;
@@ -6699,10 +6728,10 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .with_parcel(&out, crate::NodeAccess::Write)
             .with_param(9u32)
             .dispatch(1, 1, 1);
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &out)?;
+
         let mut submission = scheme.submit()?;
         assert_eq!(
-            bytemuck::cast_slice::<u8, u32>(&withdraw.claim(&mut submission)?.consume()?)[0],
+            bytemuck::cast_slice::<u8, u32>(&(&mut submission >> &out).take::<u8>()?)[0],
             9
         );
         assert!(
@@ -7084,7 +7113,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
                 frame_table_base: 0,
             }),
             GraphCommand::Compute(GpuCommand::Dispatch {
-                label: Some("double"),
+                label: Some("double".into()),
                 workgroups_x: 4,
                 workgroups_y: 1,
                 workgroups_z: 1,
@@ -7152,9 +7181,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&work, crate::NodeAccess::ReadWrite)
             .dispatch_shape_parcel(&*shape)?;
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
         let mut submission = scheme.submit()?;
-        let bytes1 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes1 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -7166,7 +7194,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
         let after_second = stats.snapshot();
         assert_eq!(
@@ -7223,9 +7251,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&work, crate::NodeAccess::ReadWrite)
             .dispatch_shape_parcel(&*shape)?;
 
-        let withdraw = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &work)?;
         let mut submission = scheme.submit()?;
-        let bytes = withdraw.claim(&mut submission)?.consume()?;
+        let bytes = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0, 0, 0, 0]);
         let snap = stats.snapshot();
         assert!(snap.captures >= 1, "clear+indirect launches must capture: {snap:?}");
@@ -7238,7 +7265,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let captures_after_first = snap.captures;
         let launches_after_first = snap.launches;
         let mut submission = scheme.submit()?;
-        let bytes2 = withdraw.claim(&mut submission)?.consume()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[0, 0, 0, 0]);
         let after = stats.snapshot();
         assert_eq!(
@@ -7277,11 +7304,9 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .with_parcel(&b, crate::NodeAccess::ReadWrite)
             .dispatch(4, 1, 1);
 
-        let withdraw_a = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &a)?;
-        let withdraw_b = crate::MemoryExchange::new(&ctx).bind_withdraw(&mut scheme, &b)?;
         let mut submission = scheme.submit()?;
-        let bytes_a = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b = (&mut submission >> &b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[0, 0, 0, 0]);
 
@@ -7298,8 +7323,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes_a2 = withdraw_a.claim(&mut submission)?.consume()?;
-        let bytes_b2 = withdraw_b.claim(&mut submission)?.consume()?;
+        let bytes_a2 = (&mut submission >> &a).take::<u8>()?;
+        let bytes_b2 = (&mut submission >> &b).take::<u8>()?;
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a2), &[4, 8, 12, 16]);
         // Cleared every resubmit, then doubled from zeros → still zeros.
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b2), &[0, 0, 0, 0]);

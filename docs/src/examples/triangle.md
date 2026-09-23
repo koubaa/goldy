@@ -16,7 +16,7 @@ cargo run --features examples --example triangle
 
 - `Runtime::acquire_buffer_with_data` for a static vertex buffer
 - `Scheme::render_pass` recorded once and resubmitted every frame
-- `SurfaceExchange::bind_render_target` plus `Transaction::claim` / `Claim::consume` to present
+- `SurfaceExchange::bind_render_target` plus `(&mut submission >> &present).take()?` to present
 - Pipeline and scheme rebuild on window resize
 
 ## Source

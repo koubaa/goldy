@@ -13,7 +13,7 @@ use goldy::swapchain_pool::PresentLease;
 use goldy::task_graph::{ComputeNodeRecord, RenderPassRecord};
 use goldy::{Scheme, Submission};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyBytes};
 use std::cell::RefCell;
 
 /// GPU submission context — one per scheme.
@@ -60,6 +60,33 @@ impl PySchemeSubmission {
         self.inner.wait_until_settled().into_py_result()
     }
 
+    /// Host-claim parcel bytes after this submission.
+    fn take<'py>(&mut self, py: Python<'py>, parcel: &PyParcel) -> PyResult<Bound<'py, PyBytes>> {
+        let view = (&mut self.inner >> parcel.inner.as_parcel())
+            .take::<u8>()
+            .into_py_result()?;
+        Ok(PyBytes::new(py, &view))
+    }
+
+    /// Host-claim texture bytes after this submission.
+    fn take_texture<'py>(&mut self, py: Python<'py>, texture: &PyTexture) -> PyResult<Bound<'py, PyBytes>> {
+        let view = (&mut self.inner >> &*texture.inner).take::<u8>().into_py_result()?;
+        Ok(PyBytes::new(py, &view))
+    }
+
+    /// `submission >> parcel` / `submission >> texture` realizes a host claim as `bytes`.
+    fn __rshift__<'py>(&mut self, py: Python<'py>, rhs: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+        if let Ok(parcel) = rhs.extract::<PyRef<PyParcel>>() {
+            return self.take(py, &parcel);
+        }
+        if let Ok(texture) = rhs.extract::<PyRef<PyTexture>>() {
+            return self.take_texture(py, &texture);
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "SchemeSubmission >> expects a Parcel or Texture",
+        ))
+    }
+
     fn __repr__(&self) -> String {
         format!("SchemeSubmission(settled={})", self.inner.is_settled())
     }
@@ -97,7 +124,6 @@ pub struct PyScheme {
     pub(crate) inner: RefCell<Scheme>,
     active_compute: RefCell<Option<ComputeNodeRecord>>,
     active_render_pass: RefCell<Option<RenderPassRecord>>,
-    labels: RefCell<Vec<String>>,
 }
 
 #[pymethods]
@@ -108,7 +134,6 @@ impl PyScheme {
             inner: RefCell::new(Scheme::new(&ctx.inner)),
             active_compute: RefCell::new(None),
             active_render_pass: RefCell::new(None),
-            labels: RefCell::new(Vec::new()),
         }
     }
 
@@ -120,28 +145,11 @@ impl PyScheme {
                 "Only one recorder may be open per scheme",
             ));
         }
-        let static_label = slf.intern_label(&label)?;
-        *slf.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(static_label, &pipeline.inner));
+        *slf.active_compute.borrow_mut() = Some(ComputeNodeRecord::new(label, &pipeline.inner));
         Ok(PySchemeComputeNode {
             scheme: slf.into(),
             committed: RefCell::new(false),
         })
-    }
-
-    #[pyo3(signature = (width, height, format, depth_format=None))]
-    fn lease_render_target(
-        &self,
-        width: u32,
-        height: u32,
-        format: PyTextureFormat,
-        depth_format: Option<PyDepthFormat>,
-    ) -> PyResult<PySchemeRenderTargetLease> {
-        self.ensure_no_active_recorder()?;
-        let ctx = self.inner.borrow().context().clone();
-        let lease = ctx
-            .lease_render_target(width, height, format.into(), depth_format.map(Into::into))
-            .into_py_result()?;
-        Ok(PySchemeRenderTargetLease { inner: lease })
     }
 
     fn render_pass(
@@ -158,13 +166,8 @@ impl PyScheme {
                     "Only one recorder may be open per scheme",
                 ));
             }
-            let static_label = scheme.intern_label(&label)?;
-            let pass = RenderPassRecord::new_for_scheme_lease(
-                static_label,
-                &mut scheme.inner.borrow_mut(),
-                &lease.inner,
-                load.inner,
-            );
+            let pass =
+                RenderPassRecord::new_for_scheme_lease(label, &mut scheme.inner.borrow_mut(), &lease.inner, load.inner);
             *scheme.active_render_pass.borrow_mut() = Some(pass);
         }
         Ok(PySchemeRenderPass { scheme: slf })
@@ -196,13 +199,6 @@ impl PyScheme {
 }
 
 impl PyScheme {
-    fn intern_label(&self, label: &str) -> PyResult<&'static str> {
-        let mut labels = self.labels.borrow_mut();
-        labels.push(label.to_string());
-        let s = labels.last().unwrap();
-        Ok(unsafe { std::mem::transmute::<&str, &'static str>(s.as_str()) })
-    }
-
     pub(crate) fn ensure_no_active_recorder(&self) -> PyResult<()> {
         if self.active_compute.borrow().is_some() || self.active_render_pass.borrow().is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(

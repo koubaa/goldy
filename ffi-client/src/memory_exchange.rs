@@ -1,23 +1,21 @@
-use crate::buffer::Buffer;
 use crate::context::Context;
 use crate::error::{check, non_null_expect, Result};
 use crate::parcel::Parcel;
-use crate::scheme::{Scheme, SchemeSubmission};
+use crate::scheme::Scheme;
 use crate::sys::{
-    self, GoldyDepositTarget, GoldyDepositTargetKind, GoldyDepositTransaction, GoldyMemoryExchange, GoldyWithdrawBytes,
-    GoldyWithdrawClaim, GoldyWithdrawTransaction,
+    self, GoldyDepositTarget, GoldyDepositTargetKind, GoldyDepositTransaction, GoldyHostView, GoldyMemoryExchange,
 };
 use crate::texture::Texture;
 use std::ops::Deref;
 
-/// CPU-readable bytes from a consumed withdraw claim.
-pub struct WithdrawBytes {
-    ptr: *mut GoldyWithdrawBytes,
+/// Host-claimed parcel bytes (`goldy_scheme_submission_take`).
+pub struct HostView {
+    pub(crate) ptr: *mut GoldyHostView,
 }
 
-impl WithdrawBytes {
+impl HostView {
     pub fn len(&self) -> usize {
-        unsafe { sys::goldy_withdraw_bytes_len(self.ptr) as usize }
+        unsafe { sys::goldy_host_view_len(self.ptr) as usize }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -26,7 +24,7 @@ impl WithdrawBytes {
 
     pub fn as_slice(&self) -> &[u8] {
         let len = self.len();
-        let data = unsafe { sys::goldy_withdraw_bytes_data(self.ptr) };
+        let data = unsafe { sys::goldy_host_view_data(self.ptr) };
         if data.is_null() || len == 0 {
             return &[];
         }
@@ -38,7 +36,7 @@ impl WithdrawBytes {
     }
 }
 
-impl Deref for WithdrawBytes {
+impl Deref for HostView {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -46,68 +44,10 @@ impl Deref for WithdrawBytes {
     }
 }
 
-impl Drop for WithdrawBytes {
+impl Drop for HostView {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { sys::goldy_withdraw_bytes_destroy(self.ptr) };
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-/// Linear claim for one submission's memory withdrawal.
-pub struct WithdrawClaim {
-    ptr: *mut GoldyWithdrawClaim,
-}
-
-impl WithdrawClaim {
-    /// Wait for the submission, read staging into CPU bytes.
-    ///
-    /// Takes ownership of this claim (do not drop afterward).
-    pub fn consume(mut self) -> Result<WithdrawBytes> {
-        let ptr = self.ptr;
-        self.ptr = std::ptr::null_mut();
-        let bytes = non_null_expect(unsafe { sys::goldy_withdraw_claim_consume(ptr) });
-        Ok(WithdrawBytes { ptr: bytes })
-    }
-
-    /// Settle without reading bytes; recycle staging.
-    pub fn discard(mut self) -> Result<()> {
-        let ptr = self.ptr;
-        self.ptr = std::ptr::null_mut();
-        check(unsafe { sys::goldy_withdraw_claim_discard(ptr) })
-    }
-}
-
-impl Drop for WithdrawClaim {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { sys::goldy_withdraw_claim_destroy(self.ptr) };
-            self.ptr = std::ptr::null_mut();
-        }
-    }
-}
-
-/// Stable withdraw relationship recorded in one [`Scheme`].
-pub struct WithdrawTransaction {
-    ptr: *mut GoldyWithdrawTransaction,
-}
-
-impl WithdrawTransaction {
-    pub fn byte_size(&self) -> u64 {
-        unsafe { sys::goldy_withdraw_transaction_byte_size(self.ptr) }
-    }
-
-    pub fn claim(&self, submission: &mut SchemeSubmission) -> Result<WithdrawClaim> {
-        let ptr = non_null_expect(unsafe { sys::goldy_withdraw_transaction_claim(self.ptr, submission.as_mut_ptr()) });
-        Ok(WithdrawClaim { ptr })
-    }
-}
-
-impl Drop for WithdrawTransaction {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { sys::goldy_withdraw_transaction_destroy(self.ptr) };
+            unsafe { sys::goldy_host_view_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }
@@ -115,7 +55,8 @@ impl Drop for WithdrawTransaction {
 
 /// Stable deposit relationship recorded in one [`Scheme`].
 ///
-/// Write staging bytes before [`Scheme::submit`]; submit claims the occurrence internally.
+/// Write staging bytes before [`Scheme::submit`] (`write` or `(&deposit << data)?`);
+/// submit claims the occurrence internally.
 pub struct DepositTransaction {
     ptr: *mut GoldyDepositTransaction,
 }
@@ -134,6 +75,14 @@ impl DepositTransaction {
     }
 }
 
+impl std::ops::Shl<&[u8]> for &DepositTransaction {
+    type Output = Result<()>;
+
+    fn shl(self, data: &[u8]) -> Self::Output {
+        self.write(data, 0)
+    }
+}
+
 impl Drop for DepositTransaction {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -143,7 +92,7 @@ impl Drop for DepositTransaction {
     }
 }
 
-/// CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
+/// CPU→GPU memory exchange (deposits / uploads).
 pub struct MemoryExchange {
     ptr: *mut GoldyMemoryExchange,
 }
@@ -152,25 +101,6 @@ impl MemoryExchange {
     pub fn new(ctx: &Context) -> Result<Self> {
         let ptr = non_null_expect(unsafe { sys::goldy_memory_exchange_create(ctx.as_ptr()) });
         Ok(Self { ptr })
-    }
-
-    pub fn bind_withdraw(&self, scheme: &mut Scheme, parcel: &Parcel) -> Result<WithdrawTransaction> {
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_memory_exchange_bind_withdraw(self.ptr, scheme.as_ptr(), parcel.as_ptr())
-        });
-        Ok(WithdrawTransaction { ptr })
-    }
-
-    pub fn bind_withdraw_buffer(&self, scheme: &mut Scheme, buffer: &Buffer) -> Result<WithdrawTransaction> {
-        let parcel = buffer.field(0)?;
-        self.bind_withdraw(scheme, &parcel)
-    }
-
-    pub fn bind_withdraw_texture(&self, scheme: &mut Scheme, texture: &Texture) -> Result<WithdrawTransaction> {
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_memory_exchange_bind_withdraw_texture(self.ptr, scheme.as_ptr(), texture.as_ptr())
-        });
-        Ok(WithdrawTransaction { ptr })
     }
 
     pub fn bind_deposit(&self, scheme: &mut Scheme, target: DepositTarget<'_>) -> Result<DepositTransaction> {

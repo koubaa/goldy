@@ -554,6 +554,16 @@ pub(crate) fn commands_with_sync_prologue(commands: &[GpuCommand], sync: Option<
     commands.to_vec()
 }
 
+/// Persistent host mapping of a GPU buffer for a host-read claim.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostMapping {
+    pub ptr: *const u8,
+    pub len: u64,
+}
+
+unsafe impl Send for HostMapping {}
+unsafe impl Sync for HostMapping {}
+
 /// GPU command recorded into a command buffer / task-graph submission.
 ///
 /// Includes compute dispatches, buffer upload/clear, texture uploads, and
@@ -575,14 +585,14 @@ pub(crate) enum GpuCommand {
     /// Dispatch compute workgroups.
     Dispatch {
         /// Debug label from [`crate::Scheme::node`] when emitted by the analyzer.
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         workgroups_x: u32,
         workgroups_y: u32,
         workgroups_z: u32,
     },
     /// Indirect dispatch: workgroup counts read from buffer at offset (3× u32: x, y, z).
     DispatchIndirect {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         buffer: BufferHandle,
         offset: u64,
     },
@@ -673,11 +683,17 @@ pub(crate) enum GpuCommand {
         width: u32,
         height: u32,
     },
-    /// Copy a texture subresource into a withdraw-staging staging buffer (placed footprint).
+    /// Copy a texture subresource into a host-read staging buffer (placed footprint).
     CopyTextureToReadback {
         src: TextureHandle,
         dst: BufferHandle,
         layout: TextureCopyFootprint,
+    },
+    /// Copy a CPU_READABLE storage buffer into its dedicated READBACK twin (DX12).
+    CopyToCpuReadableTwin {
+        src: BufferHandle,
+        src_offset: u64,
+        size: u64,
     },
     /// Batched indirect dispatch: multiple consecutive dispatches sharing the same pipeline.
     ///
@@ -689,7 +705,7 @@ pub(crate) enum GpuCommand {
     /// are detected within a wave.  Falls back to individual `Dispatch` commands
     /// if no grouping is possible.
     DispatchBatch {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         /// Pre-filled argument data: `count` entries of `DISPATCH_BATCH_STRIDE` bytes each.
         arg_data: Arc<[u8]>,
         count: u32,
@@ -714,10 +730,21 @@ pub(crate) enum GpuCommand {
     SetRayTracingPipeline(RayTracingPipelineHandle),
     /// `vkCmdTraceRaysKHR` / `DispatchRays` with dimensions in rays (not workgroups).
     TraceRays {
-        label: Option<&'static str>,
+        label: Option<crate::SchemeLabel>,
         width: u32,
         height: u32,
         depth: u32,
+    },
+    /// Backend-selected matrix multiply (cuBLAS / MPS / equivalent).
+    ///
+    /// Fallback backends never see this variant: the emitter lowers MatMul nodes
+    /// to an ordinary stdlib dispatch instead.
+    MatMul {
+        label: Option<crate::SchemeLabel>,
+        desc: crate::ops::MatMulDesc,
+        a: crate::ops::matmul::MatMulOperand,
+        b: crate::ops::matmul::MatMulOperand,
+        c: crate::ops::matmul::MatMulOperand,
     },
 }
 
@@ -1230,12 +1257,31 @@ pub(crate) trait GpuBackend:
 
     fn destroy_buffer(&mut self, buffer: BufferHandle);
     fn write_buffer(&mut self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<()>;
-    /// Allocate a persistently mapped READBACK staging buffer for withdraw staging (no bindless slot).
+    /// Allocate a persistently mapped READBACK staging buffer for host-claim staging (no bindless slot).
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle>;
     /// Read bytes from a buffer created by [`Self::alloc_readback_buffer`].
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
-    /// Release a withdraw-staging staging buffer.
+    /// Release a host-read staging buffer.
     fn free_readback_buffer(&mut self, buffer: BufferHandle);
+    /// Persistent host mapping of a parcel buffer, if the medium is host-coherent.
+    fn host_read_mapping(&self, buffer: BufferHandle) -> Option<HostMapping> {
+        let _ = buffer;
+        None
+    }
+    /// Persistent mapping of a dedicated READBACK twin (DX12 `CPU_READABLE`), if any.
+    fn host_read_twin_mapping(&self, buffer: BufferHandle) -> Option<HostMapping> {
+        let _ = buffer;
+        None
+    }
+    /// Grant CPU access for a mapped host claim (CPU-backend guarded pages).
+    fn host_read_acquire(&mut self, buffer: BufferHandle) -> Result<()> {
+        let _ = buffer;
+        Ok(())
+    }
+    /// Release CPU access granted by [`Self::host_read_acquire`].
+    fn host_read_release(&mut self, buffer: BufferHandle) {
+        let _ = buffer;
+    }
     /// Query copy/readback layout for a 2D texture grant (uncompressed formats only in v1).
     fn query_texture_copy_footprint(
         &self,
@@ -1444,6 +1490,7 @@ pub(crate) trait GpuBackend:
     fn write_texture(&mut self, texture: TextureHandle, data: &[u8], width: u32, height: u32) -> Result<()>;
     /// Write pixel data to a subregion of the texture.
     /// The data must match width*height*bpp for the texture's format.
+    #[allow(dead_code)]
     fn write_texture_region(
         &mut self,
         texture: TextureHandle,

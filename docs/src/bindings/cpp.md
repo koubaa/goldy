@@ -113,11 +113,9 @@ int main() {
                 .draw(0, 3);
         }
         scheme.copy_to_texture(rt, readback);
-        goldy::MemoryExchange memory(ctx);
-        goldy::WithdrawTransaction withdraw = memory.bind_withdraw_texture(scheme, readback);
         goldy::SchemeSubmission submission = scheme.submit();
-        goldy::WithdrawBytes bytes = withdraw.claim(submission).consume();
-        std::cout << "Rendered " << bytes.size() << " bytes\n";
+        goldy::HostView view = submission.take(readback);
+        std::cout << "Rendered " << view.size() << " bytes\n";
         return 0;
     } catch (const goldy::Exception& e) {
         std::cerr << "Goldy error: " << e.what() << '\n';
@@ -176,7 +174,7 @@ try {
 | Runtime lifetime | `Runtime` (cheap `Clone`) | RAII destructor |
 | Retained buffer | `runtime.acquire_buffer_with_data(&data, access)` | `runtime.acquire_buffer_with_data(span, access)` |
 | Render pass | `scheme.render_pass(...)` | `scheme.render_pass(...)` (RAII scope) |
-| Readback | `claim.consume(&submission)` | `withdraw.claim(submission).consume()` |
+| Readback | `claim.consume(&submission)` | `submission.take(parcel)` / `submission.take(texture)` |
 
 ## API Reference
 
@@ -188,7 +186,7 @@ try {
 | `goldy::Runtime` / `goldy::Context` | Machine root and submission timeline |
 | `goldy::RecordBuilder` | Partitioned buffer records (ping-pong fields) |
 | `goldy::Scheme` | Retained dependency graph |
-| `goldy::MemoryExchange` | CPU↔GPU withdraw/deposit |
+| `goldy::MemoryExchange` | CPU→GPU deposit |
 | `goldy::SurfaceExchange` | Window swapchain (Win32 / macOS / Wayland) |
 | `goldy::ShaderModule` | Compiled Slang shader |
 | `goldy::RenderPipeline` / `goldy::ComputePipeline` | Graphics/compute pipelines |
@@ -218,15 +216,18 @@ goldy::SchemeSubmission submission = scheme.submit();
 ### MemoryExchange / SurfaceExchange
 
 ```cpp
-goldy::MemoryExchange memory(ctx);
-goldy::WithdrawTransaction withdraw = memory.bind_withdraw_texture(scheme, texture);
 goldy::SchemeSubmission submission = scheme.submit();
-goldy::WithdrawBytes pixels = withdraw.claim(submission).consume();
+goldy::HostView pixels = submission.take(texture);
 
 goldy::SurfaceExchange surface(ctx, window_handle, width, height);
 auto present = surface.bind_render_target(scheme, rt);
 goldy::SchemeSubmission submission = scheme.submit();
 present.claim(submission).consume();
+
+goldy::MemoryExchange memory(ctx);
+auto deposit = memory.bind_deposit(scheme, goldy::DepositTarget::buffer(parcel, capacity));
+deposit << std::vector<uint8_t>{1, 2, 3, 4};
+scheme.submit();
 ```
 
 ### Raw C API
@@ -250,6 +251,10 @@ GoldyRuntime* device = goldy_instance_create_runtime_for_adapter(instance, info.
 goldy_runtime_destroy(device);
 goldy_instance_destroy(instance);
 ```
+
+The `tensor` feature (on by default) adds `goldy_runtime_acquire_tensor`, `goldy_tensor_kernels_*`,
+`goldy_tensor_add`, `goldy_tensor_matmul`, and `goldy_tensor_fill_f32`. C++ wraps them as
+`goldy::Tensor` and `goldy::TensorKernels`.
 
 ## Platform Support
 

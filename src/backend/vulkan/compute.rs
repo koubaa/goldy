@@ -452,19 +452,19 @@ fn register_submit_timeline(ld: &LogicalDevice, value: u64, route_device: bool, 
 pub(super) struct VulkanGpuProfilePool {
     pool: vk::QueryPool,
     query_count: u32,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
     period_ns: f32,
     valid_bits: u32,
 }
 
-fn collect_dispatch_labels_compute(commands: &[GpuCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn collect_dispatch_labels_compute(commands: &[GpuCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for c in commands {
         match c {
             GpuCommand::Dispatch { label, .. }
             | GpuCommand::DispatchIndirect { label, .. }
             | GpuCommand::DispatchBatch { label, .. } => {
-                labels.push(*label);
+                labels.push(label.clone());
             }
             _ => {}
         }
@@ -473,7 +473,7 @@ fn collect_dispatch_labels_compute(commands: &[GpuCommand]) -> (usize, Vec<Optio
     (n, labels)
 }
 
-fn collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<&'static str>>) {
+fn collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for gc in commands {
         if let GraphCommand::Compute(
@@ -482,7 +482,7 @@ fn collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Optio
             | GpuCommand::DispatchBatch { label, .. },
         ) = gc
         {
-            labels.push(*label);
+            labels.push(label.clone());
         }
     }
     let n = labels.len();
@@ -493,7 +493,7 @@ unsafe fn create_vulkan_gpu_profile_pool(
     ld: &LogicalDevice,
     defer_present: bool,
     dispatch_count: usize,
-    dispatch_labels: Vec<Option<&'static str>>,
+    dispatch_labels: Vec<Option<crate::SchemeLabel>>,
 ) -> Result<Option<VulkanGpuProfilePool>> {
     if defer_present || !gpu_profiler::gpu_profile_enabled() || !ld.vk_timestamp_compute_and_graphics {
         return Ok(None);
@@ -561,7 +561,9 @@ pub(super) unsafe fn vulkan_readback_gpu_profile(
         for i in 0..n {
             let si = 2 + 2 * i;
             let ns = vulkan_decode_duration_ns(raw[si], raw[si + 1], profile.valid_bits, profile.period_ns);
-            let label = profile.dispatch_labels[i].unwrap_or("dispatch");
+            let label = profile.dispatch_labels[i]
+                .clone()
+                .unwrap_or_else(|| crate::SchemeLabel::from("dispatch"));
             dispatches.push(DispatchGpuNs { label, gpu_ns: ns });
         }
         gpu_profiler::log_dispatch_timings("vulkan", signal_value, &dispatches);
@@ -1271,6 +1273,9 @@ pub(super) fn submit_with_scope(
                         }
                     }
                 }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("Vulkan backend expected MatMul to be lowered to a stdlib dispatch");
+                }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
                     textures: tex_entries,
@@ -1613,6 +1618,9 @@ pub(super) fn submit_with_scope(
                             .device
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
+                }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");
@@ -2334,6 +2342,9 @@ pub(super) fn submit_graph_with_scope(
                         }
                     }
                 }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("Vulkan backend expected MatMul to be lowered to a stdlib dispatch");
+                }
                 GpuCommand::ResourceBarrier {
                     buffers: buf_entries,
                     textures: tex_entries,
@@ -2662,6 +2673,9 @@ pub(super) fn submit_graph_with_scope(
                             .device
                             .cmd_copy_buffer(cmd, src_buf, dst_buf, std::slice::from_ref(&region));
                     }
+                }
+                GpuCommand::CopyToCpuReadableTwin { .. } => {
+                    anyhow::bail!("CopyToCpuReadableTwin is DX12-only");
                 }
                 GpuCommand::CopyTextureToReadback { src, dst, layout } => {
                     let _tz = tracy_zone!("vk.copy_texture_to_readback");

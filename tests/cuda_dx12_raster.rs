@@ -19,6 +19,7 @@ use raw_window_handle::{
     Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
 };
 use std::num::NonZeroIsize;
+use std::ops::Shr;
 use std::sync::Arc;
 use windows::core::w;
 use windows::Win32::Foundation::HWND;
@@ -218,16 +219,8 @@ fn cuda_raster_rgba8_triangle_readback() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit rgba8 raster");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 4);
     let x = 32usize;
@@ -302,16 +295,8 @@ fn cuda_raster_triangle_readback() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 16);
     // Sample near the centroid of the NDC triangle (slightly above center).
@@ -444,16 +429,8 @@ fn cuda_raster_depth_occlusion_readback() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 16);
     let offset = (32usize * 64 + 32) * 16;
@@ -533,16 +510,8 @@ fn cuda_raster_indexed_triangle_readback() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 16);
     let x = 32usize;
@@ -734,16 +703,8 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 16);
     let x = 32usize;
@@ -758,7 +719,7 @@ fn cuda_compute_generated_vertices_raster_no_dtoh() {
     );
 
     let after = device.cuda_path_stats_for_test().expect("stats");
-    // Texture withdraw uses DtoH for pixel readback; vertex path must not.
+    // Texture host claim uses DtoH for pixel readback; vertex path must not.
     assert!(
         after.shared_vb_binds > before.shared_vb_binds,
         "expected shared VB refresh/bind"
@@ -850,16 +811,8 @@ fn cuda_compute_generated_indices_raster() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     assert_eq!(pixels.len(), 64 * 64 * 16);
     let x = 32usize;
@@ -874,7 +827,7 @@ fn cuda_compute_generated_indices_raster() {
     );
 
     let after = device.cuda_path_stats_for_test().expect("stats");
-    // Texture withdraw uses DtoH for pixel readback; IA path must not.
+    // Texture host claim uses DtoH for pixel readback; IA path must not.
     assert!(
         after.shared_vb_binds > before.shared_vb_binds,
         "expected shared IA refresh/bind for compute-generated indices"
@@ -981,11 +934,8 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
         ];
         deposit.write(0, bytemuck::cast_slice(&verts)).expect("warmup deposit");
         upload.submit().expect("warmup upload");
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &readback)
-            .expect("warmup withdraw");
         let mut submission = scheme.submit().expect("warmup submit");
-        let _ = grant.claim(&mut submission).expect("warmup claim").consume();
+        let _ = (&mut submission >> &readback).take::<u8>().expect("warmup take");
     }
 
     let mut prev_binds = device.cuda_path_stats_for_test().expect("stats").shared_vb_binds;
@@ -999,16 +949,8 @@ fn cuda_deposit_refreshes_shared_vb_each_frame() {
         deposit.write(0, bytemuck::cast_slice(&verts)).expect("deposit write");
         upload.submit().expect("upload submit");
 
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &readback)
-            .expect("withdraw");
         let mut submission = scheme.submit().expect("submit");
-        let pixels = grant
-            .claim(&mut submission)
-            .expect("claim")
-            .consume()
-            .expect("consume")
-            .to_vec();
+        let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
         let binds = device.cuda_path_stats_for_test().expect("stats").shared_vb_binds;
         assert!(
@@ -1089,16 +1031,8 @@ fn cuda_raster_goldy_vertex_color_2d() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     let x = 32usize;
     let y = 28usize;
@@ -1239,16 +1173,8 @@ fn cuda_raster_bindless_buffer_tint() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     let x = 32usize;
     let y = 28usize;
@@ -1348,16 +1274,8 @@ fn cuda_raster_bindless_tint_change_rerecords() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
     let (r, g, b) = sample(&pixels);
     assert!(
         r < 0.25 && g > 0.5 && b < 0.25,
@@ -1382,16 +1300,8 @@ fn cuda_raster_bindless_tint_change_rerecords() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
     let (r, g, b) = sample(&pixels);
     assert!(
         r < 0.25 && g < 0.25 && b > 0.5,
@@ -1494,16 +1404,8 @@ fn cuda_raster_bindless_sampled_texture() {
         pass.finish();
     }
     scheme.copy_to_texture(&rt, &readback).expect("copy_to_texture");
-    let grant = MemoryExchange::new(scheme.context())
-        .bind_withdraw(&mut scheme, &readback)
-        .expect("withdraw");
     let mut submission = scheme.submit().expect("submit");
-    let pixels = grant
-        .claim(&mut submission)
-        .expect("claim")
-        .consume()
-        .expect("consume")
-        .to_vec();
+    let pixels = (&mut submission >> &readback).take::<u8>().expect("host take").to_vec();
 
     let x = 32usize;
     let y = 28usize;

@@ -9,8 +9,9 @@ use goldy::{
     Buffer, BufferFlags, BufferKind, Color, ComputePipeline, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, PrimitiveTopology, RenderPipeline, RenderPipelineDesc,
     RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad,
-    Texture, TextureFormat, Transaction, VertexBufferLayout, WithdrawTransaction,
+    Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -29,8 +30,7 @@ const STAR_TYPE_GALAXY: f32 = 1.0;
 const STAR_TYPE_QUASAR: f32 = 2.0;
 const STAR_TYPE_WHITE_DWARF: f32 = 3.0;
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Star {
     x: f32,
     y: f32,
@@ -38,16 +38,11 @@ struct Star {
     star_type: f32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct StarfieldParams {
     speed: f32,
     frame: f32,
-    _pad1: f32,
-    _pad2: f32,
 }
-impl goldy::StructuredBufferElement for Star {}
-impl goldy::StructuredBufferElement for StarfieldParams {}
 
 static mut SEED: u32 = 12345;
 fn rand_f32() -> f32 {
@@ -99,7 +94,6 @@ struct RenderState {
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
     present: Option<Transaction>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     compute_pipeline: ComputePipeline,
@@ -137,15 +131,15 @@ impl RenderState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -198,14 +192,13 @@ impl RenderState {
                 &self.params_buffer,
                 &self.scene_rt,
             );
-            if let Ok((present, withdraw)) = Self::bind_frame(
+            if let Ok(present) = Self::bind_frame(
                 &mut scheme,
                 &self.scene_rt,
                 self.surface.as_ref(),
                 self.readback.as_ref(),
             ) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scheme = scheme;
             }
         }
@@ -239,8 +232,16 @@ impl RenderState {
             )
         };
 
-        let compute_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_update.slang"))?;
-        let render_shader = ShaderModule::from_slang(&device, include_str!("../shaders/starfield_render.slang"))?;
+        let compute_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/starfield_update.slang"),
+            &[Star::GPU_TYPE, StarfieldParams::GPU_TYPE],
+        )?;
+        let render_shader = ShaderModule::from_slang_with_gpu_types(
+            &device,
+            include_str!("../shaders/starfield_render.slang"),
+            &[Star::GPU_TYPE],
+        )?;
 
         let mut stars = Vec::with_capacity(NUM_STARS as usize);
         for _ in 0..NUM_STARS {
@@ -280,12 +281,12 @@ impl RenderState {
             &params_buffer,
             &scene_rt,
         );
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         let mut upload_scheme = Scheme::new(&ctx);
         let params_deposit = MemoryExchange::new(&ctx).bind_deposit(
             &mut upload_scheme,
-            DepositTarget::buffer(&params_buffer, std::mem::size_of::<StarfieldParams>() as u64),
+            DepositTarget::buffer_elements::<StarfieldParams>(&params_buffer, 1),
         )?;
 
         println!("Created starfield with {NUM_STARS} stars (Scheme + Present)");
@@ -298,7 +299,6 @@ impl RenderState {
             capture,
             readback,
             present,
-            withdraw,
             scheme,
             scene_rt,
             compute_pipeline,
@@ -320,18 +320,18 @@ impl RenderState {
         let params = StarfieldParams {
             speed: self.speed,
             frame: self.frame_count,
-            _pad1: 0.0,
-            _pad2: 0.0,
         };
 
-        self.params_deposit.write(0, bytemuck::bytes_of(&params))?;
+        (&self.params_deposit << &params)?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 

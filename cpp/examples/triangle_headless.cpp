@@ -1,5 +1,5 @@
 /**
- * Headless triangle  Scheme render pass + MemoryExchange withdraw (no GLFW).
+ * Headless triangle ? Scheme render pass + host claim (no GLFW).
  *
  * Mirrors python/examples/triangle_headless.py and ffi-client triangle_headless.
  * Used on headless Linux CI (lavapipe container has no Wayland display).
@@ -89,7 +89,7 @@ int main() {
             GOLDY_TEXTURE_KIND_DIRECT, copy_readback_flags());
 
         goldy::Scheme scheme(ctx);
-        goldy::SchemeRenderTargetLease rt = scheme.lease_render_target(
+        goldy::SchemeRenderTargetLease rt = ctx.lease_render_target(
             kWidth, kHeight, GOLDY_TEXTURE_FORMAT_RGBA8_UNORM);
         {
             auto pass = scheme.render_pass("triangle", rt, goldy::TargetLoad::clear(goldy::Color::black()));
@@ -100,11 +100,9 @@ int main() {
         }
 
         scheme.copy_to_texture(rt, readback);
-        goldy::MemoryExchange memory(ctx);
-        goldy::WithdrawTransaction withdraw = memory.bind_withdraw_texture(scheme, readback);
         goldy::SchemeSubmission submission = scheme.submit();
-        goldy::WithdrawBytes bytes = withdraw.claim(submission).consume();
-        const auto pixels = bytes.to_vector();
+        goldy::HostView view = submission.take(readback);
+        const auto pixels = view.to_vector();
 
         const bool has_lit_pixel = std::any_of(pixels.begin(), pixels.end(), [](uint8_t b) { return b > 0; });
         if (!has_lit_pixel) {

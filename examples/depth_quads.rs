@@ -5,13 +5,11 @@
 //!
 //! Run with: cargo run --example depth_quads
 
-use bytemuck::{Pod, Zeroable};
 use goldy::{
     Buffer, BufferFlags, BufferKind, Color, CompareFunction, DepositTarget, DepositTransaction, DepthFormat,
     DepthStencilState, Instance, Lease, LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline,
     RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange,
-    TargetLoad, Texture, TextureFormat, Transaction, VertexAttribute, VertexBufferLayout, VertexFormat,
-    WithdrawTransaction,
+    TargetLoad, Texture, TextureFormat, Transaction, VertexBufferLayout,
 };
 use std::sync::Arc;
 use winit::{
@@ -24,13 +22,11 @@ use winit::{
 mod common;
 use common::CaptureDump;
 
-#[derive(Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
+#[goldy::gpu]
 struct DepthVertex {
     position: [f32; 3],
     color: [f32; 4],
 }
-impl goldy::StructuredBufferElement for DepthVertex {}
 
 impl DepthVertex {
     const fn new(x: f32, y: f32, z: f32, r: f32, g: f32, b: f32) -> Self {
@@ -42,21 +38,9 @@ impl DepthVertex {
 }
 
 fn depth_vertex_layout() -> VertexBufferLayout {
-    VertexBufferLayout {
-        stride: std::mem::size_of::<DepthVertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x4,
-                offset: 12,
-            },
-        ],
-    }
+    DepthVertex::GPU_TYPE
+        .vertex_buffer_layout()
+        .expect("depth vertex layout")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,14 +60,12 @@ struct App {
     shader: Option<ShaderModule>,
     warm_parcel: Option<Buffer>,
     cool_parcel: Option<Buffer>,
-    upload_scheme: Option<Scheme>,
     warm_deposit: Option<DepositTransaction>,
     cool_deposit: Option<DepositTransaction>,
     surface: Option<SurfaceExchange>,
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
     scene_rt: Option<Lease<LeaseRenderTarget>>,
     scheme: Option<Scheme>,
     window: Option<Arc<Window>>,
@@ -101,14 +83,12 @@ impl App {
             shader: None,
             warm_parcel: None,
             cool_parcel: None,
-            upload_scheme: None,
             warm_deposit: None,
             cool_deposit: None,
             surface: None,
             present: None,
             capture: None,
             readback: None,
-            withdraw: None,
             scene_rt: None,
             scheme: None,
             window: None,
@@ -157,20 +137,32 @@ impl App {
         pass.finish();
     }
 
+    fn bind_uploads(
+        ctx: &goldy::Context,
+        scheme: &mut Scheme,
+        warm_parcel: &Buffer,
+        cool_parcel: &Buffer,
+    ) -> anyhow::Result<(DepositTransaction, DepositTransaction)> {
+        let memory = MemoryExchange::new(ctx);
+        let warm_deposit = memory.bind_deposit(scheme, DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()))?;
+        let cool_deposit = memory.bind_deposit(scheme, DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()))?;
+        Ok((warm_deposit, cool_deposit))
+    }
+
     fn bind_frame(
         scheme: &mut Scheme,
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -209,36 +201,22 @@ impl App {
 
         let mut scheme = Scheme::new(&ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))?;
+        let (warm_deposit, cool_deposit) = Self::bind_uploads(&ctx, &mut scheme, &warm_parcel, &cool_parcel)?;
         Self::record_pass(&mut scheme, &pipeline, &warm_parcel, &cool_parcel, &scene_rt);
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, surface.as_ref(), readback.as_ref())?;
 
         self.ctx = Some(ctx);
-        let ctx = self.ctx.as_ref().unwrap();
         self.device = Some(device);
         self.shader = Some(shader);
         self.pipeline = Some(pipeline);
         self.warm_parcel = Some(warm_parcel);
         self.cool_parcel = Some(cool_parcel);
-        let warm_parcel = self.warm_parcel.as_ref().unwrap();
-        let cool_parcel = self.cool_parcel.as_ref().unwrap();
-        let mut upload_scheme = Scheme::new(ctx);
-        let memory = MemoryExchange::new(ctx);
-        let warm_deposit = memory.bind_deposit(
-            &mut upload_scheme,
-            DepositTarget::buffer(warm_parcel, warm_parcel.byte_size()),
-        )?;
-        let cool_deposit = memory.bind_deposit(
-            &mut upload_scheme,
-            DepositTarget::buffer(cool_parcel, cool_parcel.byte_size()),
-        )?;
-        self.upload_scheme = Some(upload_scheme);
         self.warm_deposit = Some(warm_deposit);
         self.cool_deposit = Some(cool_deposit);
         self.surface = surface;
         self.present = present;
         self.capture = capture;
         self.readback = readback;
-        self.withdraw = withdraw;
         self.scene_rt = Some(scene_rt);
         self.scheme = Some(scheme);
         Ok(())
@@ -267,23 +245,17 @@ impl App {
             ));
         }
 
-        let upload = self.upload_scheme.as_mut().unwrap();
-        self.warm_deposit
-            .as_ref()
-            .unwrap()
-            .write(0, bytemuck::cast_slice(&warm_verts))?;
-        self.cool_deposit
-            .as_ref()
-            .unwrap()
-            .write(0, bytemuck::cast_slice(&cool_verts))?;
-        upload.submit()?;
+        (self.warm_deposit.as_ref().unwrap() << warm_verts.as_slice())?;
+        (self.cool_deposit.as_ref().unwrap() << cool_verts.as_slice())?;
 
         let scheme = self.scheme.as_mut().unwrap();
         let mut submission = scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
 
@@ -319,14 +291,17 @@ impl App {
                     if let Ok(rt) =
                         ctx.lease_render_target(width.max(1), height.max(1), format, Some(DepthFormat::Depth32Float))
                     {
-                        Self::record_pass(&mut scheme, pipeline, warm, cool, &rt);
-                        if let Ok((present, withdraw)) =
-                            Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
-                        {
-                            self.present = present;
-                            self.withdraw = withdraw;
-                            self.scheme = Some(scheme);
-                            self.scene_rt = Some(rt);
+                        if let Ok((warm_deposit, cool_deposit)) = Self::bind_uploads(ctx, &mut scheme, warm, cool) {
+                            Self::record_pass(&mut scheme, pipeline, warm, cool, &rt);
+                            if let Ok(present) =
+                                Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
+                            {
+                                self.warm_deposit = Some(warm_deposit);
+                                self.cool_deposit = Some(cool_deposit);
+                                self.present = present;
+                                self.scheme = Some(scheme);
+                                self.scene_rt = Some(rt);
+                            }
                         }
                     }
                 }

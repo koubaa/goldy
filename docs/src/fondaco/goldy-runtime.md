@@ -40,13 +40,14 @@ That split is a substrate artifact, not a machine requirement.
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | **Shipped** (internal) |
 | Gate | Submission gate, `Context::boundary_crossed` | **Shipped** |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | **Shipped** |
-| Exchange claim | `Transaction` → `Claim` → `consume` / `discard` (deposit claims are Runtime-internal) | **Shipped** |
+| Exchange claim | Present: `(&mut submission >> &transaction).take()?`; deposit: `(&deposit << &data)?` tenders this submission (internal claim at submit) | **Shipped** |
 | Warehouse / budget | `BudgetPolicy`, `VramAllocator` | **Shipped** (partial) |
 | Growable buffers | `Buffer::resize_to`, stable handles | **Shipped** |
 | Retained resubmit | Clean schemes replay with zero re-record | **Shipped** |
 | Compute-to-surface | `SurfaceExchange::bind_destination` | **Shipped** |
 | Pipelined frames | `FrameOrchestrator`, surface depth | **Shipped** |
 | Yielding scripts / `$yield` | Slang intrinsic + petition servicing | **Designed** |
+| Sub-scheme inclusion | `Scheme::include` / `Scheme::group` — snapshot copy of a child description | **Shipped** |
 | Scheme fusion (mega-kernel) | Merge adjacent dispatches | **Designed** |
 | Raster pass as fused draws | One `RenderPass` node per framebuffer epoch | **Shipped** (finer per-draw nodes: **Designed**) |
 | Scheme splitting (wavefront) | Split at yield points | **Designed** |
@@ -124,23 +125,27 @@ Budget enforcement keys on **committed**. **Resident** enters reactively via OS 
 ```rust
 let transaction = surface_exchange.bind_render_target(&mut scheme, &scene_rt)?;
 let mut submission = scheme.submit()?;
-let claim = transaction.claim(&mut submission)?;
-claim.consume()?; // present
+(&mut submission >> &transaction).take()?; // present
 ```
 
 - Binding does not acquire a drawable; acquire runs at submit when the partition needs it
-- `Claim::consume` is terminal
+- `(&mut submission >> &transaction).take()` is sugar for `transaction.claim(&mut submission)?.consume()`; the `&mut` borrow leaves other claims untouched
+- `Claim::consume` / `Claim::discard` remain the canonical settlement verbs
 - The program never passes raw GPU addresses to the compositor
 
-**Shipped** CPU readback: `MemoryExchange` with `WithdrawTransaction` / `WithdrawClaim`. See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
+**Shipped** CPU readback: host claims via `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`). See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
-**Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `DepositTransaction::write` prepares an occurrence; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
+**Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `(&deposit << &data)?` (or `DepositTransaction::write`) prepares an occurrence for this submission; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
 
 **Designed**: video-encoder exchange (foreign read continues after enqueue).
 
 ## 7. Schemes and GraphIR
 
-**Shipped.** Public type: `Scheme`. Internally Goldy holds **GraphIR** — nodes, ownership-derived edges, wave / partition analysis, retention fingerprints.
+**Shipped.** Public type: `Scheme`. Internally Goldy holds **GraphIR** — nodes, ownership-derived edges, group provenance, wave / partition analysis, retention fingerprints.
+
+`Scheme::include` copies a child's description into the parent as one group (snapshot: later mutation of the child does not affect the parent; the child stays independently submittable). `Scheme::group` is sugar: a temporary child on the same `Context`, then include. Group-level `.after(prior)` expands to node-pair precedences when the schedule cache is rebuilt — never on the clean submit path.
+
+**Restrictions** (all `GoldyError::Validation` at include time; the parent is left untouched): same `Context`; no pending record errors; no CPU dispatch, deposit, present/swapchain, yielding, or transient nodes; all child stamps alive (`StaleResource` otherwise).
 
 On `Scheme::submit`:
 
@@ -221,7 +226,8 @@ Capability queries report backend, residency model, resize cost, zero-copy readb
 | Parcel | `Buffer` / `Texture` handle |
 | Merchant | Program |
 | Exchange | `SurfaceExchange`, `MemoryExchange` |
-| Claim (exchange) | `Claim`, `WithdrawClaim`; deposit claims are Runtime-internal |
+| Claim (exchange) | `Claim`; deposit claims are Runtime-internal |
+| Host claim | `PendingHostRead`, `HostView` |
 | Gate | Fence epoch, `boundary_crossed` |
 | Warehouse | `BudgetPolicy`, `VramAllocator` |
 | Ledger | Cross-submit sync analysis |

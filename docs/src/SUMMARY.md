@@ -11,6 +11,7 @@
 # Programming Model
 
 - [Parcels](./programming-model/parcels.md)
+- [Schemes](./programming-model/schemes.md)
 - [Virtual Entry Points](./programming-model/virtual-entry-points.md)
 - [Rust Compute Kernels](./programming-model/rust-kernels.md)
 - [CPU Dispatches](./programming-model/cpu-dispatch.md)
@@ -20,6 +21,8 @@
 # Compute Workflows
 
 - [Settlement](./compute/settlement.md)
+- [Tensor Algebra](./compute/tensor.md)
+- [Matrix Multiply](./compute/matmul.md)
 - [Pipelined Frames](./compute/pipelined-frames.md)
 - [Compute to Surface](./compute/compute-to-surface.md)
 
@@ -70,6 +73,7 @@
   - [game_of_life](./examples/game_of_life.md)
   - [compute_to_surface](./examples/compute_to_surface.md)
   - [ray_query](./examples/ray_query.md)
+  - [tensor_algebra](./examples/tensor_algebra.md)
   - [solid_cube](./examples/solid_cube.md)
   - [spinning_cube](./examples/spinning_cube.md)
   - [depth_quads](./examples/depth_quads.md)

@@ -309,7 +309,7 @@ struct PointState {
 
 /// Host-driven executor recorded in place of a yielding dispatch.
 pub(crate) struct YieldDriver {
-    label: &'static str,
+    label: crate::SchemeLabel,
     ctx: Context,
     pipelines: Arc<YieldPipelines>,
     prologue: PipelineParts,
@@ -327,7 +327,7 @@ pub(crate) struct YieldDriver {
 
 /// Record-time inputs collected by [`crate::SchemeNodeBuilder`].
 pub(crate) struct YieldRecord {
-    pub label: &'static str,
+    pub label: crate::SchemeLabel,
     pub pipelines: Arc<YieldPipelines>,
     pub prologue: PipelineParts,
     /// One entry per `with_parcel` call; `None` when the bindable was not a buffer parcel.
@@ -424,7 +424,7 @@ impl YieldDriver {
                 elems.max(1) * stride as u64,
                 BufferKind::Scattered,
                 Some(stride),
-                BufferFlags::empty(),
+                BufferFlags::CPU_READABLE,
                 None,
             )
             .map_err(|e| format!("yield_point: allocating {what} for `{label}`: {e}"))
@@ -704,9 +704,8 @@ impl YieldDriver {
         set: usize,
     ) -> Result<RoundOutcome, GoldyError> {
         let mut sub = Scheme::new(&self.ctx);
-        let mx = MemoryExchange::new(&self.ctx);
         sub.clear_parcel(self.cnt.whole(), 0, 0)?;
-        let mut node = sub.node_from_parts(self.label, &self.prologue);
+        let mut node = sub.node_from_parts(self.label.clone(), &self.prologue);
         for (p, access) in &self.user_parcels {
             node = node.with_parcel(p, *access);
         }
@@ -726,9 +725,8 @@ impl YieldDriver {
         }
         node = node.with_param(base);
         node.dispatch(groups, gy, gz);
-        let withdraws = self.bind_withdraws(&mut sub, &mx, &self.prologue_yields_to, set)?;
         let mut submission = sub.submit()?;
-        withdraws.claim(&mut submission, self.points.len())
+        self.take_round(&mut submission, &self.prologue_yields_to, set)
     }
 
     /// Service `pending` continuations from mailbox set `set` and resume them, writing
@@ -751,7 +749,7 @@ impl YieldDriver {
                 Handler::Cpu { payload_bytes, run, .. } => {
                     let bytes = payloads[i].as_deref().ok_or_else(|| {
                         GoldyError::Backend(anyhow::anyhow!(
-                            "yield `{}`: payload mailbox was not withdrawn",
+                            "yield `{}`: payload mailbox was not host-claimed",
                             self.continuation(i).fn_name
                         ))
                     })?;
@@ -824,50 +822,42 @@ impl YieldDriver {
         }
 
         let targets: Vec<usize> = targets.into_iter().collect();
-        let withdraws = self.bind_withdraws(&mut sub, &mx, &targets, next)?;
         let mut submission = sub.submit()?;
-        withdraws.claim(&mut submission, self.points.len())
+        self.take_round(&mut submission, &targets, next)
     }
 
-    /// Withdraw the counters and, for CPU-handled `targets`, their payload mailboxes in `set`.
-    fn bind_withdraws(
+    /// Host-claim the counters and, for CPU-handled `targets`, their payload mailboxes in `set`.
+    fn take_round(
         &self,
-        sub: &mut Scheme,
-        mx: &MemoryExchange,
+        submission: &mut crate::Submission,
         targets: &[usize],
         set: usize,
-    ) -> Result<RoundWithdraws, GoldyError> {
-        let counts = mx.bind_withdraw(sub, self.cnt.whole())?;
-        let mut payloads = Vec::new();
+    ) -> Result<RoundOutcome, GoldyError> {
+        let n_points = self.points.len();
+        let counts_view = (&mut *submission >> self.cnt.whole()).take::<u32>()?;
+        if counts_view.len() < n_points {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "yield counter parcel is shorter than the number of yield points"
+            )));
+        }
+        let counts = counts_view[..n_points].to_vec();
+        drop(counts_view);
+        let mut payloads: Vec<Option<Vec<u8>>> = (0..n_points).map(|_| None).collect();
         for &t in targets {
             if matches!(self.points[t].handler, Handler::Cpu { .. }) {
-                payloads.push((t, mx.bind_withdraw(sub, self.points[t].pay[set].whole())?));
+                payloads[t] = Some(
+                    (&mut *submission >> self.points[t].pay[set].whole())
+                        .take::<u8>()?
+                        .into_vec(),
+                );
             }
-        }
-        Ok(RoundWithdraws { counts, payloads })
-    }
-}
-
-/// Per-continuation yield counts and, for CPU-handled mailboxes, the withdrawn payload bytes.
-type RoundOutcome = (Vec<u32>, Vec<Option<Vec<u8>>>);
-
-struct RoundWithdraws {
-    counts: crate::WithdrawTransaction,
-    payloads: Vec<(usize, crate::WithdrawTransaction)>,
-}
-
-impl RoundWithdraws {
-    fn claim(self, submission: &mut crate::Submission, n_points: usize) -> Result<RoundOutcome, GoldyError> {
-        let bytes = self.counts.claim(submission)?.consume()?;
-        let counts: Vec<u32> = bytemuck::cast_slice(&bytes[..n_points * 4]).to_vec();
-        drop(bytes);
-        let mut payloads: Vec<Option<Vec<u8>>> = (0..n_points).map(|_| None).collect();
-        for (t, w) in self.payloads {
-            payloads[t] = Some(w.claim(submission)?.consume()?.into_vec());
         }
         Ok((counts, payloads))
     }
 }
+
+/// Per-continuation yield counts and, for CPU-handled mailboxes, the host-claimed payload bytes.
+type RoundOutcome = (Vec<u32>, Vec<Option<Vec<u8>>>);
 
 /// Type-erased driver entry used by the CPU dispatch machinery.
 pub(crate) fn driver_main(

@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 #[path = "common/submission.rs"]
 mod submission;
 
@@ -230,15 +228,9 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, buf.whole())
-            .expect("withdraw");
+
         let mut frame = scheme.submit().expect("submit");
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("grant consume");
+        let loan = (&mut frame >> buf.whole()).take::<u8>().expect("host take");
         let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
@@ -312,15 +304,9 @@ mod imp {
             .node("n0", &pipeline)
             .with_parcel(&buf, NodeAccess::Write)
             .dispatch(1, 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, buf.whole())
-            .expect("withdraw");
+
         let mut frame = scheme.submit().expect("submit");
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("grant consume");
+        let loan = (&mut frame >> buf.whole()).take::<u8>().expect("host take");
         let result: &[f32] = bytemuck::cast_slice(&loan);
 
         let eps = 1e-5f32;
@@ -384,15 +370,11 @@ mod imp {
             .with_parcel(&buffers[0], NodeAccess::Read)
             .with_parcel(&buffers[NUM_BUFFERS - 1], NodeAccess::Write)
             .dispatch(workgroups, 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, buffers[NUM_BUFFERS - 1].whole())
-            .expect("withdraw");
+
         let mut frame = scheme.submit().expect("submit");
-        let loan = grant
-            .claim(&mut frame)
-            .expect("claim")
-            .consume()
-            .expect("grant consume");
+        let loan = (&mut frame >> buffers[NUM_BUFFERS - 1].whole())
+            .take::<u8>()
+            .expect("host take");
         let result: &[u32] = bytemuck::cast_slice(&loan);
         for i in (0..ELEM_COUNT).step_by(1024) {
             assert_eq!(

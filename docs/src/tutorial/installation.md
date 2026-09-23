@@ -26,6 +26,7 @@ cargo add goldy
 | `dx12` | yes | DirectX 12 backend (Windows); implies `graphics` and `gpu` |
 | `metal` | yes | Metal Tier 2+ backend (macOS); implies `graphics` and `gpu` |
 | `graphics` | yes | Raster pipelines, render targets, surfaces, and presentation |
+| `tensor` | yes | Dense tensor algebra over parcels (independent of `graphics`; not an ML framework) |
 | `gpu` | yes | Implied by every real GPU backend (not mock). Do not enable alone. |
 | `cuda` | no | CUDA backend (in progress; NVIDIA compute; implies `gpu`, not `graphics`) |
 | `webgpu` | no | WebGPU backend (in progress; via wgpu; implies `graphics` and `gpu`) |

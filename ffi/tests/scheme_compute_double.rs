@@ -7,12 +7,11 @@ mod common;
 use common::{last_ffi_message, open_device};
 use goldy_ffi::{
     goldy_buffer_destroy, goldy_buffer_field, goldy_compute_pipeline_create, goldy_compute_pipeline_destroy,
-    goldy_context_create, goldy_context_destroy, goldy_instance_destroy, goldy_memory_exchange_bind_withdraw,
-    goldy_memory_exchange_create, goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_runtime_acquire_buffer,
-    goldy_runtime_destroy, goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch,
-    goldy_scheme_compute_node_with_parcel, goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len,
-    goldy_scheme_submission_destroy, goldy_scheme_submit, goldy_shader_create, goldy_shader_destroy,
-    goldy_withdraw_transaction_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResult,
+    goldy_context_create, goldy_context_destroy, goldy_instance_destroy, goldy_memory_exchange_create,
+    goldy_memory_exchange_destroy, goldy_parcel_destroy, goldy_runtime_acquire_buffer, goldy_runtime_destroy,
+    goldy_scheme_compute_node_begin, goldy_scheme_compute_node_dispatch, goldy_scheme_compute_node_with_parcel,
+    goldy_scheme_create, goldy_scheme_destroy, goldy_scheme_len, goldy_scheme_submission_destroy, goldy_scheme_submit,
+    goldy_shader_create, goldy_shader_destroy, GoldyBufferKind, GoldyNodeAccess, GoldyResult,
 };
 use std::ffi::CString;
 
@@ -133,8 +132,6 @@ fn scheme_compute_double_then_add_ten() {
 
         let memory = goldy_memory_exchange_create(ctx);
         assert!(!memory.is_null(), "{}", last_ffi_message());
-        let withdraw = goldy_memory_exchange_bind_withdraw(memory, scheme, dst_parcel);
-        assert!(!withdraw.is_null(), "{}", last_ffi_message());
 
         let mut submission = std::ptr::null_mut();
         assert_eq!(
@@ -145,7 +142,7 @@ fn scheme_compute_double_then_add_ten() {
         );
         assert!(!submission.is_null());
 
-        let readback = common::withdraw_claim_copy(withdraw, submission);
+        let readback = common::take_parcel_copy(submission, dst_parcel);
         goldy_scheme_submission_destroy(submission);
 
         let values: &[u32] = std::slice::from_raw_parts(
@@ -156,8 +153,6 @@ fn scheme_compute_double_then_add_ten() {
             let expected = i as u32 * 2 + 10;
             assert_eq!(v, expected, "index {i}: expected {expected}, got {v}");
         }
-
-        goldy_withdraw_transaction_destroy(withdraw);
         goldy_memory_exchange_destroy(memory);
         goldy_scheme_destroy(scheme);
         goldy_compute_pipeline_destroy(add_pipeline);

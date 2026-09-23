@@ -10,8 +10,9 @@ use goldy::{
     types::{BackendType, BufferFlags},
     AccelInstance, AccelerationStructure, Buffer, BufferKind, ComputePipeline, DepositTarget, DepositTransaction,
     Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
-    SurfaceConfig, SurfaceExchange, Texture, Transaction, WithdrawTransaction,
+    SurfaceConfig, SurfaceExchange, Texture, Transaction,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
@@ -27,12 +28,6 @@ use common::CaptureDump;
 const RAY_SHADER: &str = r#"
 import goldy_exp;
 
-struct Uniforms {
-    uint width;
-    uint height;
-    float time;
-    float _padding;
-};
 
 [goldy_compute]
 [numthreads(8, 8, 1)]
@@ -65,15 +60,12 @@ void cs_main(BufRO<Uniforms> uniforms_buf, Accel scene, DirectSpatial<float4> ou
 }
 "#;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct Uniforms {
     width: u32,
     height: u32,
     time: f32,
-    _padding: f32,
 }
-impl goldy::StructuredBufferElement for Uniforms {}
 
 const INITIAL_WIDTH: u32 = 800;
 const INITIAL_HEIGHT: u32 = 600;
@@ -140,7 +132,7 @@ fn warm_gpu() -> Result<GpuWarmup> {
         std::process::exit(0);
     }
     let ctx = device.create_context()?;
-    let shader = ShaderModule::from_slang(&device, RAY_SHADER)?;
+    let shader = ShaderModule::from_slang_with_gpu_types(&device, RAY_SHADER, &[Uniforms::GPU_TYPE])?;
     let compute_pipeline = ComputePipeline::new(&device, &shader)?;
     let positions: [[f32; 3]; 3] = [[0.0, 0.5, 0.0], [-0.7, -0.5, 0.0], [0.7, -0.5, 0.0]];
     let verts =
@@ -170,7 +162,6 @@ struct RenderState {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     compute_pipeline: ComputePipeline,
     verts: Buffer,
@@ -195,7 +186,7 @@ fn record_scheme(
     height: u32,
     surface: Option<&SurfaceExchange>,
     readback: Option<&Texture>,
-) -> Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+) -> Result<Option<Transaction>> {
     scheme.build_blas(blas, verts.whole(), 3, 12, None)?;
     let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     scheme.build_tlas(
@@ -217,7 +208,7 @@ fn record_scheme(
             .with_parcel(tlas, NodeAccess::Read)
             .with_present(&lease)
             .dispatch(wg_x, wg_y, 1);
-        Ok((Some(present), None))
+        Ok(Some(present))
     } else {
         let target = readback.expect("capture readback");
         scheme
@@ -226,8 +217,8 @@ fn record_scheme(
             .with_parcel(tlas, NodeAccess::Read)
             .with_parcel(target, NodeAccess::Write)
             .dispatch(wg_x, wg_y, 1);
-        let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, target)?;
-        Ok((None, Some(withdraw)))
+
+        Ok(None)
     }
 }
 
@@ -241,7 +232,7 @@ fn output_size(state: &RenderState) -> (u32, u32) {
 
 fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     let mut scheme = Scheme::new(&state.ctx);
-    let (present, withdraw) = record_scheme(
+    let present = record_scheme(
         &mut scheme,
         &state.compute_pipeline,
         &state.uniform_buffer,
@@ -255,7 +246,6 @@ fn rebuild_scheme(state: &mut RenderState, width: u32, height: u32) {
     )
     .expect("failed to record scheme");
     state.present = present;
-    state.withdraw = withdraw;
     state.scheme = scheme;
 }
 
@@ -290,13 +280,12 @@ impl App {
                 width,
                 height,
                 time: 0.0,
-                _padding: 0.0,
             }],
             BufferKind::Scattered,
         )?;
 
         let mut scheme = Scheme::new(&ctx);
-        let (present, withdraw) = record_scheme(
+        let present = record_scheme(
             &mut scheme,
             &compute_pipeline,
             &uniform_buffer,
@@ -322,7 +311,6 @@ impl App {
             present,
             capture,
             readback,
-            withdraw,
             scheme,
             compute_pipeline,
             verts,
@@ -427,15 +415,16 @@ fn render_frame(state: &mut RenderState) -> Result<()> {
             .as_ref()
             .map(CaptureDump::time)
             .unwrap_or_else(|| state.start_time.elapsed().as_secs_f32()),
-        _padding: 0.0,
     };
-    state.uniform_deposit.write(0, bytemuck::bytes_of(&uniforms))?;
+    (&state.uniform_deposit << &uniforms)?;
     state.upload_scheme.submit()?;
     let mut submission = state.scheme.submit()?;
     if let Some(present) = &state.present {
-        present.claim(&mut submission)?.consume()?;
+        (&mut submission >> present).take()?;
     } else {
-        let pixels = state.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+        let pixels = (&mut submission >> state.readback.as_ref().unwrap())
+            .take::<u8>()?
+            .to_vec();
         state.capture.as_mut().unwrap().write_rgba(&pixels)?;
     }
     Ok(())

@@ -155,7 +155,7 @@ pub(crate) struct SitePredictor {
     provenance: Arc<ShaderProvenance>,
     /// `[goldy_compute]` function name the bake macros are scoped to.
     entry: String,
-    label: &'static str,
+    label: crate::SchemeLabel,
     /// Scalar words seen at the previous submit.
     last: Vec<u32>,
     /// Per slot: consecutive clean submits the word has held its current value.
@@ -176,7 +176,7 @@ impl SitePredictor {
         universal: ComputePipelineHandle,
         provenance: Arc<ShaderProvenance>,
         entry: String,
-        label: &'static str,
+        label: crate::SchemeLabel,
         slots: &[u32],
         policy: &SpecializationPolicy,
     ) -> Self {
@@ -299,7 +299,7 @@ impl SchemePredictor {
         node: u32,
         universal: ComputePipelineHandle,
         provenance: &Arc<ShaderProvenance>,
-        label: &'static str,
+        label: crate::SchemeLabel,
         slots: &[u32],
     ) {
         if let Some(old) = self.sites.remove(&node) {
@@ -320,6 +320,26 @@ impl SchemePredictor {
             &self.policy,
         );
         self.sites.insert(node, site);
+    }
+
+    /// Re-register child's tracked dispatch sites at `node_offset` in the parent IR.
+    pub(crate) fn copy_sites_from(&mut self, child: &Self, node_offset: u32) {
+        let snapshot: Vec<_> = child
+            .sites
+            .iter()
+            .map(|(&idx, site)| {
+                (
+                    idx + node_offset,
+                    site.universal,
+                    Arc::clone(&site.provenance),
+                    site.label.clone(),
+                    site.last.clone(),
+                )
+            })
+            .collect();
+        for (idx, universal, provenance, label, slots) in snapshot {
+            self.register_site(idx, universal, &provenance, label, &slots);
+        }
     }
 
     /// Whether `node` currently runs a predictor-chosen variant instead of the caller's pipeline.
@@ -372,7 +392,7 @@ impl SchemePredictor {
             self.events.demotions += 1;
             tracing::debug!(
                 node,
-                label = site.label,
+                label = %site.label,
                 slot,
                 baked = ?demoted.baked,
                 "specialization: demoted (baked param changed)"
@@ -577,14 +597,16 @@ impl SchemePredictor {
                             })
                         }
                         // Evicted between insert and poll (cache smaller than the working set).
-                        None => tracing::debug!(node, label = site.label, "specialization: variant evicted before use"),
+                        None => {
+                            tracing::debug!(node, label = %site.label, "specialization: variant evicted before use")
+                        }
                     }
                 }
                 Err(err) => {
                     site.failures += 1;
                     tracing::warn!(
                         node,
-                        label = site.label,
+                        label = %site.label,
                         baked = ?job.baked,
                         failures = site.failures,
                         %err,
@@ -594,7 +616,7 @@ impl SchemePredictor {
                         site.pinned = true;
                         tracing::warn!(
                             node,
-                            label = site.label,
+                            label = %site.label,
                             "specialization: site pinned to universal pipeline"
                         );
                         return NodeChange::None;
@@ -615,7 +637,7 @@ impl SchemePredictor {
             }
             let handle = next.pipeline.handle;
             events.promotions += 1;
-            tracing::debug!(node, label = site.label, baked = ?next.baked, "specialization: promoted");
+            tracing::debug!(node, label = %site.label, baked = ?next.baked, "specialization: promoted");
             site.promoted = Some(next);
             return NodeChange::Bind(handle);
         }
@@ -635,7 +657,7 @@ impl SchemePredictor {
                     }
                     None => {
                         events.warms += 1;
-                        tracing::debug!(node, label = site.label, baked = ?target, "specialization: warming");
+                        tracing::debug!(node, label = %site.label, baked = ?target, "specialization: warming");
                         site.job = Some(spawn_compile(device, site, target, variants));
                     }
                 }
@@ -668,7 +690,7 @@ fn spawn_compile(
     let device = device.clone();
     let provenance = Arc::clone(&site.provenance);
     let entry = site.entry.clone();
-    let label = site.label;
+    let label = site.label.clone();
     let variants = Arc::clone(variants);
     let worker_cancel = Arc::clone(&cancel);
     let worker_outcome = Arc::clone(&outcome);
@@ -677,7 +699,7 @@ fn spawn_compile(
     let thread = std::thread::Builder::new()
         .name("goldy-specialize".into())
         .spawn(move || {
-            let result = compile_variant(&device, &provenance, &entry, label, &worker_baked, &worker_cancel);
+            let result = compile_variant(&device, &provenance, &entry, &label, &worker_baked, &worker_cancel);
             let filed = match result {
                 Ok(Some(pipeline)) => {
                     variants
@@ -714,7 +736,7 @@ fn compile_variant(
     device: &Runtime,
     provenance: &ShaderProvenance,
     entry: &str,
-    label: &'static str,
+    label: &crate::SchemeLabel,
     baked: &[(u32, u32)],
     cancel: &AtomicBool,
 ) -> Result<Option<ComputePipeline>, String> {
@@ -729,7 +751,8 @@ fn compile_variant(
     // Once Slang is running the cancel flag is advisory: the module compile cannot be
     // aborted, but a result that arrives after cancellation is still worth caching.
     let module = ShaderModule::from_provenance(device, provenance, &define_refs).map_err(|e| format!("{e:#}"))?;
-    let pipeline = ComputePipeline::new_with_label(device, &module, Some(label)).map_err(|e| format!("{e:#}"))?;
+    let pipeline =
+        ComputePipeline::new_with_label(device, &module, Some(label.as_str())).map_err(|e| format!("{e:#}"))?;
     Ok(Some(pipeline))
 }
 
@@ -775,7 +798,7 @@ mod tests {
             pipeline.handle,
             Arc::clone(&pipeline.provenance),
             "k".into(),
-            "t",
+            "t".into(),
             &[7, 9],
             &policy,
         );

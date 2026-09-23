@@ -3,9 +3,6 @@
 
 import goldy_exp;
 
-struct TimeUniforms {
-    float time;
-};
 
 [goldy_vertex]
 FullscreenVarying vs_main(VertexId vertex_id) {

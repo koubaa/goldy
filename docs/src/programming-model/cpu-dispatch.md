@@ -57,6 +57,10 @@ device-resident allocation; the runtime stages them around the host call:
 Use `Overwrite` when the function produces every element; use `Write` when it touches only
 some of them and the rest must keep their previous values.
 
+Host claims (`(&mut submission >> &parcel).take()`) follow the same medium rule: the parcel
+stays device-resident; mapped backends expose a coherent pointer after a timeline wait,
+others copy through a context staging pool. See [Settlement](../compute/settlement.md).
+
 Because the staging is a fence wait, a CPU dispatch is a full pipeline drain: every GPU node
 it depends on has finished before it runs, and every GPU node that depends on it starts
 only after its upload copy. A scheme with a CPU dispatch in the middle costs at least two

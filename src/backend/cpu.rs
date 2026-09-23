@@ -613,8 +613,12 @@ impl CpuBackend {
                 | GpuCommand::CopyTextureRegion { .. }
                 | GpuCommand::CopyRenderTarget { .. }
                 | GpuCommand::CopyBufferToTexture { .. }
-                | GpuCommand::CopyTextureToReadback { .. } => {
+                | GpuCommand::CopyTextureToReadback { .. }
+                | GpuCommand::CopyToCpuReadableTwin { .. } => {
                     cpu_graphics_unsupported()?;
+                }
+                GpuCommand::MatMul { .. } => {
+                    anyhow::bail!("CPU backend expected MatMul to be lowered to a stdlib dispatch");
                 }
             }
         }
@@ -938,6 +942,24 @@ impl GpuBackend for CpuBackend {
 
     fn alloc_readback_buffer(&mut self, device: DeviceHandle, size: u64) -> Result<BufferHandle> {
         self.alloc_owned_buffer(device, size, size, false, true)
+    }
+
+    fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        let (root, offset, size) = self.resolve_root(buffer).ok()?;
+        let buf = self.buffers.get(&root)?;
+        let data = buf.data.as_ref()?;
+        Some(crate::backend::HostMapping {
+            ptr: unsafe { data.as_slice().as_ptr().add(offset as usize) },
+            len: size,
+        })
+    }
+
+    fn host_read_acquire(&mut self, buffer: BufferHandle) -> Result<()> {
+        self.grant_storage(buffer)
+    }
+
+    fn host_read_release(&mut self, buffer: BufferHandle) {
+        self.revoke_storage(buffer);
     }
 
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()> {
@@ -1491,11 +1513,8 @@ mod tests {
             .node("double", &pipeline)
             .with_parcel(&data, NodeAccess::ReadWrite)
             .dispatch((n as u32).div_ceil(64), 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &data)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> &data).take::<u8>().expect("host take");
         let out: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
         assert_eq!(out.len(), n);
         for i in 0..n {
@@ -1553,11 +1572,8 @@ mod tests {
             .with_parcel(&y, NodeAccess::ReadWrite)
             .with_param(a.to_bits())
             .dispatch((n as u32).div_ceil(64), 1, 1);
-        let grant = MemoryExchange::new(scheme.context())
-            .bind_withdraw(&mut scheme, &y)
-            .expect("withdraw");
         let mut frame = scheme.submit().expect("submit");
-        let bytes = grant.claim(&mut frame).expect("claim").consume().expect("consume");
+        let bytes = (&mut frame >> &y).take::<u8>().expect("host take");
         let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
         assert_eq!(out.len(), n);
         for i in 0..n {

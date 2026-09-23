@@ -3,7 +3,7 @@ using Goldy.Native;
 namespace Goldy;
 
 /// <summary>
-/// CPU↔GPU memory exchange: withdrawals (readback) and deposits (upload).
+/// CPU→GPU memory exchange (deposits / uploads).
 /// </summary>
 public sealed class MemoryExchange : IDisposable
 {
@@ -17,28 +17,6 @@ public sealed class MemoryExchange : IDisposable
         Handle = NativeMethods.MemoryExchangeCreate(ctx.Handle);
         if (Handle == nint.Zero)
             throw GoldyException.FromLastError("MemoryExchange creation");
-    }
-
-    public WithdrawTransaction BindWithdraw(Scheme scheme, Parcel parcel)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(scheme);
-        ArgumentNullException.ThrowIfNull(parcel);
-        var tx = NativeMethods.MemoryExchangeBindWithdraw(Handle, scheme.Handle, parcel.Handle);
-        if (tx == nint.Zero)
-            throw GoldyException.FromLastError("MemoryExchange bind_withdraw");
-        return new WithdrawTransaction(tx);
-    }
-
-    public WithdrawTransaction BindWithdrawTexture(Scheme scheme, Texture texture)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(scheme);
-        ArgumentNullException.ThrowIfNull(texture);
-        var tx = NativeMethods.MemoryExchangeBindWithdrawTexture(Handle, scheme.Handle, texture.Handle);
-        if (tx == nint.Zero)
-            throw GoldyException.FromLastError("MemoryExchange bind_withdraw_texture");
-        return new WithdrawTransaction(tx);
     }
 
     public DepositTransaction BindDeposit(Scheme scheme, DepositTarget target)

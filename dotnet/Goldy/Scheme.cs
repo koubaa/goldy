@@ -31,26 +31,6 @@ public sealed class Scheme : IDisposable
     }
 
     /// <summary>
-    /// Declare an offscreen render-target lease on this scheme's context.
-    /// Prefer <see cref="Context.LeaseRenderTarget"/>.
-    /// </summary>
-    [Obsolete("Mint from the lessor: Context.LeaseRenderTarget")]
-    public SchemeRenderTargetLease LeaseRenderTarget(
-        uint width,
-        uint height,
-        TextureFormat format,
-        DepthFormat? depthFormat = null)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        var hasDepth = depthFormat.HasValue;
-        var depth = depthFormat ?? default;
-        var lease = NativeMethods.SchemeLeaseRenderTarget(Handle, width, height, format, hasDepth, depth);
-        if (lease == nint.Zero)
-            throw GoldyException.FromLastError("Scheme lease_render_target");
-        return new SchemeRenderTargetLease(lease);
-    }
-
-    /// <summary>
     /// Begin recording an offscreen render pass. Finish with <see cref="SchemeRenderPassScope.Dispose"/>.
     /// </summary>
     public SchemeRenderPassScope RenderPass(string label, SchemeRenderTargetLease lease, TargetLoadKind load, Color clearColor = default)

@@ -70,7 +70,7 @@ impl PendingRenderSlot {
 /// Accumulates one offscreen render-pass node before [`Self::commit_scheme`].
 #[cfg(feature = "graphics")]
 pub struct RenderPassRecord {
-    label: &'static str,
+    label: crate::SchemeLabel,
     target: crate::backend::RenderTargetHandle,
     color_load: crate::types::TargetLoad,
     bindings: Vec<ResourceBinding>,
@@ -252,7 +252,7 @@ impl RenderPassRecord {
 
     /// Begin accumulating a render pass targeting a scheme-held render-target lease.
     pub fn new_for_scheme_lease(
-        label: &'static str,
+        label: impl Into<crate::SchemeLabel>,
         scheme: &mut crate::Scheme,
         lease: &crate::Lease<crate::LeaseRenderTarget>,
         color_load: crate::types::TargetLoad,
@@ -264,7 +264,7 @@ impl RenderPassRecord {
             NodeAccess::Write
         };
         Self {
-            label,
+            label: label.into(),
             target: handle,
             color_load,
             bindings: vec![ResourceBinding {
@@ -300,7 +300,7 @@ fn node_access_to_resource_access(access: NodeAccess) -> ResourceAccess {
 
 /// Accumulates one compute dispatch node before [`Self::commit_dispatch_scheme`].
 pub struct ComputeNodeRecord {
-    label: &'static str,
+    label: crate::SchemeLabel,
     pipeline: crate::backend::ComputePipelineHandle,
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
@@ -313,9 +313,9 @@ pub struct ComputeNodeRecord {
 }
 
 impl ComputeNodeRecord {
-    pub fn new(label: &'static str, pipeline: &ComputePipeline) -> Self {
+    pub fn new(label: impl Into<crate::SchemeLabel>, pipeline: &ComputePipeline) -> Self {
         Self {
-            label,
+            label: label.into(),
             pipeline: pipeline.handle,
             bindings: Vec::new(),
             resource_slots: Vec::new(),

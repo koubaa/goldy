@@ -48,16 +48,19 @@ GPU-referenced). Prefer [`MemoryExchange`](https://docs.rs/goldy/latest/goldy/st
 
 ## Exchange claims (unchanged)
 
-Surface and memory exchanges still settle occurrences via consume/discard:
+Surface and memory exchanges still settle occurrences via consume/discard.
+Rust surface present sugar is `(&mut submission >> &transaction).take()?`; the
+`&mut` borrow is required by operator semantics and leaves other claims
+untouched.
 
 ```rust
 let mut submission = scheme.submit()?;
 
 // Present
-transaction.claim(&mut submission)?.consume()?;
+(&mut submission >> &transaction).take()?;
 
-// Readback — consume waits for the submission internally
-let bytes = withdraw.claim(&mut submission)?.consume()?;
+// Host claim — wait + mapped pointer or staged copy
+let view = (&mut submission >> &parcel).take::<u32>()?;
 ```
 
 A live linear claim is unsettled until `consume` or `discard`. Dropping an unsettled claim
@@ -65,9 +68,10 @@ discards it.
 
 Memory deposits follow the same grammar internally (`Transaction` → claim at submit →
 consume at the copy dispatch) but the program never authors the claim. `bind_deposit`
-records copy topology; `DepositTransaction::write` prepares the occurrence; submit claims
-it; graph execution consumes it. Exchange staging is retired locally and is not a
-parcel-ledger entry. Destination RAW/WAR ordering remains enforced.
+records copy topology; `(&deposit << &data)?` (or [`DepositTransaction::write`](https://docs.rs/goldy/latest/goldy/struct.DepositTransaction.html))
+prepares the occurrence for this submission; submit claims it; graph execution consumes it.
+Exchange staging is retired locally and is not a parcel-ledger entry. Destination RAW/WAR
+ordering remains enforced.
 
 ## Multi-frame pipelining
 

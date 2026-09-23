@@ -24,6 +24,8 @@ mod runtime;
 mod scheme;
 mod shader;
 mod surface_exchange;
+#[cfg(feature = "tensor")]
+mod tensor;
 mod texture;
 mod types;
 
@@ -71,8 +73,6 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<surface_exchange::PySurfaceExchange>()?;
     m.add_class::<memory_exchange::PyMemoryExchange>()?;
     m.add_class::<memory_exchange::PyDepositTarget>()?;
-    m.add_class::<memory_exchange::PyWithdrawTransaction>()?;
-    m.add_class::<memory_exchange::PyWithdrawClaim>()?;
     m.add_class::<memory_exchange::PyDepositTransaction>()?;
     m.add_class::<buffer::PyBuffer>()?;
     m.add_class::<parcel::PyParcel>()?;
@@ -87,6 +87,13 @@ fn _goldy(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Compute
     m.add_class::<compute::PyComputePipeline>()?;
+
+    #[cfg(feature = "tensor")]
+    {
+        m.add_class::<tensor::PyTensorDType>()?;
+        m.add_class::<tensor::PyTensor>()?;
+        m.add_class::<tensor::PyTensorKernels>()?;
+    }
 
     Ok(())
 }

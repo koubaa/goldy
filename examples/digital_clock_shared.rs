@@ -1,17 +1,14 @@
 //! Shared digital-clock rendering helpers for the `digital_clock` example.
 
-use bytemuck::{Pod, Zeroable};
-use goldy::buffer::StructuredBufferElement;
 use goldy::types::Color;
 
 /// Vertex with 2D position and RGBA color.
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-#[repr(C)]
+#[goldy::gpu]
+#[derive(Debug)]
 pub struct ClockVertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
 }
-impl StructuredBufferElement for ClockVertex {}
 
 impl ClockVertex {
     pub const fn new(x: f32, y: f32, color: Color) -> Self {

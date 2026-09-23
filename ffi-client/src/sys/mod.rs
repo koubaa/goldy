@@ -284,6 +284,36 @@ pub unsafe fn goldy_scheme_submission_wait_until_settled(submission: *const Gold
     (lib().goldy_scheme_submission_wait_until_settled)(submission)
 }
 
+pub unsafe fn goldy_scheme_submission_take(
+    submission: *mut GoldySchemeSubmission,
+    parcel: *const GoldyParcel,
+) -> *mut GoldyHostView {
+    (lib().goldy_scheme_submission_take)(submission, parcel)
+}
+
+pub unsafe fn goldy_scheme_submission_take_texture(
+    submission: *mut GoldySchemeSubmission,
+    texture: *const GoldyTexture,
+) -> *mut GoldyHostView {
+    (lib().goldy_scheme_submission_take_texture)(submission, texture)
+}
+
+pub unsafe fn goldy_host_view_len(view: *const GoldyHostView) -> u64 {
+    (lib().goldy_host_view_len)(view)
+}
+
+pub unsafe fn goldy_host_view_data(view: *const GoldyHostView) -> *const u8 {
+    (lib().goldy_host_view_data)(view)
+}
+
+pub unsafe fn goldy_host_view_copy(view: *const GoldyHostView, output: *mut u8, output_size: usize) -> GoldyResult {
+    (lib().goldy_host_view_copy)(view, output, output_size)
+}
+
+pub unsafe fn goldy_host_view_destroy(view: *mut GoldyHostView) {
+    (lib().goldy_host_view_destroy)(view)
+}
+
 pub unsafe fn goldy_memory_exchange_create(ctx: *const GoldyContext) -> *mut GoldyMemoryExchange {
     (lib().goldy_memory_exchange_create)(ctx)
 }
@@ -292,75 +322,12 @@ pub unsafe fn goldy_memory_exchange_destroy(exchange: *mut GoldyMemoryExchange) 
     (lib().goldy_memory_exchange_destroy)(exchange)
 }
 
-pub unsafe fn goldy_memory_exchange_bind_withdraw(
-    exchange: *const GoldyMemoryExchange,
-    scheme: *mut GoldyScheme,
-    parcel: *const GoldyParcel,
-) -> *mut GoldyWithdrawTransaction {
-    (lib().goldy_memory_exchange_bind_withdraw)(exchange, scheme, parcel)
-}
-
-pub unsafe fn goldy_memory_exchange_bind_withdraw_texture(
-    exchange: *const GoldyMemoryExchange,
-    scheme: *mut GoldyScheme,
-    texture: *const GoldyTexture,
-) -> *mut GoldyWithdrawTransaction {
-    (lib().goldy_memory_exchange_bind_withdraw_texture)(exchange, scheme, texture)
-}
-
 pub unsafe fn goldy_memory_exchange_bind_deposit(
     exchange: *const GoldyMemoryExchange,
     scheme: *mut GoldyScheme,
     target: *const GoldyDepositTarget,
 ) -> *mut GoldyDepositTransaction {
     (lib().goldy_memory_exchange_bind_deposit)(exchange, scheme, target)
-}
-
-pub unsafe fn goldy_withdraw_transaction_destroy(transaction: *mut GoldyWithdrawTransaction) {
-    (lib().goldy_withdraw_transaction_destroy)(transaction)
-}
-
-pub unsafe fn goldy_withdraw_transaction_byte_size(transaction: *const GoldyWithdrawTransaction) -> u64 {
-    (lib().goldy_withdraw_transaction_byte_size)(transaction)
-}
-
-pub unsafe fn goldy_withdraw_transaction_claim(
-    transaction: *const GoldyWithdrawTransaction,
-    submission: *mut GoldySchemeSubmission,
-) -> *mut GoldyWithdrawClaim {
-    (lib().goldy_withdraw_transaction_claim)(transaction, submission)
-}
-
-pub unsafe fn goldy_withdraw_claim_destroy(claim: *mut GoldyWithdrawClaim) {
-    (lib().goldy_withdraw_claim_destroy)(claim)
-}
-
-pub unsafe fn goldy_withdraw_claim_consume(claim: *mut GoldyWithdrawClaim) -> *mut GoldyWithdrawBytes {
-    (lib().goldy_withdraw_claim_consume)(claim)
-}
-
-pub unsafe fn goldy_withdraw_claim_discard(claim: *mut GoldyWithdrawClaim) -> GoldyResult {
-    (lib().goldy_withdraw_claim_discard)(claim)
-}
-
-pub unsafe fn goldy_withdraw_bytes_len(bytes: *const GoldyWithdrawBytes) -> u64 {
-    (lib().goldy_withdraw_bytes_len)(bytes)
-}
-
-pub unsafe fn goldy_withdraw_bytes_data(bytes: *const GoldyWithdrawBytes) -> *const u8 {
-    (lib().goldy_withdraw_bytes_data)(bytes)
-}
-
-pub unsafe fn goldy_withdraw_bytes_copy(
-    bytes: *const GoldyWithdrawBytes,
-    output: *mut u8,
-    output_size: usize,
-) -> GoldyResult {
-    (lib().goldy_withdraw_bytes_copy)(bytes, output, output_size)
-}
-
-pub unsafe fn goldy_withdraw_bytes_destroy(bytes: *mut GoldyWithdrawBytes) {
-    (lib().goldy_withdraw_bytes_destroy)(bytes)
 }
 
 pub unsafe fn goldy_deposit_transaction_destroy(transaction: *mut GoldyDepositTransaction) {
@@ -382,17 +349,6 @@ pub unsafe fn goldy_deposit_transaction_write(
     data_size: usize,
 ) -> GoldyResult {
     (lib().goldy_deposit_transaction_write)(transaction, offset, data, data_size)
-}
-
-pub unsafe fn goldy_scheme_lease_render_target(
-    scheme: *mut GoldyScheme,
-    width: u32,
-    height: u32,
-    format: GoldyTextureFormat,
-    has_depth: bool,
-    depth_format: GoldyDepthFormat,
-) -> *mut GoldySchemeRenderTargetLease {
-    (lib().goldy_scheme_lease_render_target)(scheme, width, height, format, has_depth, depth_format)
 }
 
 pub unsafe fn goldy_scheme_render_target_lease_destroy(lease: *mut GoldySchemeRenderTargetLease) {
@@ -599,6 +555,76 @@ pub unsafe fn goldy_claim_consume(claim: *mut GoldyClaim) -> GoldyResult {
 
 pub unsafe fn goldy_claim_discard(claim: *mut GoldyClaim) -> GoldyResult {
     (lib().goldy_claim_discard)(claim)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_runtime_acquire_tensor(
+    runtime: *mut GoldyRuntime,
+    dtype: GoldyTensorDType,
+    rank: u32,
+    dims: *const u32,
+    data: *const u8,
+    data_size: usize,
+) -> *mut GoldyTensor {
+    (lib().goldy_runtime_acquire_tensor)(runtime, dtype, rank, dims, data, data_size)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_destroy(tensor: *mut GoldyTensor) {
+    (lib().goldy_tensor_destroy)(tensor)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_dtype(tensor: *const GoldyTensor) -> GoldyTensorDType {
+    (lib().goldy_tensor_dtype)(tensor)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_shape(tensor: *const GoldyTensor, out: *mut GoldyTensorShape) -> GoldyResult {
+    (lib().goldy_tensor_shape)(tensor, out)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_kernels_create(runtime: *mut GoldyRuntime) -> *mut GoldyTensorKernels {
+    (lib().goldy_tensor_kernels_create)(runtime)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_kernels_destroy(ctx: *mut GoldyTensorKernels) {
+    (lib().goldy_tensor_kernels_destroy)(ctx)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_add(
+    ctx: *mut GoldyTensorKernels,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    a: *const GoldyTensor,
+    b: *const GoldyTensor,
+) -> *mut GoldyTensor {
+    (lib().goldy_tensor_add)(ctx, scheme, label, a, b)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_matmul(
+    ctx: *mut GoldyTensorKernels,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    a: *const GoldyTensor,
+    b: *const GoldyTensor,
+) -> *mut GoldyTensor {
+    (lib().goldy_tensor_matmul)(ctx, scheme, label, a, b)
+}
+
+#[cfg(feature = "tensor")]
+pub unsafe fn goldy_tensor_fill_f32(
+    ctx: *mut GoldyTensorKernels,
+    scheme: *mut GoldyScheme,
+    label: *const std::ffi::c_char,
+    tensor: *mut GoldyTensor,
+    value: f32,
+) -> GoldyResult {
+    (lib().goldy_tensor_fill_f32)(ctx, scheme, label, tensor, value)
 }
 
 #[cfg(windows)]

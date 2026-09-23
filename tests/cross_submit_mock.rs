@@ -11,6 +11,7 @@ use goldy::{
 };
 #[cfg(feature = "graphics")]
 use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat};
+use std::ops::Shr;
 
 fn mock_ctx(device: &Runtime) -> Context {
     device.create_context().expect("context")
@@ -685,11 +686,9 @@ fn retained_resubmit_carries_reuse_epochs_and_deferred_host_writes() {
     );
 
     let mut verify = Scheme::new(&ctx);
-    let grant = MemoryExchange::new(&ctx)
-        .bind_withdraw(&mut verify, staging.whole())
-        .expect("withdraw staging");
+
     let mut sub = verify.submit().expect("verify submit");
-    let staging_bytes = grant.claim(&mut sub).expect("claim").consume().expect("consume");
+    let staging_bytes = (&mut sub >> staging.whole()).take::<u8>().expect("host take");
     assert_eq!(&staging_bytes[..4], &[7, 0, 0, 0]);
 
     // Silence unused warning if Buffer import is only for type clarity.

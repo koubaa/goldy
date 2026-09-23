@@ -8,7 +8,7 @@ use crate::sys::{
     self, GoldyPresentLease, GoldyReplayStats, GoldyScheme, GoldySchemeRenderTargetLease, GoldySchemeSubmission,
 };
 use crate::texture::Texture;
-use crate::types::{DepthFormat, IndexFormat, NodeAccess, TextureFormat};
+use crate::types::{IndexFormat, NodeAccess};
 use std::ffi::CString;
 use std::ops::Range;
 
@@ -24,6 +24,21 @@ impl SchemeSubmission {
 
     pub fn wait_until_settled(&self) -> Result<()> {
         check(unsafe { sys::goldy_scheme_submission_wait_until_settled(self.ptr) })
+    }
+
+    /// Realize a host read of `parcel` after this submission.
+    pub fn take(&mut self, parcel: &Parcel) -> Result<crate::memory_exchange::HostView> {
+        let ptr =
+            crate::error::non_null_expect(unsafe { sys::goldy_scheme_submission_take(self.ptr, parcel.as_ptr()) });
+        Ok(crate::memory_exchange::HostView { ptr })
+    }
+
+    /// Realize a host read of `texture` after this submission.
+    pub fn take_texture(&mut self, texture: &Texture) -> Result<crate::memory_exchange::HostView> {
+        let ptr = crate::error::non_null_expect(unsafe {
+            sys::goldy_scheme_submission_take_texture(self.ptr, texture.as_ptr())
+        });
+        Ok(crate::memory_exchange::HostView { ptr })
     }
 
     pub(crate) fn as_mut_ptr(&mut self) -> *mut GoldySchemeSubmission {
@@ -124,23 +139,6 @@ impl Scheme {
         })
     }
 
-    pub fn lease_render_target(
-        &mut self,
-        width: u32,
-        height: u32,
-        format: TextureFormat,
-        depth_format: Option<DepthFormat>,
-    ) -> Result<SchemeRenderTargetLease> {
-        let (has_depth, depth) = match depth_format {
-            Some(d) => (true, d),
-            None => (false, DepthFormat::Depth24Plus),
-        };
-        let ptr = non_null_expect(unsafe {
-            sys::goldy_scheme_lease_render_target(self.ptr, width, height, format.into(), has_depth, depth.into())
-        });
-        Ok(SchemeRenderTargetLease::from_ptr(ptr))
-    }
-
     pub fn copy_to_texture(&mut self, src: &SchemeRenderTargetLease, dst: &Texture) -> Result<()> {
         check(unsafe { sys::goldy_scheme_copy_to_texture(self.ptr, src.as_ptr(), dst.as_ptr()) })
     }
@@ -151,8 +149,12 @@ impl Scheme {
         Ok(SchemeSubmission { ptr: submission })
     }
 
-    pub fn compute_node<'a>(&'a mut self, label: &'static str, pipeline: &ComputePipeline) -> ComputeNodeBuilder<'a> {
-        let label = CString::new(label).expect("compute node label contains interior null byte");
+    pub fn compute_node<'a>(
+        &'a mut self,
+        label: impl AsRef<str>,
+        pipeline: &ComputePipeline,
+    ) -> ComputeNodeBuilder<'a> {
+        let label = CString::new(label.as_ref()).expect("compute node label contains interior null byte");
         expect_ok(unsafe { sys::goldy_scheme_compute_node_begin(self.ptr, label.as_ptr(), pipeline.as_ptr()) });
         ComputeNodeBuilder {
             scheme: self,
@@ -162,11 +164,11 @@ impl Scheme {
 
     pub fn render_pass<'a>(
         &'a mut self,
-        label: &'static str,
+        label: impl AsRef<str>,
         target: &SchemeRenderTargetLease,
         load: crate::types::TargetLoad,
     ) -> SchemeRenderPassBuilder<'a> {
-        let label = CString::new(label).expect("render pass label contains interior null byte");
+        let label = CString::new(label.as_ref()).expect("render pass label contains interior null byte");
         let (load_kind, clear_color) = load.to_ffi();
         expect_ok(unsafe {
             sys::goldy_scheme_render_pass_begin(self.ptr, label.as_ptr(), target.as_ptr(), load_kind, clear_color)

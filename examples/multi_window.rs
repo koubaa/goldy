@@ -8,10 +8,11 @@ use goldy::{
     shaders, Buffer, BufferFlags, BufferKind, Color, DepositTarget, DepositTransaction, Instance, Lease,
     LeaseRenderTarget, MemoryExchange, NodeAccess, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, ShaderModule, SurfaceConfig, SurfaceExchange, TargetLoad, Texture, TextureFormat,
-    Transaction, VertexAttribute, VertexBufferLayout, VertexFormat, WithdrawTransaction,
+    Transaction, VertexBufferLayout,
 };
 mod common;
 use common::CaptureDump;
+use std::ops::Shr;
 
 const PLASMA_VERTEX_TIME: &str = r#"
 struct VertexInput {
@@ -129,37 +130,16 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[goldy::gpu]
 struct QuadVertex {
     position: [f32; 2],
     uv: [f32; 2],
     time: f32,
 }
-impl goldy::StructuredBufferElement for QuadVertex {}
 
 impl QuadVertex {
     fn layout() -> VertexBufferLayout {
-        VertexBufferLayout {
-            stride: std::mem::size_of::<Self>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-                VertexAttribute {
-                    location: 2,
-                    format: VertexFormat::Float32,
-                    offset: 16,
-                },
-            ],
-        }
+        Self::GPU_TYPE.vertex_buffer_layout().expect("quad vertex layout")
     }
 }
 
@@ -230,7 +210,6 @@ struct WindowState {
     present: Option<Transaction>,
     capture: Option<CaptureDump>,
     readback: Option<Texture>,
-    withdraw: Option<WithdrawTransaction>,
     scheme: Scheme,
     scene_rt: Lease<LeaseRenderTarget>,
     pipeline: RenderPipeline,
@@ -282,15 +261,15 @@ impl WindowState {
         scene_rt: &Lease<LeaseRenderTarget>,
         surface: Option<&SurfaceExchange>,
         readback: Option<&Texture>,
-    ) -> anyhow::Result<(Option<Transaction>, Option<WithdrawTransaction>)> {
+    ) -> anyhow::Result<Option<Transaction>> {
         if let Some(surface) = surface {
             let present = surface.bind_render_target(scheme, scene_rt)?;
-            Ok((Some(present), None))
+            Ok(Some(present))
         } else {
             let readback = readback.expect("capture readback");
             scheme.copy_to_texture(scene_rt, readback)?;
-            let withdraw = MemoryExchange::new(scheme.context()).bind_withdraw(scheme, readback)?;
-            Ok((None, Some(withdraw)))
+
+            Ok(None)
         }
     }
 
@@ -322,11 +301,8 @@ impl WindowState {
                 &rt,
                 self.effect_type.title(),
             );
-            if let Ok((present, withdraw)) =
-                Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref())
-            {
+            if let Ok(present) = Self::bind_frame(&mut scheme, &rt, self.surface.as_ref(), self.readback.as_ref()) {
                 self.present = present;
-                self.withdraw = withdraw;
                 self.scene_rt = rt;
                 self.scheme = scheme;
             }
@@ -351,7 +327,7 @@ impl WindowState {
         let mut scheme = Scheme::new(ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, Some(&surface), None)?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, Some(&surface), None)?;
 
         let mut upload_scheme = Scheme::new(ctx);
         let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
@@ -366,7 +342,6 @@ impl WindowState {
             present,
             capture: None,
             readback: None,
-            withdraw,
             scheme,
             scene_rt,
             pipeline,
@@ -401,7 +376,7 @@ impl WindowState {
         let mut scheme = Scheme::new(ctx);
         let scene_rt = ctx.lease_render_target(width.max(1), height.max(1), format, None)?;
         Self::record_pass(&mut scheme, &pipeline, &vertex_parcel, &scene_rt, effect_type.title());
-        let (present, withdraw) = Self::bind_frame(&mut scheme, &scene_rt, None, Some(&readback))?;
+        let present = Self::bind_frame(&mut scheme, &scene_rt, None, Some(&readback))?;
 
         let mut upload_scheme = Scheme::new(ctx);
         let vertex_deposit = MemoryExchange::new(ctx).bind_deposit(
@@ -416,7 +391,6 @@ impl WindowState {
             present,
             capture: Some(capture),
             readback: Some(readback),
-            withdraw,
             scheme,
             scene_rt,
             pipeline,
@@ -485,14 +459,16 @@ impl WindowState {
         }
 
         let vertices = create_quad(self.current_time());
-        self.vertex_deposit.write(0, bytemuck::cast_slice(&vertices))?;
+        (&self.vertex_deposit << vertices.as_slice())?;
         self.upload_scheme.submit()?;
 
         let mut submission = self.scheme.submit()?;
         if let Some(present) = &self.present {
-            present.claim(&mut submission)?.consume()?;
+            (&mut submission >> present).take()?;
         } else {
-            let pixels = self.withdraw.as_ref().unwrap().claim(&mut submission)?.consume()?;
+            let pixels = (&mut submission >> self.readback.as_ref().unwrap())
+                .take::<u8>()?
+                .to_vec();
             self.capture.as_mut().unwrap().write_rgba(&pixels)?;
         }
         Ok(())

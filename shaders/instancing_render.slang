@@ -2,12 +2,6 @@
 
 import goldy_exp;
 
-struct QuadInstance {
-    float2 position;
-    float rotation;
-    float scale;
-    float4 color;
-};
 
 struct VSOutput {
     float4 position : SV_Position;
@@ -15,10 +9,10 @@ struct VSOutput {
 };
 
 [goldy_vertex]
-VSOutput vs_main(Scattered<QuadInstance> INSTANCES, VertexId vertex_id, InstanceId instance_id) {
+VSOutput vs_main(Scattered<Instance2D> INSTANCES, VertexId vertex_id, InstanceId instance_id) {
     VSOutput output;
     
-    QuadInstance inst = INSTANCES[instance_id.value];
+    Instance2D inst = INSTANCES[instance_id.value];
     float2 world_pos = quad_position_rotated(vertex_id.value, inst.position, inst.scale, inst.rotation);
     
     output.position = float4(world_pos, 0.0, 1.0);

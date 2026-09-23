@@ -9,6 +9,7 @@ use goldy::{
     compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions, Runtime,
     RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
+use std::ops::Shr;
 use std::sync::Arc;
 
 #[compute(workgroup_size = [64, 1, 1])]
@@ -31,6 +32,51 @@ fn double_u32(data: &mut [u32]) {
 fn fill_red(output: goldy::gpu::DirectSpatial<goldy::gpu::Float4>) {
     let tid = goldy::gpu::global_id();
     output[tid.xy] = goldy::gpu::float4(1.0, 0.0, 0.0, 1.0);
+}
+
+#[compute(workgroup_size = [256, 1, 1])]
+fn workgroup_sum_manual(data: &[f32], out: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    let local = goldy::gpu::local_id().x;
+    scratch[local] = data[local];
+    let mut acc = scratch[local];
+    for i in 0..8 {
+        goldy::gpu::workgroup_barrier();
+        if local + (1u32 << i) < 256 {
+            acc = acc + scratch[local + (1u32 << i)];
+        }
+        goldy::gpu::workgroup_barrier();
+        scratch[local] = acc;
+    }
+    if local == 0 {
+        out[0] = scratch[0];
+    }
+}
+
+#[compute(workgroup_size = [256, 1, 1])]
+fn reduce_sum(data: &[f32], out: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    let local = goldy::gpu::local_id().x;
+    let total = goldy::gpu::workgroup_sum::<256>(data[local], scratch);
+    if local == 0 {
+        out[0] = total;
+    }
+}
+
+#[compute(workgroup_size = [256, 1, 1])]
+fn reduce_max(data: &[f32], out: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    let local = goldy::gpu::local_id().x;
+    let peak = goldy::gpu::workgroup_max::<256>(data[local], scratch);
+    if local == 0 {
+        out[0] = peak;
+    }
+}
+
+#[compute(workgroup_size = [256, 1, 1])]
+fn softmax_slice(scores: &mut [f32], count: u32) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    goldy::gpu::workgroup_softmax_in_place::<256>(scores, 0, count, scratch);
 }
 
 #[goldy::gpu]
@@ -97,7 +143,102 @@ fn main() {
             assert!(saxpy::CANONICAL_SOURCE.contains("ThreadId _goldy_gid"));
             assert!(saxpy::CANONICAL_SOURCE.contains("[numthreads(64, 1, 1)]"));
             assert!(double_u32::CANONICAL_SOURCE.contains("Scattered<uint> data"));
+            assert!(workgroup_sum_manual::CANONICAL_SOURCE.contains("groupshared float scratch[256];"));
+            assert!(workgroup_sum_manual::CANONICAL_SOURCE.contains("GroupMemoryBarrierWithGroupSync()"));
+            assert!(workgroup_sum_manual::CANONICAL_SOURCE.contains("GroupThreadId _goldy_lid"));
+            assert!(reduce_sum::CANONICAL_SOURCE.contains("_goldy_red = _goldy_red + scratch"));
+            assert!(reduce_max::CANONICAL_SOURCE.contains("_goldy_red = max(_goldy_red, scratch"));
+            assert!(softmax_slice::CANONICAL_SOURCE.contains("exp(scores[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
             Ok(())
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_sum_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let ctx = device.create_context()?;
+                let n = 256usize;
+                let input = vec![1.0f32; n];
+                let data = device.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
+                let out = device.acquire_buffer_with_data(&[0.0f32], BufferKind::Scattered)?;
+                let kernel = workgroup_sum_manual::Kernel::prepare(&device)?;
+                let mut scheme = Scheme::new(&ctx);
+                kernel.record(&mut scheme, "sum", &data, &out).groups([1, 1, 1]);
+
+                let mut frame = scheme.submit()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
+                let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                assert!((got[0] - 256.0).abs() < 1e-3, "sum {}", got[0]);
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_sum_collective_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let ctx = device.create_context()?;
+                let n = 256usize;
+                let input = vec![1.0f32; n];
+                let data = device.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
+                let out = device.acquire_buffer_with_data(&[0.0f32], BufferKind::Scattered)?;
+                let kernel = reduce_sum::Kernel::prepare(&device)?;
+                let mut scheme = Scheme::new(&ctx);
+                kernel.record(&mut scheme, "sum", &data, &out).groups([1, 1, 1]);
+
+                let mut frame = scheme.submit()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
+                let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                assert!((got[0] - 256.0).abs() < 1e-3, "sum {}", got[0]);
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_max_collective_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let ctx = device.create_context()?;
+                let mut input = vec![0.25f32; 256];
+                input[17] = 42.5;
+                let data = device.acquire_buffer_with_data(&input, BufferKind::Scattered)?;
+                let out = device.acquire_buffer_with_data(&[0.0f32], BufferKind::Scattered)?;
+                let kernel = reduce_max::Kernel::prepare(&device)?;
+                let mut scheme = Scheme::new(&ctx);
+                kernel.record(&mut scheme, "max", &data, &out).groups([1, 1, 1]);
+
+                let mut frame = scheme.submit()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
+                let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                assert!((got[0] - 42.5).abs() < 1e-4, "max {}", got[0]);
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_softmax_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let ctx = device.create_context()?;
+                let mut scores = vec![100.0f32; 8];
+                scores[0] = 1.0;
+                scores[1] = 2.0;
+                scores[2] = 3.0;
+                let buf = device.acquire_buffer_with_data(&scores, BufferKind::Scattered)?;
+                let kernel = softmax_slice::Kernel::prepare(&device)?;
+                let mut scheme = Scheme::new(&ctx);
+                kernel.record(&mut scheme, "sm", &buf, 3).groups([1, 1, 1]);
+
+                let mut frame = scheme.submit()?;
+                let bytes = (&mut frame >> &buf).take::<u8>()?;
+                let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                let xs = [1.0f32, 2.0, 3.0];
+                let max = 3.0f32;
+                let exps: Vec<f32> = xs.iter().map(|x| (x - max).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                for i in 0..3 {
+                    let want = exps[i] / sum;
+                    assert!((got[i] - want).abs() < 1e-4, "index {i}: {} vs {want}", got[i]);
+                }
+                let softmax_sum: f32 = got[..3].iter().sum();
+                assert!((softmax_sum - 1.0).abs() < 1e-4, "softmax sum {softmax_sum}");
+                for i in 3..8 {
+                    assert!((got[i] - 100.0).abs() < 1e-5, "untouched index {i}: {}", got[i]);
+                }
+                Ok(())
+            }
         }),
         libtest_mimic::Trial::test("rust_kernel_double_u32_gpu", {
             let device = Arc::clone(&device);
@@ -111,9 +252,9 @@ fn main() {
                 let kernel = double_u32::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "double", &data).over_1d(n as u32);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &data)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &data).take::<u8>()?;
                 let out: Vec<u32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(out.len(), n);
                 for i in 0..n {
@@ -140,9 +281,9 @@ fn main() {
                 kernel
                     .record(&mut scheme, "saxpy", &x, &y, a)
                     .groups([(n as u32).div_ceil(64), 1, 1]);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &y)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &y).take::<u8>()?;
                 let out: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(out.len(), n);
                 for i in 0..n {
@@ -193,9 +334,9 @@ fn main() {
                 let kernel = fill_red::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "fill", &texture).over_2d(width, height);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &texture)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &texture).take::<u8>()?;
                 assert!(!bytes.iter().all(|&b| b == 0), "texture readback all zeros");
                 Ok(())
             }
@@ -235,9 +376,9 @@ fn main() {
                 let kernel = read_plasma_uniforms::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "read", &uniforms, &out).over_1d(1);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(got.len(), 3);
                 assert!((got[0] - 8.0).abs() < 1e-5, "width {}", got[0]);
@@ -277,9 +418,9 @@ fn main() {
                 let kernel = read_tight_vertex::Kernel::prepare(&device)?;
                 let mut scheme = Scheme::new(&ctx);
                 kernel.record(&mut scheme, "read", &verts, &out).over_1d(1);
-                let grant = MemoryExchange::new(scheme.context()).bind_withdraw(&mut scheme, &out)?;
+
                 let mut frame = scheme.submit()?;
-                let bytes = grant.claim(&mut frame)?.consume()?;
+                let bytes = (&mut frame >> &out).take::<u8>()?;
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert_eq!(got.len(), 5);
                 for (i, want) in [1.0, 2.0, 3.0, 4.0, 5.0].iter().enumerate() {

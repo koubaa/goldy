@@ -91,7 +91,7 @@ def test_parcel_write(device):
     upload = goldy.Scheme(ctx)
     memory = goldy.MemoryExchange(ctx)
     deposit = memory.bind_deposit(upload, goldy.DepositTarget.buffer(buffer[0], 16))
-    deposit.write(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes())
+    deposit << np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32).tobytes()
     frame = upload.submit()
     frame.wait_until_settled()
 
@@ -175,9 +175,8 @@ def test_render_clear_via_scheme(device):
         pass
 
     scheme.copy_to_texture(rt, readback)
-    grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, readback)
     submission = scheme.submit()
-    pixels = np.frombuffer(grant.claim(submission).consume(), dtype=np.uint8).reshape(height, width, 4)
+    pixels = np.frombuffer(submission.take_texture(readback), dtype=np.uint8).reshape(height, width, 4)
 
     assert pixels.shape == (2, 2, 4)
     assert np.all(pixels[:, :, 0] == 255)
@@ -210,9 +209,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     scheme.node("fill", pipeline).with_parcel(
         buffer[0], goldy.NodeAccess.WRITE
     ).dispatch(1, 1, 1)
-    grant = goldy.MemoryExchange(ctx).bind_withdraw(scheme, buffer[0])
     frame = scheme.submit()
-    values = np.frombuffer(grant.claim(frame).consume(), dtype=np.uint32)
+    values = np.frombuffer(frame.take(buffer[0]), dtype=np.uint32)
     assert values.shape == (64,)
     assert np.all(values == 42)
 
@@ -279,9 +277,8 @@ def test_triangle_via_scheme(device):
         )
 
     scheme.copy_to_texture(rt, readback)
-    grant = goldy.MemoryExchange(ctx).bind_withdraw_texture(scheme, readback)
     submission = scheme.submit()
-    pixels = np.frombuffer(grant.claim(submission).consume(), dtype=np.uint8).reshape(100, 100, 4)
+    pixels = np.frombuffer(submission.take_texture(readback), dtype=np.uint8).reshape(100, 100, 4)
 
     assert pixels.shape == (100, 100, 4)
     assert np.any(pixels[:, :, :3] > 0)

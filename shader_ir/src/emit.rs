@@ -1,6 +1,66 @@
 //! Emit canonical `[goldy_compute]` Slang from a lowered [`ShaderKernel`].
 
-use crate::{BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, ShaderKernel, Stmt, UnaryOp};
+use crate::{
+    BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam, ShaderKernel, Stmt, UnaryOp, WorkgroupReduceOp,
+    TENSOR_LAYOUT_SLANG, TENSOR_META_PARAM,
+};
+use std::collections::HashMap;
+
+/// Packed layout + logical-index helpers prepended when the kernel has tensor parameters.
+pub const TENSOR_LAYOUT_SLANG_PREAMBLE: &str = r#"struct GoldyTensorLayout {
+    uint off;
+    uint rank;
+    uint numel;
+    uint d0;
+    uint d1;
+    uint d2;
+    uint d3;
+    uint s0;
+    uint s1;
+    uint s2;
+    uint s3;
+    uint pad;
+};
+
+uint goldy_tensor_offset(GoldyTensorLayout L, uint i) {
+    uint rest = i;
+    uint i3 = rest % L.d3;
+    rest = rest / L.d3;
+    uint i2 = rest % L.d2;
+    rest = rest / L.d2;
+    uint i1 = rest % L.d1;
+    rest = rest / L.d1;
+    uint i0 = rest % L.d0;
+    return L.off + i0 * L.s0 + i1 * L.s1 + i2 * L.s2 + i3 * L.s3;
+}
+
+uint goldy_tensor_dim(GoldyTensorLayout L, uint axis) {
+    if (axis == 0) return L.d0;
+    if (axis == 1) return L.d1;
+    if (axis == 2) return L.d2;
+    return L.d3;
+}
+
+"#;
+
+fn tensor_slot_map(params: &[KernelParam]) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
+    let mut slot = 0u32;
+    for p in params {
+        if p.is_tensor {
+            map.insert(p.name.clone(), slot);
+            slot += 1;
+        }
+    }
+    map
+}
+
+fn tensor_slot(expr: &Expr, slots: &HashMap<String, u32>) -> Option<u32> {
+    match expr {
+        Expr::Var(name) => slots.get(name).copied(),
+        _ => None,
+    }
+}
 
 /// Emit the portable canonical compute source (still marked `[goldy_compute]`).
 ///
@@ -8,8 +68,12 @@ use crate::{BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, ShaderKernel, Stmt, 
 /// frame-table / CUDA / WebGPU plumbing.
 pub fn emit_canonical_compute_source(kernel: &ShaderKernel) -> KernelDef {
     let entry = "cs_main";
-    let mut sig_parts: Vec<String> = kernel
-        .params
+    let tensor_slots = tensor_slot_map(&kernel.params);
+    let mut params = kernel.params.clone();
+    if !tensor_slots.is_empty() {
+        params.push(KernelParam::tensor_meta());
+    }
+    let mut sig_parts: Vec<String> = params
         .iter()
         .map(|p| format!("{} {}", p.slang_param_type(), p.name))
         .collect();
@@ -25,20 +89,31 @@ pub fn emit_canonical_compute_source(kernel: &ShaderKernel) -> KernelDef {
     }
 
     let [wx, wy, wz] = kernel.workgroup_size;
-    let body = emit_user_helper_body(&kernel.body, &kernel.builtins);
+    let body = emit_user_helper_body_with_tensors(&kernel.body, &kernel.builtins, &tensor_slots);
+    let shared = emit_workgroup_decls(&kernel.body);
+    let layout = if tensor_slots.is_empty() {
+        String::new()
+    } else {
+        TENSOR_LAYOUT_SLANG_PREAMBLE.to_string()
+    };
     let sig = sig_parts.join(", ");
     let canonical = format!(
         "import goldy_exp;\n\n\
+         {layout}\
+         {shared}\
          [goldy_compute]\n\
          [numthreads({wx}, {wy}, {wz})]\n\
          void {entry}({sig}) {{\n{body}}}\n"
+    );
+    debug_assert!(
+        tensor_slots.is_empty() || canonical.contains(TENSOR_LAYOUT_SLANG) && canonical.contains(TENSOR_META_PARAM)
     );
 
     KernelDef::new(
         canonical,
         entry,
         kernel.workgroup_size,
-        kernel.params.clone(),
+        params,
         kernel.builtins,
         kernel.source_map.clone(),
     )
@@ -46,9 +121,30 @@ pub fn emit_canonical_compute_source(kernel: &ShaderKernel) -> KernelDef {
 
 /// Emit the indented Slang body for a list of statements.
 pub fn emit_user_helper_body(body: &[Stmt], builtins: &BuiltinMask) -> String {
+    emit_user_helper_body_with_tensors(body, builtins, &HashMap::new())
+}
+
+fn emit_user_helper_body_with_tensors(
+    body: &[Stmt],
+    builtins: &BuiltinMask,
+    tensor_slots: &HashMap<String, u32>,
+) -> String {
     let mut out = String::new();
     for stmt in body {
-        emit_stmt(&mut out, stmt, 1, builtins);
+        emit_stmt(&mut out, stmt, 1, builtins, tensor_slots);
+    }
+    out
+}
+
+fn emit_workgroup_decls(body: &[Stmt]) -> String {
+    let mut out = String::new();
+    for stmt in body {
+        if let Stmt::WorkgroupArray { name, elem, len } = stmt {
+            out.push_str(&format!("groupshared {elem} {name}[{len}];\n"));
+        }
+    }
+    if !out.is_empty() {
+        out.push('\n');
     }
     out
 }
@@ -57,7 +153,7 @@ fn indent(level: usize) -> String {
     "    ".repeat(level)
 }
 
-fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask) {
+fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) {
     let pad = indent(level);
     match stmt {
         Stmt::Let {
@@ -69,13 +165,16 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask
             // Slang requires typed locals; default to uint when the frontend
             // could not infer a more precise type.
             let ty_s = ty.as_deref().unwrap_or("uint");
-            out.push_str(&format!("{pad}{ty_s} {name} = {};\n", emit_expr(init, builtins)));
+            out.push_str(&format!(
+                "{pad}{ty_s} {name} = {};\n",
+                emit_expr(init, builtins, tensor_slots)
+            ));
         }
         Stmt::Assign { target, value } => {
             out.push_str(&format!(
                 "{pad}{} = {};\n",
-                emit_expr(target, builtins),
-                emit_expr(value, builtins)
+                emit_expr(target, builtins, tensor_slots),
+                emit_expr(value, builtins, tensor_slots)
             ));
         }
         Stmt::If {
@@ -83,50 +182,193 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask
             then_body,
             else_body,
         } => {
-            out.push_str(&format!("{pad}if ({}) {{\n", emit_expr(cond, builtins)));
+            out.push_str(&format!("{pad}if ({}) {{\n", emit_expr(cond, builtins, tensor_slots)));
             for s in then_body {
-                emit_stmt(out, s, level + 1, builtins);
+                emit_stmt(out, s, level + 1, builtins, tensor_slots);
             }
             if let Some(else_body) = else_body {
                 out.push_str(&format!("{pad}}} else {{\n"));
                 for s in else_body {
-                    emit_stmt(out, s, level + 1, builtins);
+                    emit_stmt(out, s, level + 1, builtins, tensor_slots);
                 }
             }
             out.push_str(&format!("{pad}}}\n"));
         }
         Stmt::While { cond, body } => {
-            out.push_str(&format!("{pad}while ({}) {{\n", emit_expr(cond, builtins)));
+            out.push_str(&format!(
+                "{pad}while ({}) {{\n",
+                emit_expr(cond, builtins, tensor_slots)
+            ));
             for s in body {
-                emit_stmt(out, s, level + 1, builtins);
+                emit_stmt(out, s, level + 1, builtins, tensor_slots);
             }
             out.push_str(&format!("{pad}}}\n"));
         }
         Stmt::ForRange { var, start, end, body } => {
             out.push_str(&format!(
                 "{pad}for (uint {var} = {}; {var} < {}; ++{var}) {{\n",
-                emit_expr(start, builtins),
-                emit_expr(end, builtins)
+                emit_expr(start, builtins, tensor_slots),
+                emit_expr(end, builtins, tensor_slots)
             ));
             for s in body {
-                emit_stmt(out, s, level + 1, builtins);
+                emit_stmt(out, s, level + 1, builtins, tensor_slots);
             }
             out.push_str(&format!("{pad}}}\n"));
         }
         Stmt::Return { value } => {
             if let Some(v) = value {
-                out.push_str(&format!("{pad}return {};\n", emit_expr(v, builtins)));
+                out.push_str(&format!("{pad}return {};\n", emit_expr(v, builtins, tensor_slots)));
             } else {
                 out.push_str(&format!("{pad}return;\n"));
             }
         }
+        Stmt::WorkgroupArray { .. } => {}
+        Stmt::WorkgroupReduce {
+            op,
+            n,
+            val,
+            scratch,
+            dest,
+        } => emit_workgroup_reduce(out, level, *op, *n, val, scratch, dest, builtins, tensor_slots),
+        Stmt::WorkgroupSoftmax {
+            n,
+            buf,
+            base,
+            count,
+            scratch,
+        } => emit_workgroup_softmax(out, level, *n, buf, base, count, scratch, builtins, tensor_slots),
         Stmt::Expr(expr) => {
-            out.push_str(&format!("{pad}{};\n", emit_expr(expr, builtins)));
+            out.push_str(&format!("{pad}{};\n", emit_expr(expr, builtins, tensor_slots)));
         }
     }
 }
 
-fn emit_expr(expr: &Expr, builtins: &BuiltinMask) -> String {
+fn reduce_steps(n: u32) -> u32 {
+    n.trailing_zeros()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_workgroup_reduce(
+    out: &mut String,
+    level: usize,
+    op: WorkgroupReduceOp,
+    n: u32,
+    val: &Expr,
+    scratch: &str,
+    dest: &Expr,
+    builtins: &BuiltinMask,
+    tensor_slots: &HashMap<String, u32>,
+) {
+    let pad = indent(level);
+    let inner = indent(level + 1);
+    let loop_pad = indent(level + 2);
+    let steps = reduce_steps(n);
+    out.push_str(&format!("{pad}{{\n"));
+    out.push_str(&format!(
+        "{inner}float _goldy_red = {};\n",
+        emit_expr(val, builtins, tensor_slots)
+    ));
+    out.push_str(&format!("{inner}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!(
+        "{inner}for (uint _goldy_s = 0u; _goldy_s < {steps}u; ++_goldy_s) {{\n"
+    ));
+    out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{loop_pad}if (_goldy_lid.x + (1u << _goldy_s) < {n}u)\n"));
+    match op {
+        WorkgroupReduceOp::Sum => out.push_str(&format!(
+            "{loop_pad}    _goldy_red = _goldy_red + {scratch}[_goldy_lid.x + (1u << _goldy_s)];\n"
+        )),
+        WorkgroupReduceOp::Max => out.push_str(&format!(
+            "{loop_pad}    _goldy_red = max(_goldy_red, {scratch}[_goldy_lid.x + (1u << _goldy_s)]);\n"
+        )),
+    }
+    out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{loop_pad}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    out.push_str(&format!("{inner}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!(
+        "{inner}{} = {scratch}[0];\n",
+        emit_expr(dest, builtins, tensor_slots)
+    ));
+    out.push_str(&format!("{pad}}}\n"));
+}
+
+fn tensor_index_expr(buf: &str, index: &str, tensor_slots: &HashMap<String, u32>) -> String {
+    match tensor_slots.get(buf) {
+        Some(slot) => format!("{buf}[goldy_tensor_offset({TENSOR_META_PARAM}[{slot}u], {index})]"),
+        None => format!("{buf}[{index}]"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_workgroup_softmax(
+    out: &mut String,
+    level: usize,
+    n: u32,
+    buf: &str,
+    base: &Expr,
+    count: &Expr,
+    scratch: &str,
+    builtins: &BuiltinMask,
+    tensor_slots: &HashMap<String, u32>,
+) {
+    let pad = indent(level);
+    let inner = indent(level + 1);
+    let loop_pad = indent(level + 2);
+    let base_s = emit_expr(base, builtins, tensor_slots);
+    let count_s = emit_expr(count, builtins, tensor_slots);
+    let idx = format!("({base_s}) + _goldy_sm_t");
+    let at = tensor_index_expr(buf, &idx, tensor_slots);
+    out.push_str(&format!("{pad}{{\n"));
+    out.push_str(&format!("{inner}float _goldy_sm_max = -1e30;\n"));
+    out.push_str(&format!("{inner}uint _goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!("{loop_pad}float _goldy_sm_s = {at};\n"));
+    out.push_str(&format!("{loop_pad}if (_goldy_sm_s > _goldy_sm_max) {{\n"));
+    out.push_str(&format!("{loop_pad}    _goldy_sm_max = _goldy_sm_s;\n"));
+    out.push_str(&format!("{loop_pad}}}\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    emit_workgroup_reduce(
+        out,
+        level + 1,
+        WorkgroupReduceOp::Max,
+        n,
+        &Expr::Var("_goldy_sm_max".into()),
+        scratch,
+        &Expr::Var("_goldy_sm_max".into()),
+        builtins,
+        tensor_slots,
+    );
+    out.push_str(&format!("{inner}float _goldy_sm_sum = 0.0;\n"));
+    out.push_str(&format!("{inner}_goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!("{loop_pad}float _goldy_sm_e = exp({at} - _goldy_sm_max);\n"));
+    out.push_str(&format!("{loop_pad}{at} = _goldy_sm_e;\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_sum = _goldy_sm_sum + _goldy_sm_e;\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    emit_workgroup_reduce(
+        out,
+        level + 1,
+        WorkgroupReduceOp::Sum,
+        n,
+        &Expr::Var("_goldy_sm_sum".into()),
+        scratch,
+        &Expr::Var("_goldy_sm_sum".into()),
+        builtins,
+        tensor_slots,
+    );
+    out.push_str(&format!("{inner}_goldy_sm_t = _goldy_lid.x;\n"));
+    out.push_str(&format!("{inner}while (_goldy_sm_t < {count_s}) {{\n"));
+    out.push_str(&format!("{loop_pad}{at} = {at} / _goldy_sm_sum;\n"));
+    out.push_str(&format!("{loop_pad}_goldy_sm_t = _goldy_sm_t + {n}u;\n"));
+    out.push_str(&format!("{inner}}}\n"));
+    out.push_str(&format!("{inner}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{pad}}}\n"));
+}
+
+fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
     match expr {
         Expr::LitU32(v) => format!("{v}u"),
         Expr::LitI32(v) => format!("{v}"),
@@ -140,24 +382,57 @@ fn emit_expr(expr: &Expr, builtins: &BuiltinMask) -> String {
         }
         Expr::LitBool(v) => if *v { "true" } else { "false" }.to_string(),
         Expr::Var(name) => name.clone(),
-        Expr::Field { base, field } => format!("{}.{}", emit_expr(base, builtins), field),
+        Expr::Field { base, field } => format!("{}.{}", emit_expr(base, builtins, tensor_slots), field),
         Expr::Index { base, index } => {
-            format!("{}[{}]", emit_expr(base, builtins), emit_expr(index, builtins))
+            let index_s = emit_expr(index, builtins, tensor_slots);
+            if let Some(slot) = tensor_slot(base, tensor_slots) {
+                let buf = emit_expr(base, builtins, tensor_slots);
+                format!("{buf}[goldy_tensor_offset({TENSOR_META_PARAM}[{slot}u], {index_s})]")
+            } else {
+                format!("{}[{}]", emit_expr(base, builtins, tensor_slots), index_s)
+            }
         }
-        Expr::Len { base } => format!("goldy_buf_len({})", emit_expr(base, builtins)),
+        Expr::Len { base } => {
+            if let Some(slot) = tensor_slot(base, tensor_slots) {
+                format!("{TENSOR_META_PARAM}[{slot}u].numel")
+            } else {
+                format!("goldy_buf_len({})", emit_expr(base, builtins, tensor_slots))
+            }
+        }
+        Expr::Dim { base, axis } => {
+            if let Some(slot) = tensor_slot(base, tensor_slots) {
+                format!(
+                    "goldy_tensor_dim({TENSOR_META_PARAM}[{slot}u], {})",
+                    emit_expr(axis, builtins, tensor_slots)
+                )
+            } else {
+                format!(
+                    "goldy_tensor_dim({}[0], {})",
+                    emit_expr(base, builtins, tensor_slots),
+                    emit_expr(axis, builtins, tensor_slots)
+                )
+            }
+        }
+        Expr::Rank { base } => {
+            if let Some(slot) = tensor_slot(base, tensor_slots) {
+                format!("{TENSOR_META_PARAM}[{slot}u].rank")
+            } else {
+                "0u".to_string()
+            }
+        }
         Expr::Binary { op, left, right } => format!(
             "({} {} {})",
-            emit_expr(left, builtins),
+            emit_expr(left, builtins, tensor_slots),
             bin_op_slang(*op),
-            emit_expr(right, builtins)
+            emit_expr(right, builtins, tensor_slots)
         ),
-        Expr::Unary { op, expr } => format!("({}{})", unary_op_slang(*op), emit_expr(expr, builtins)),
-        Expr::Call { func, args } => emit_call(*func, args, builtins),
-        Expr::Cast { expr, ty } => format!("(({}){})", ty, emit_expr(expr, builtins)),
+        Expr::Unary { op, expr } => format!("({}{})", unary_op_slang(*op), emit_expr(expr, builtins, tensor_slots)),
+        Expr::Call { func, args } => emit_call(*func, args, builtins, tensor_slots),
+        Expr::Cast { expr, ty } => format!("(({}){})", ty, emit_expr(expr, builtins, tensor_slots)),
     }
 }
 
-fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask) -> String {
+fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
     match func {
         BuiltinFn::GlobalId => {
             assert!(builtins.global_id, "global_id used without builtin mask");
@@ -183,24 +458,32 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask) -> String {
                 "uint3(0u, 0u, 0u)".to_string()
             }
         }
-        BuiltinFn::Abs => format!("abs({})", join_args(args, builtins)),
-        BuiltinFn::Min => format!("min({})", join_args(args, builtins)),
-        BuiltinFn::Max => format!("max({})", join_args(args, builtins)),
-        BuiltinFn::Floor => format!("floor({})", join_args(args, builtins)),
-        BuiltinFn::Ceil => format!("ceil({})", join_args(args, builtins)),
-        BuiltinFn::Sqrt => format!("sqrt({})", join_args(args, builtins)),
-        BuiltinFn::Sin => format!("sin({})", join_args(args, builtins)),
-        BuiltinFn::Length => format!("length({})", join_args(args, builtins)),
-        BuiltinFn::Float2 => format!("float2({})", join_args(args, builtins)),
-        BuiltinFn::Float3 => format!("float3({})", join_args(args, builtins)),
-        BuiltinFn::Float4 => format!("float4({})", join_args(args, builtins)),
-        BuiltinFn::Uint2 => format!("uint2({})", join_args(args, builtins)),
+        BuiltinFn::Abs => format!("abs({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Min => format!("min({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Max => format!("max({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Floor => format!("floor({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Ceil => format!("ceil({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Sqrt => format!("sqrt({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Sin => format!("sin({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Cos => format!("cos({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Exp => format!("exp({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Log => format!("log({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Pow => format!("pow({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Length => format!("length({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::WorkgroupBarrier => {
+            assert!(args.is_empty());
+            "GroupMemoryBarrierWithGroupSync()".to_string()
+        }
+        BuiltinFn::Float2 => format!("float2({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Float3 => format!("float3({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Float4 => format!("float4({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Uint2 => format!("uint2({})", join_args(args, builtins, tensor_slots)),
     }
 }
 
-fn join_args(args: &[Expr], builtins: &BuiltinMask) -> String {
+fn join_args(args: &[Expr], builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
     args.iter()
-        .map(|a| emit_expr(a, builtins))
+        .map(|a| emit_expr(a, builtins, tensor_slots))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -315,5 +598,175 @@ mod tests {
         assert!(def.source.canonical_slang.contains("goldy_buf_len(y)"));
         assert_eq!(def.entry, "cs_main");
         assert_eq!(def.workgroup_size, [256, 1, 1]);
+    }
+
+    #[test]
+    fn emits_groupshared_and_barrier() {
+        let kernel = ShaderKernel {
+            name: "reduce".into(),
+            workgroup_size: [256, 1, 1],
+            params: vec![KernelParam::buffer_read_write("data", ElementType::F32)],
+            builtins: BuiltinMask {
+                local_id: true,
+                ..BuiltinMask::NONE
+            },
+            body: vec![
+                Stmt::WorkgroupArray {
+                    name: "scratch".into(),
+                    elem: "float".into(),
+                    len: 256,
+                },
+                Stmt::Assign {
+                    target: Expr::Index {
+                        base: Box::new(Expr::Var("scratch".into())),
+                        index: Box::new(Expr::Field {
+                            base: Box::new(Expr::Call {
+                                func: BuiltinFn::LocalId,
+                                args: vec![],
+                            }),
+                            field: "x".into(),
+                        }),
+                    },
+                    value: Expr::LitF32(1.0),
+                },
+                Stmt::Expr(Expr::Call {
+                    func: BuiltinFn::WorkgroupBarrier,
+                    args: vec![],
+                }),
+            ],
+            source_map: SourceMap {
+                rust_file: "reduce.rs".into(),
+                rust_line: 1,
+            },
+        };
+        let slang = emit_canonical_compute_source(&kernel).source.canonical_slang;
+        assert!(slang.contains("groupshared float scratch[256];"));
+        assert!(slang.contains("GroupMemoryBarrierWithGroupSync()"));
+        assert!(!slang.contains("float scratch ="));
+    }
+
+    #[test]
+    fn emits_workgroup_sum_and_softmax() {
+        let kernel = ShaderKernel {
+            name: "collectives".into(),
+            workgroup_size: [256, 1, 1],
+            params: vec![KernelParam::buffer_read_write("att", ElementType::F32)],
+            builtins: BuiltinMask {
+                local_id: true,
+                ..BuiltinMask::NONE
+            },
+            body: vec![
+                Stmt::WorkgroupArray {
+                    name: "scratch".into(),
+                    elem: "float".into(),
+                    len: 256,
+                },
+                Stmt::Let {
+                    name: "ss".into(),
+                    mutable: true,
+                    ty: Some("float".into()),
+                    init: Expr::LitF32(1.0),
+                },
+                Stmt::WorkgroupReduce {
+                    op: WorkgroupReduceOp::Sum,
+                    n: 256,
+                    val: Expr::Var("ss".into()),
+                    scratch: "scratch".into(),
+                    dest: Expr::Var("ss".into()),
+                },
+                Stmt::WorkgroupSoftmax {
+                    n: 256,
+                    buf: "att".into(),
+                    base: Expr::LitU32(0),
+                    count: Expr::LitU32(4),
+                    scratch: "scratch".into(),
+                },
+            ],
+            source_map: SourceMap {
+                rust_file: "collectives.rs".into(),
+                rust_line: 1,
+            },
+        };
+        let slang = emit_canonical_compute_source(&kernel).source.canonical_slang;
+        assert!(slang.contains("GroupThreadId _goldy_lid"));
+        assert!(slang.contains("_goldy_red = _goldy_red + scratch[_goldy_lid.x + (1u << _goldy_s)]"));
+        assert!(slang.contains("ss = scratch[0];"));
+        assert!(slang.contains("exp(att[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
+        assert!(slang.contains("_goldy_red = max(_goldy_red, scratch[_goldy_lid.x + (1u << _goldy_s)])"));
+    }
+
+    #[test]
+    fn emits_tensor_view_index_and_metadata_resource() {
+        let kernel = ShaderKernel {
+            name: "scale_view".into(),
+            workgroup_size: [64, 1, 1],
+            params: vec![
+                KernelParam::tensor_read("x", ElementType::F32),
+                KernelParam::tensor_write("y", ElementType::F32),
+            ],
+            builtins: BuiltinMask {
+                global_id: true,
+                ..BuiltinMask::NONE
+            },
+            body: vec![
+                Stmt::Let {
+                    name: "i".into(),
+                    mutable: false,
+                    ty: Some("uint".into()),
+                    init: Expr::Field {
+                        base: Box::new(Expr::Call {
+                            func: BuiltinFn::GlobalId,
+                            args: vec![],
+                        }),
+                        field: "x".into(),
+                    },
+                },
+                Stmt::If {
+                    cond: Expr::Binary {
+                        op: BinOp::Lt,
+                        left: Box::new(Expr::Var("i".into())),
+                        right: Box::new(Expr::Len {
+                            base: Box::new(Expr::Var("y".into())),
+                        }),
+                    },
+                    then_body: vec![Stmt::Assign {
+                        target: Expr::Index {
+                            base: Box::new(Expr::Var("y".into())),
+                            index: Box::new(Expr::Var("i".into())),
+                        },
+                        value: Expr::Index {
+                            base: Box::new(Expr::Var("x".into())),
+                            index: Box::new(Expr::Binary {
+                                op: BinOp::Add,
+                                left: Box::new(Expr::Var("i".into())),
+                                right: Box::new(Expr::Dim {
+                                    base: Box::new(Expr::Var("x".into())),
+                                    axis: Box::new(Expr::LitU32(1)),
+                                }),
+                            }),
+                        },
+                    }],
+                    else_body: None,
+                },
+            ],
+            source_map: SourceMap {
+                rust_file: "view.rs".into(),
+                rust_line: 1,
+            },
+        };
+        let def = emit_canonical_compute_source(&kernel);
+        let slang = &def.source.canonical_slang;
+        assert!(slang.contains("struct GoldyTensorLayout"));
+        assert!(slang.contains("BufRO<GoldyTensorLayout> _goldy_tensor_meta"));
+        assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
+        assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[1u]"));
+        assert!(slang.contains("_goldy_tensor_meta[1u].numel"));
+        assert!(slang.contains("goldy_tensor_dim(_goldy_tensor_meta[0u], 1u)"));
+        assert_eq!(def.params.len(), 3);
+        assert!(def.params[0].is_tensor);
+        assert!(def.params[1].is_tensor);
+        assert!(!def.params[2].is_tensor);
+        assert_eq!(def.params[2].name, "_goldy_tensor_meta");
+        assert_eq!(def.abi_version, crate::KERNEL_ABI_VERSION);
     }
 }

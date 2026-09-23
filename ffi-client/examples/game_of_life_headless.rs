@@ -88,12 +88,9 @@ fn main() -> goldy_ffi_client::Result<()> {
     }
 
     scheme.copy_to_texture(&rt, &readback)?;
-    let memory = goldy_ffi_client::MemoryExchange::new(&ctx)?;
-    let withdraw_tex = memory.bind_withdraw_texture(&mut scheme, &readback)?;
-    let withdraw_cells = memory.bind_withdraw(&mut scheme, &write)?;
     let mut submission = scheme.submit()?;
-    let pixels = withdraw_tex.claim(&mut submission)?.consume()?;
-    let cell_bytes = withdraw_cells.claim(&mut submission)?.consume()?;
+    let pixels = submission.take_texture(&readback)?;
+    let cell_bytes = submission.take(&write)?;
     let cells_out: &[u32] = bytemuck::cast_slice(&cell_bytes);
     assert_eq!(count_live(cells_out), 4, "still-life block should remain 4 live cells");
 

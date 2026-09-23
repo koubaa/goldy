@@ -7,19 +7,6 @@ static const float STAR_TYPE_GALAXY = 1.0;
 static const float STAR_TYPE_QUASAR = 2.0;
 static const float STAR_TYPE_WHITE_DWARF = 3.0;
 
-struct Star {
-    float x;
-    float y;
-    float z;
-    float star_type;
-};
-
-struct StarfieldParams {
-    float speed;
-    float frame;
-    float _pad1;
-    float _pad2;
-};
 
 static const uint NUM_STARS = 500;
 

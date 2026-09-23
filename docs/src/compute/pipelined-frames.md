@@ -48,7 +48,7 @@ loop {
     let handle = orch.begin_frame()?;
 
     let mut submission = scheme.submit()?;
-    present.claim(&mut submission)?.consume()?;
+    (&mut submission >> &present).take()?;
 
     orch.end_frame_for_present(handle, &submission)?;
     orch.note_presented(&submission);
