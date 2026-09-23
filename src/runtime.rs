@@ -805,6 +805,11 @@ impl Runtime {
         self.inner.adapter.id()
     }
 
+    /// Identity of this handle's device substrate. Clones of the same [`Runtime`] share it.
+    pub fn substrate_ptr(&self) -> *const () {
+        Arc::as_ptr(&self.inner).cast()
+    }
+
     /// Get the device type (discrete GPU, integrated GPU, CPU/software, etc.).
     pub fn device_type(&self) -> DeviceType {
         self.inner.adapter.device_type()
