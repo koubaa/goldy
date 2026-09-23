@@ -163,7 +163,7 @@ impl HostReadRequest {
                 byte_size,
                 keepalive,
             } => {
-                if elem == 0 || byte_size as usize % elem != 0 {
+                if elem == 0 || !(byte_size as usize).is_multiple_of(elem) {
                     return Err(GoldyError::Backend(anyhow::anyhow!(
                         "host claim: parcel byte size {byte_size} is not a multiple of {}",
                         elem
@@ -368,7 +368,7 @@ impl HostReadRequest {
                 .query_texture_copy_footprint(ctx.runtime().inner.handle, width, height, format)
                 .map_err(|e| ctx.classify(e))?
         };
-        if elem == 0 || layout.logical_bytes as usize % elem != 0 {
+        if elem == 0 || !(layout.logical_bytes as usize).is_multiple_of(elem) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
                 "host claim: texture logical size {} is not a multiple of {elem}",
                 layout.logical_bytes

@@ -61,18 +61,18 @@ impl<'a> TensorRecorder<'a> {
         b: TensorView<'_>,
         out: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        let (m, n, k, a_view, b_view, ta, tb) = gemm_views(a, b)?;
+        let g = gemm_views(a, b)?;
         let desc = {
-            let mut d = MatMulDesc::gemm(m, n, k);
-            d.transpose_a = ta;
-            d.transpose_b = tb;
+            let mut d = MatMulDesc::gemm(g.m, g.n, g.k);
+            d.transpose_a = g.transpose_a;
+            d.transpose_b = g.transpose_b;
             d
         };
         let c_view = packed_or_strided(out, false)?;
         self.scheme
             .matmul(label, desc)
-            .a(a.buffer(), a_view)
-            .b(b.buffer(), b_view)
+            .a(a.buffer(), g.a)
+            .b(b.buffer(), g.b)
             .out(out.buffer(), c_view)
             .record();
         Ok(())
@@ -182,10 +182,17 @@ fn matmul_out_shape(a: TensorShape, b: TensorShape) -> Result<TensorShape, Goldy
     }
 }
 
-fn gemm_views(
-    a: TensorView<'_>,
-    b: TensorView<'_>,
-) -> Result<(u32, u32, u32, MatMulView, MatMulView, bool, bool), GoldyError> {
+struct GemmViews {
+    m: u32,
+    n: u32,
+    k: u32,
+    a: MatMulView,
+    b: MatMulView,
+    transpose_a: bool,
+    transpose_b: bool,
+}
+
+fn gemm_views(a: TensorView<'_>, b: TensorView<'_>) -> Result<GemmViews, GoldyError> {
     let (m, k, a_view, ta) = matrix_operand(a, true)?;
     let (k2, n, b_view, tb) = matrix_operand(b, false)?;
     if k != k2 {
@@ -193,7 +200,15 @@ fn gemm_views(
             "tensor matmul: inner dimensions must match".into(),
         ));
     }
-    Ok((m, n, k, a_view, b_view, ta, tb))
+    Ok(GemmViews {
+        m,
+        n,
+        k,
+        a: a_view,
+        b: b_view,
+        transpose_a: ta,
+        transpose_b: tb,
+    })
 }
 
 fn matrix_operand(v: TensorView<'_>, is_a: bool) -> Result<(u32, u32, MatMulView, bool), GoldyError> {

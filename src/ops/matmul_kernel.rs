@@ -1,5 +1,7 @@
 //! Portable FP32 GEMM/GEMV fallback (`C = op(A) @ op(B)`, alpha = 1, beta = 0).
 
+#![allow(clippy::too_many_arguments)]
+
 /// Packed flags: bit 0 = transpose A, bit 1 = transpose B.
 pub const FLAG_TRANSPOSE_A: u32 = 1;
 pub const FLAG_TRANSPOSE_B: u32 = 2;

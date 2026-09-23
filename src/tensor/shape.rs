@@ -86,7 +86,7 @@ impl TensorShape {
     }
 
     pub fn is_empty(self) -> bool {
-        self.rank > 0 && self.dims().iter().any(|&d| d == 0)
+        self.rank > 0 && self.dims().contains(&0)
     }
 
     /// Drop `axis` (must be in range).

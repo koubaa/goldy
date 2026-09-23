@@ -82,17 +82,17 @@ pub(crate) struct PreparedOps {
 impl PreparedOps {
     fn prepare(runtime: &Runtime) -> Result<Self, GoldyError> {
         Ok(Self {
-            unary: UnaryF32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            binary: BinaryF32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            copy: CopyU32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            reduce: ReduceF32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            gather: GatherF32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            scatter: ScatterF32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            batched: BatchedMatMulKernel::prepare(runtime).map_err(GoldyError::from)?,
-            cast_f32_i32: CastF32I32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            cast_f32_u32: CastF32U32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            cast_i32_f32: CastI32F32Kernel::prepare(runtime).map_err(GoldyError::from)?,
-            cast_u32_f32: CastU32F32Kernel::prepare(runtime).map_err(GoldyError::from)?,
+            unary: UnaryF32Kernel::prepare(runtime)?,
+            binary: BinaryF32Kernel::prepare(runtime)?,
+            copy: CopyU32Kernel::prepare(runtime)?,
+            reduce: ReduceF32Kernel::prepare(runtime)?,
+            gather: GatherF32Kernel::prepare(runtime)?,
+            scatter: ScatterF32Kernel::prepare(runtime)?,
+            batched: BatchedMatMulKernel::prepare(runtime)?,
+            cast_f32_i32: CastF32I32Kernel::prepare(runtime)?,
+            cast_f32_u32: CastF32U32Kernel::prepare(runtime)?,
+            cast_i32_f32: CastI32F32Kernel::prepare(runtime)?,
+            cast_u32_f32: CastU32F32Kernel::prepare(runtime)?,
         })
     }
 }

@@ -302,8 +302,7 @@ impl<'a> TensorView<'a> {
         let pad = target.rank() - src.rank();
         let mut dims = Vec::with_capacity(target.rank());
         let mut strides = [0i64; MAX_TENSOR_RANK];
-        for i in 0..target.rank() {
-            let t = target.dims()[i];
+        for (i, &t) in target.dims().iter().enumerate() {
             if i < pad {
                 dims.push(t);
                 strides[i] = 0;
@@ -341,15 +340,15 @@ pub(crate) fn broadcast_shapes(a: TensorShape, b: TensorShape) -> Result<TensorS
     let rb = b.rank();
     let rank = ra.max(rb);
     let mut dims = vec![0u32; rank];
-    for i in 0..rank {
+    for (i, dim) in dims.iter_mut().enumerate() {
         let da = if i < rank - ra { 1 } else { a.dims()[i - (rank - ra)] };
         let db = if i < rank - rb { 1 } else { b.dims()[i - (rank - rb)] };
         if da == db {
-            dims[i] = da;
+            *dim = da;
         } else if da == 1 {
-            dims[i] = db;
+            *dim = db;
         } else if db == 1 {
-            dims[i] = da;
+            *dim = da;
         } else {
             return Err(GoldyError::Validation(format!(
                 "tensor broadcast: incompatible dims {da} and {db}"

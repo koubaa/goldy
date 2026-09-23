@@ -247,6 +247,7 @@ fn reduce_steps(n: u32) -> u32 {
     n.trailing_zeros()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_workgroup_reduce(
     out: &mut String,
     level: usize,
@@ -299,6 +300,7 @@ fn tensor_index_expr(buf: &str, index: &str, tensor_slots: &HashMap<String, u32>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_workgroup_softmax(
     out: &mut String,
     level: usize,

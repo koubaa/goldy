@@ -1785,6 +1785,7 @@ impl Scheme {
         self.desc.register_stamp_parts(resource, stamp);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_matmul_node(
         &mut self,
         label: crate::SchemeLabel,

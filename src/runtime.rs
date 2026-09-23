@@ -181,6 +181,7 @@ impl Instance {
         Ok(adapter.clone())
     }
 
+    #[cfg(all(feature = "dx12", target_os = "windows"))]
     fn adapter_for_id(&self, adapter_id: u32) -> Result<Adapter> {
         let info = self
             .backend

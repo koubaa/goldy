@@ -18,9 +18,9 @@ use crate::context::Context;
 use crate::deposit_pool::DepositExchangePool;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
+use crate::scheme::Scheme;
 #[cfg(feature = "graphics")]
-use crate::scheme::{Lease, LeaseRenderTarget, Transaction};
-use crate::scheme::{Scheme, Submission};
+use crate::scheme::{Lease, LeaseRenderTarget, Submission, Transaction};
 #[cfg(feature = "graphics")]
 use crate::surface::Frame as SurfaceFrame;
 #[cfg(feature = "graphics")]
