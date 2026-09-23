@@ -17,11 +17,9 @@ mod imp {
     use crate::submission::submission_context;
     use crate::upload;
     use goldy::{
-        BackendType, BufferKind, ComputePipeline, Context, Instance, NodeAccess, Parcel,
-        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission,
+        BackendType, BufferKind, ComputePipeline, Context, Instance, NodeAccess, Parcel, RequestAdapterOptions,
+        Runtime, RuntimeDescriptor, Scheme, ShaderModule, Submission,
     };
-    
-    
 
     fn request_default_device(instance: &Instance) -> Runtime {
         instance

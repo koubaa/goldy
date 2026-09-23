@@ -6517,7 +6517,9 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let first = scheme.register_present_exchange(&lease);
         let second = scheme.register_present_exchange(&lease);
         let ClaimKey::Present { present_idx: first_idx } = first.key;
-        let ClaimKey::Present { present_idx: second_idx } = second.key;
+        let ClaimKey::Present {
+            present_idx: second_idx,
+        } = second.key;
         assert_eq!(first_idx, second_idx);
         assert_eq!(first.binding_id, second.binding_id);
         assert_eq!(scheme.ir_node_count(), 0, "reuse must not append IR nodes");

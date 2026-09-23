@@ -2460,7 +2460,10 @@ impl CudaBackend {
                         .context("CUDA: readback missing pinned host")?;
                     let host = Arc::clone(host);
                     let host_offset = (dst_buf.offset + layout.footprint_offset) as usize;
-                    let dst_buf = self.buffers.get_mut(dst).context("CUDA: invalid CopyTextureToReadback destination")?;
+                    let dst_buf = self
+                        .buffers
+                        .get_mut(dst)
+                        .context("CUDA: invalid CopyTextureToReadback destination")?;
                     dst_buf.bump_content_epoch();
                     dst_buf.readback_stream = Some(Arc::clone(stream));
                     ops.push(CudaOp::CopyTextureToReadbackHost {
@@ -7312,13 +7315,8 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             BufferFlags::COPY_SRC | BufferFlags::COPY_DST,
         )?;
         backend.write_buffer(small, 0, bytemuck::cast_slice(&[3u32, 4, 5, 6]))?;
-        let shader = backend.create_shader_with_paths(
-            device,
-            SPIN_SLANG,
-            &[],
-            &[],
-            crate::types::OptimizationLevel::Default,
-        )?;
+        let shader =
+            backend.create_shader_with_paths(device, SPIN_SLANG, &[], &[], crate::types::OptimizationLevel::Default)?;
         let pipeline = backend.create_compute_pipeline(device, shader, Some("spin"))?;
         let slot = backend.buffer_bindless_index(spin).context("missing registry key")?;
         let tv_a = backend.submit_standalone(

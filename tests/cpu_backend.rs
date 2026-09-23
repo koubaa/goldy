@@ -2,10 +2,7 @@
 //!
 //! Isolated crate so the env override cannot race other GPU tests.
 
-use goldy::{
-    BufferKind, Instance, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme,
-    ShaderModule,
-};
+use goldy::{BufferKind, Instance, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule};
 
 fn run_scheme_double_u32() {
     let instance = Instance::new().expect("instance");

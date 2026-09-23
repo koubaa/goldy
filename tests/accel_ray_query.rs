@@ -6,8 +6,8 @@ mod imp {
     use crate::submission::{skip_dx12_warp_ray_tracing, submission_context};
     use goldy::{
         types::{BackendType, BufferFlags},
-        AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Instance, NodeAccess,
-        RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
+        AccelInstance, AccelerationStructure, BufferKind, ComputePipeline, Instance, NodeAccess, RequestAdapterOptions,
+        Runtime, RuntimeDescriptor, Scheme, ShaderModule,
     };
     use std::sync::Mutex;
 

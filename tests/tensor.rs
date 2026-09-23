@@ -6,8 +6,8 @@
 mod submission;
 
 use goldy::{
-    BufferKind, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
-    TensorDType, TensorKernels, TensorScalar, TensorShape, TensorView,
+    BufferKind, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorDType,
+    TensorKernels, TensorScalar, TensorShape, TensorView,
 };
 use std::sync::Mutex;
 

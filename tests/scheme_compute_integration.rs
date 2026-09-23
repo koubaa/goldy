@@ -13,7 +13,7 @@ mod imp {
         RequestAdapterOptions, Runtime, RuntimeDescriptor, Sampler, Scheme, ShaderModule, StructuredBufferElement,
         Submission,
     };
-    
+
     use std::sync::Arc;
 
     fn make_device() -> Runtime {
