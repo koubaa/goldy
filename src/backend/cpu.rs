@@ -11,7 +11,6 @@ use crate::slang::compiler::SlangCompiler;
 use crate::types::{BufferFlags, BufferKind, DeviceType, ResourceAccess, ResourceCategory};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::ops::Shr;
 use std::sync::{Arc, Mutex};
 
 fn cpu_graphics_unsupported<T>() -> Result<T> {

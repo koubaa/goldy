@@ -17,7 +17,7 @@ use crate::timeline::{
 use crate::types::{BufferFlags, BufferKind, ResourceAccess, ResourceHandle, TextureFlags};
 use crate::vram_allocator::ParcelType;
 use std::borrow::Cow;
-use std::ops::{Deref, Index, Shr};
+use std::ops::{Deref, Index};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 

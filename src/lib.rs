@@ -62,6 +62,7 @@ pub mod tracy;
 #[doc(hidden)]
 pub use tracy_client as _tracy_client;
 pub(crate) mod allocation_policy;
+#[cfg(test)]
 mod buffer_alloc_tests;
 pub mod exchange;
 #[cfg(test)]
@@ -200,7 +201,7 @@ pub mod test_support {
     use crate::backend::mock::MockBackend;
     use crate::runtime::{Adapter, Instance, RequestAdapterOptions, RuntimeDescriptor};
     use crate::{BackendType, DeviceType, Runtime};
-    use std::ops::{Deref, Shr};
+    use std::ops::Deref;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};

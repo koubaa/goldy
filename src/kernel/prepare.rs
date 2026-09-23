@@ -7,7 +7,9 @@ use crate::scheme::{Scheme, SchemeBindable};
 use crate::shader::ShaderModule;
 use crate::task_graph::NodeAccess;
 use anyhow::{Context, Result};
+#[cfg(feature = "tensor")]
 use goldy_shader_ir::{BoundTensorDim, TensorShapeSpec};
+#[cfg(feature = "tensor")]
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 /// Symbolic extents unified across one generated `record` call.
 #[derive(Debug, Default)]
 pub struct TensorShapeEnv {
+    #[cfg(feature = "tensor")]
     dims: HashMap<String, BoundTensorDim>,
 }
 
@@ -271,6 +274,7 @@ pub fn dump_kernel_artifacts(def: &KernelDef, override_dir: Option<&std::path::P
     Ok(())
 }
 
+#[cfg(feature = "tensor")]
 fn check_tensor_shape_spec(
     kernel: &str,
     param: &str,

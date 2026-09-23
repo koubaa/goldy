@@ -48,7 +48,6 @@
 //! into it, and a handler that runs out of arena space rejects the petition.
 
 use std::collections::BTreeSet;
-use std::ops::Shr;
 use std::sync::{Arc, Mutex};
 
 use bytemuck::Pod;

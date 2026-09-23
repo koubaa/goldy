@@ -235,11 +235,7 @@ impl Submission {
                 "Transaction belongs to a different scheme than this submission"
             )));
         }
-        let ClaimKey::Present { present_idx } = key else {
-            return Err(GoldyError::Backend(anyhow::anyhow!(
-                "present claim key required for surface transaction"
-            )));
-        };
+        let ClaimKey::Present { present_idx } = key;
         let idx = present_idx as usize;
         let expected_binding = self.claim_bindings.get(idx).copied().ok_or_else(|| {
             GoldyError::Backend(anyhow::anyhow!(
@@ -1671,6 +1667,7 @@ impl Scheme {
     }
 
     /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
+    #[cfg(feature = "tensor")]
     pub(crate) fn intern_record_buffer_arc(&mut self, buf: crate::Buffer) -> Arc<crate::Buffer> {
         let arc = Arc::new(buf);
         self.desc.record_constants.push(Arc::clone(&arc));
@@ -1678,6 +1675,7 @@ impl Scheme {
     }
 
     /// Intern a record-time constant buffer so it outlives IR nodes that bind it.
+    #[cfg(feature = "tensor")]
     pub(crate) fn intern_record_buffer(&mut self, buf: crate::Buffer) -> crate::parcel::Parcel {
         let arc = self.intern_record_buffer_arc(buf);
         arc.whole().clone()
@@ -3396,11 +3394,13 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Bind a scheme-owned constant buffer as the next shader resource slot.
+    #[cfg(feature = "tensor")]
     pub(crate) fn bind_record_constant(self, buf: crate::Buffer, access: NodeAccess) -> Self {
         let parcel = self.scheme.intern_record_buffer(buf);
         self.with_parcel(&parcel, access)
     }
 
+    #[cfg(feature = "tensor")]
     pub(crate) fn scheme_runtime(&self) -> crate::runtime::Runtime {
         self.scheme.context().runtime().clone()
     }
@@ -4243,7 +4243,6 @@ mod tests {
     use crate::types::ResourceAccess;
     use crate::BufferKind;
     use crate::{DepositTarget, MemoryExchange};
-    use std::ops::Shr;
     use std::sync::Arc;
 
     fn mock_runtime() -> Arc<Runtime> {

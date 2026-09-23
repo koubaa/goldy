@@ -1,4 +1,3 @@
-use std::ops::Shr;
 #[cfg(test)]
 mod heap_tests {
     //! Metal heap self-regulation integration tests.

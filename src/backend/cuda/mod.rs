@@ -81,7 +81,6 @@ use retained_graph::GraphRegistry;
 pub use retained_graph::{CudaGraphStats, CudaGraphStatsSnapshot};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
-use std::ops::Shr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};

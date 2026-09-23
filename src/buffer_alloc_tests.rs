@@ -1,4 +1,3 @@
-use std::ops::Shr;
 #[cfg(test)]
 mod buffer_alloc_tests {
     use crate::parcel::Parcel;

@@ -46,8 +46,6 @@ enum HostReadKind {
         width: u32,
         height: u32,
         format: crate::types::TextureFormat,
-        flags: TextureFlags,
-        access: TextureKind,
     },
 }
 
@@ -126,8 +124,6 @@ impl HostReadRequest {
                 width,
                 height,
                 format,
-                flags,
-                access,
             }
         } else {
             return Err(GoldyError::Backend(anyhow::anyhow!(
@@ -181,8 +177,6 @@ impl HostReadRequest {
                 width,
                 height,
                 format,
-                flags: _,
-                access: _,
             } => {
                 let _ = keepalive;
                 Self::realize_texture::<T>(ctx, stamp, handle, width, height, format, elem)
