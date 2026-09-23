@@ -173,14 +173,7 @@ impl<'a> TensorRecorder<'a> {
             self.kernels
                 .ops
                 .copy
-                .record(
-                    self.scheme,
-                    label,
-                    out.buffer(),
-                    out.buffer(),
-                    &*meta_buf,
-                    value.bits(),
-                )
+                .record(self.scheme, label, out.buffer(), out.buffer(), &*meta_buf, value.bits())
                 .over_1d(n);
         }
         Ok(())

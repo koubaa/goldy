@@ -3,7 +3,7 @@
 use crate::error::{check, non_null, Result};
 use crate::runtime::Runtime;
 use crate::scheme::Scheme;
-use crate::sys::{self, GoldyTensor, GoldyTensorKernels, GoldyTensorDType, GoldyTensorShape};
+use crate::sys::{self, GoldyTensor, GoldyTensorDType, GoldyTensorKernels, GoldyTensorShape};
 use std::ffi::CString;
 
 /// Dense tensor element type. Operation support is per-op, not universal.

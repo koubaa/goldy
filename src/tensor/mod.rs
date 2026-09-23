@@ -6,9 +6,9 @@
 //! RMSNorm, RoPE, attention, and KV-cache policy are **out of scope**.
 //!
 //! Views are metadata lenses: they never mint a new ownership identity. Binding a
-//! view claims a conservative [`crate::task_graph::ResourceId::BufferRange`]
-//! envelope (or the parent buffer) so aliases remain visible to Goldy, while the
-//! shader bindless slot is the parent parcel.
+//! view claims a conservative buffer-range envelope (or the parent buffer) so
+//! aliases remain visible to Goldy, while the shader bindless slot is the parent
+//! parcel.
 
 mod bind;
 mod dtype;

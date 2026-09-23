@@ -45,7 +45,7 @@ pub use scheme::{
 pub use shader_module::ShaderModule;
 pub use surface_exchange::SurfaceExchange;
 #[cfg(feature = "tensor")]
-pub use tensor::{Tensor, TensorKernels, TensorDType, TensorShape};
+pub use tensor::{Tensor, TensorDType, TensorKernels, TensorShape};
 pub use texture::Texture;
 pub use types::{
     BufferKind, Color, CompareFunction, DepthFormat, DepthStencilState, DeviceType, IndexFormat, NodeAccess,

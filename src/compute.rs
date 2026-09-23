@@ -218,4 +218,3 @@ fn compile_compute_stage_unlocked(
 
     Ok(Some((result.shader.data, reflection)))
 }
-

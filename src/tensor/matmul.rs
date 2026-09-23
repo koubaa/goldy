@@ -129,14 +129,7 @@ impl<'a> TensorRecorder<'a> {
         self.kernels
             .ops
             .batched
-            .record(
-                self.scheme,
-                label,
-                a.buffer(),
-                b.buffer(),
-                out.buffer(),
-                &*meta_buf,
-            )
+            .record(self.scheme, label, a.buffer(), b.buffer(), out.buffer(), &*meta_buf)
             .over_1d(out.numel_u32().max(1));
         Ok(())
     }
