@@ -5,9 +5,7 @@
 #[path = "common/submission.rs"]
 mod submission;
 
-use goldy::{
-    BufferKind, MatMulDesc, MatMulView, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
-};
+use goldy::{BufferKind, MatMulDesc, MatMulView, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme};
 use std::sync::Mutex;
 
 static GPU: Mutex<()> = Mutex::new(());

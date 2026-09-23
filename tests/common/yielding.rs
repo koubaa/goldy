@@ -1,8 +1,8 @@
 //! Yielding-script scenarios shared by the CPU and GPU backend test crates.
 
 use goldy::{
-    Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, NodeAccess, Parcel,
-    Petition, Promised, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, YieldPoint,
+    Backpressure, BufferKind, ComputePipeline, Context, GoldyError, Instance, NodeAccess, Parcel, Petition, Promised,
+    RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule, YieldPoint,
 };
 use std::sync::{Arc, Mutex};
 
