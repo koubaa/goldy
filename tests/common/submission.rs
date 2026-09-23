@@ -2,6 +2,7 @@
 
 use goldy::{types::BackendType, Context, Runtime};
 
+#[allow(dead_code)]
 pub fn submission_context(device: &Runtime) -> Context {
     device.create_context().expect("context")
 }

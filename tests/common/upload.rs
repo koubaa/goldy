@@ -9,6 +9,7 @@ pub fn upload_parcel(upload: &mut Scheme, deposit: &DepositTransaction, data: &[
 }
 
 /// Bind a reusable buffer deposit on an upload scheme.
+#[allow(dead_code)]
 pub fn bind_upload_deposit(
     ctx: &Context,
     upload: &mut Scheme,

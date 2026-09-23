@@ -1485,7 +1485,7 @@ impl GpuBackend for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BufferKind, MemoryExchange, NodeAccess, Runtime, Scheme, ShaderModule};
+    use crate::{BufferKind, NodeAccess, Runtime, Scheme, ShaderModule};
 
     fn run_double(device: &Runtime) {
         let ctx = device.create_context().expect("ctx");

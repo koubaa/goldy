@@ -49,7 +49,7 @@ Do not describe **Designed**, **Experimental**, or **Speculative** capabilities 
 | Ledger | Cross-submission sync (`ParcelStamp`, timeline) | Crate-private; clients use settlement APIs |
 | Gate | Submission gate, `Context::boundary_crossed` | Epoch-driven reclamation |
 | Exchange | `SurfaceExchange`, `MemoryExchange` | Present: `(&mut submission >> &transaction).take()?` (canonical: `Transaction` → `Claim` → `consume` / `discard`). Deposit: `(&deposit << &data)?` tenders this submission; internal `Claim` consumed at copy dispatch |
-| Host claim | `PendingHostRead`, `HostView` | `(&mut submission >> &parcel).take::<T>()` — mapped read or staged copy; public CPU ownership between gates |
+| Host claim | `PendingHostRead`, `HostView` | `(&mut submission >> &parcel).take::<T>()` — mapped read or staged copy; CUDA stages into cacheable pinned host memory on the producing stream. Public CPU ownership between gates |
 | Warehouse | `BudgetPolicy`, `VramAllocator` | Bound on committed parcel extent |
 | Lease | `Lease<LeaseTexture>`, `Lease<LeaseBuffer>`, `Lease<LeaseRenderTarget>`, `PresentLease` | Temporary tenancy minted by the lessor (`Context` / surface pool); schemes intern on first use |
 

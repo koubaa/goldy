@@ -2,8 +2,11 @@
 //!
 //! `(&mut submission >> &parcel).take::<T>()` waits for the submission (and any later
 //! GPU write on the parcel), then realizes a typed view. Host-coherent media map in
-//! place; others copy through a context staging pool. While the view lives, a later
-//! submit that writes the parcel fails rather than blocking.
+//! place; others copy through a context staging pool. CUDA fills that pool with one
+//! producer-stream DtoH into cacheable pinned host memory, then `take()` copies into
+//! an owned view. Eager sink copies and independently settled streaming identities are
+//! not part of this path. While the view lives, a later submit that writes the parcel
+//! fails rather than blocking.
 
 use crate::backend::{GpuCommand, HostMapping};
 use crate::buffer::{Allocation, BufferSource};

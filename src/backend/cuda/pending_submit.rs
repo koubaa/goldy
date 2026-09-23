@@ -250,6 +250,7 @@ pub(super) enum CudaOp {
         semaphore: SendExternalSemaphore,
         value: u64,
     },
+    #[allow(dead_code)]
     CopyTextureToBuffer {
         texture: Arc<super::texture::CudaTextureResource>,
         x: u32,
@@ -259,6 +260,26 @@ pub(super) enum CudaOp {
         dst: Arc<Mutex<CudaSlice<u8>>>,
         dst_abs: u64,
         dst_ptr: u64,
+        dst_row_pitch: u32,
+    },
+    /// Device buffer → cacheable pinned host (host-claim / CPU-dispatch readback).
+    /// Graph-unsafe in v1: stays on the stream-replay path.
+    CopyToReadbackHost {
+        src: Arc<Mutex<CudaSlice<u8>>>,
+        src_abs: u64,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
+        len: usize,
+    },
+    /// CUDA array → cacheable pinned host (texture host-claim readback). Graph-unsafe in v1.
+    CopyTextureToReadbackHost {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
         dst_row_pitch: u32,
     },
     /// cuBLAS GEMM/GEMV captured on the submit stream.
@@ -609,6 +630,10 @@ pub(super) fn collect_pins(
                 buffers.push(Arc::clone(memory));
                 hosts.push(Arc::clone(host));
             }
+            CudaOp::CopyToReadbackHost { src, host, .. } => {
+                buffers.push(Arc::clone(src));
+                hosts.push(Arc::clone(host));
+            }
             CudaOp::Copy { src, dst, .. } => {
                 buffers.push(Arc::clone(src));
                 buffers.push(Arc::clone(dst));
@@ -633,6 +658,10 @@ pub(super) fn collect_pins(
             CudaOp::CopyTextureToBuffer { texture, dst, .. } => {
                 textures.push(Arc::clone(texture));
                 buffers.push(Arc::clone(dst));
+            }
+            CudaOp::CopyTextureToReadbackHost { texture, host, .. } => {
+                textures.push(Arc::clone(texture));
+                hosts.push(Arc::clone(host));
             }
             CudaOp::MatMul { a, b, c, .. } => {
                 buffers.push(Arc::clone(&a.memory));
@@ -949,6 +978,64 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     maybe_validate_sync(stream, "CopyTextureToReadback")?;
                 }
             }
+            CudaOp::CopyToReadbackHost {
+                src,
+                src_abs,
+                host,
+                host_offset,
+                len,
+            } => {
+                if capturing {
+                    anyhow::bail!("CUDA: CopyToReadbackHost is not graph-capturable");
+                }
+                if *len > 0 {
+                    let mut host = host.lock().unwrap();
+                    let host_end = *host_offset + *len;
+                    if host_end > host.len() {
+                        anyhow::bail!("CUDA: CopyToReadbackHost exceeds host staging");
+                    }
+                    let dst = &mut host.as_mut_slice()[*host_offset..host_end];
+                    let memory = src.lock().unwrap();
+                    let view = memory
+                        .try_slice(*src_abs as usize..*src_abs as usize + *len)
+                        .context("CUDA: CopyToReadbackHost source out of bounds")?;
+                    stream
+                        .memcpy_dtoh(&view, dst)
+                        .context("CUDA: CopyToReadbackHost DtoH failed")?;
+                }
+                if validate {
+                    maybe_validate_sync(stream, "CopyToReadbackHost")?;
+                }
+            }
+            CudaOp::CopyTextureToReadbackHost {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                host,
+                host_offset,
+                dst_row_pitch,
+            } => {
+                if capturing {
+                    anyhow::bail!("CUDA: CopyTextureToReadbackHost is not graph-capturable");
+                }
+                let mut host = host.lock().unwrap();
+                super::texture::memcpy_array_to_host(
+                    stream,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    host.as_mut_slice(),
+                    *host_offset,
+                    *dst_row_pitch,
+                )?;
+                if validate {
+                    maybe_validate_sync(stream, "CopyTextureToReadbackHost")?;
+                }
+            }
             CudaOp::MatMul { .. } => {
                 super::matmul::execute(op)?;
                 if validate {
@@ -1143,6 +1230,8 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
             | CudaOp::CopyTextureToBuffer { .. }
+            | CudaOp::CopyToReadbackHost { .. }
+            | CudaOp::CopyTextureToReadbackHost { .. }
             | CudaOp::MatMul { .. } => {}
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {}

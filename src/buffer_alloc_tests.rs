@@ -3,7 +3,7 @@ mod buffer_alloc_tests {
     use crate::parcel::Parcel;
     use crate::test_support::SerialGpuRuntime;
     use crate::types::{BufferFlags, ResourceAccess};
-    use crate::{BufferKind, Context, MemoryExchange, Scheme};
+    use crate::{BufferKind, Context, Scheme};
     use std::sync::Arc;
 
     fn make_device() -> SerialGpuRuntime {

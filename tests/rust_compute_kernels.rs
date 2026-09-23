@@ -6,10 +6,9 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions, Runtime,
+    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
-use std::ops::Shr;
 use std::sync::Arc;
 
 #[compute(workgroup_size = [64, 1, 1])]
