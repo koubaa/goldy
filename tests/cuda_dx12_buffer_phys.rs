@@ -9,10 +9,9 @@
 use goldy::types::BackendType;
 use goldy::{
     test_support, BufferKind, Color, ComputePipeline, DepositTarget, Instance, MemoryExchange, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme, ShaderModule,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
     TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
-use std::ops::Shr;
 use std::sync::Arc;
 
 fn try_cuda_instance() -> Option<Instance> {
@@ -125,7 +124,7 @@ fn draw_and_readback(
     }
     scheme.copy_to_texture(&rt, readback).expect("copy_to_texture");
     let mut submission = scheme.submit().expect("submit");
-    (&mut submission >> &readback).take::<u8>().expect("host take").to_vec()
+    (&mut submission >> readback).take::<u8>().expect("host take").to_vec()
 }
 
 #[test]
@@ -485,7 +484,7 @@ fn scheme_delete_and_multi_scheme_same_retained_buffer() {
     } // upload scheme dropped — physical buffer identity must remain valid
 
     let mut draw = Scheme::new(&ctx);
-    let rt = draw
+    let rt = ctx
         .lease_render_target(64, 64, TextureFormat::Rgba32Float, None)
         .expect("rt");
     {

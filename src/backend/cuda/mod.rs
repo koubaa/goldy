@@ -2037,6 +2037,20 @@ impl CudaBackend {
 
     /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+    /// Pinned staging that receives host writes to `buffer` at `offset`, as
+    /// `(staging owner, offset within that staging, logical size of buffer)`.
+    /// Views of a staged parent write through the parent.
+    fn host_staging_target(&self, buffer: BufferHandle, offset: u64) -> Result<Option<(BufferHandle, u64, u64)>> {
+        let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
+        #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
+        if let Some(parent) = buf.parent {
+            if self.buffers.get(&parent).is_some_and(|p| p.has_host_staging()) {
+                return Ok(Some((parent, buf.offset + offset, buf.size)));
+            }
+        }
+        Ok(buf.has_host_staging().then_some((buffer, offset, buf.size)))
+    }
+
     fn native_twin_buffers_written_by_ops(&self, ops: &[CudaOp]) -> Vec<BufferHandle> {
         let mut memories = Vec::new();
         for op in ops {
@@ -3170,12 +3184,30 @@ impl CudaBackend {
                     timeline::WaitCompletion::Pending(_) => unreachable!("only CudaEvent on non-dx12"),
                 }
             }
-            deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |handle| {
+            deferred_writes = pending_submit::materialize_deferred_writes(&sync.deferred_host_writes, |write| {
+                let handle = write.buffer;
+                if let Some((target, stage_offset, logical_size)) = self.host_staging_target(handle, write.offset)? {
+                    if write.offset + write.data.len() as u64 > logical_size {
+                        anyhow::bail!("CUDA: deferred write exceeds logical buffer size");
+                    }
+                    let staging = self
+                        .buffers
+                        .get(&target)
+                        .and_then(|b| b.host_staging.as_ref())
+                        .context("CUDA: missing host staging")?;
+                    return Ok((
+                        pending_submit::HostWriteTarget::Staging(Arc::clone(staging)),
+                        stage_offset,
+                    ));
+                }
                 let buffer = self
                     .buffers
                     .get(&handle)
                     .with_context(|| format!("CUDA: deferred write invalid buffer {handle}"))?;
-                Ok((Arc::clone(buffer.memory_arc()?), buffer.offset))
+                Ok((
+                    pending_submit::HostWriteTarget::Device(Arc::clone(buffer.memory_arc()?)),
+                    buffer.offset + write.offset,
+                ))
             })?;
         }
 
@@ -4070,43 +4102,7 @@ impl GpuBackend for CudaBackend {
         // performed at Copy/CopyBufferToTexture materialization on the context stream —
         // never flush the submission worker or sync alloc_stream here.
         {
-            let (target, stage_offset, logical_size, has_staging) = {
-                let buf = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
-                let self_has = buf.has_host_staging();
-                let logical_size = buf.size;
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                let parent = buf.parent;
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                let view_abs = buf.offset + offset;
-                let _ = buf;
-
-                #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
-                {
-                    if let Some(parent) = parent {
-                        let parent_has = self.buffers.get(&parent).is_some_and(|p| p.has_host_staging());
-                        if parent_has {
-                            (parent, view_abs, logical_size, true)
-                        } else if self_has {
-                            (buffer, offset, logical_size, true)
-                        } else {
-                            (buffer, offset, logical_size, false)
-                        }
-                    } else if self_has {
-                        (buffer, offset, logical_size, true)
-                    } else {
-                        (buffer, offset, logical_size, false)
-                    }
-                }
-                #[cfg(not(all(feature = "graphics", feature = "dx12", target_os = "windows")))]
-                {
-                    if self_has {
-                        (buffer, offset, logical_size, true)
-                    } else {
-                        (buffer, offset, logical_size, false)
-                    }
-                }
-            };
-            if has_staging {
+            if let Some((target, stage_offset, logical_size)) = self.host_staging_target(buffer, offset)? {
                 if offset + data.len() as u64 > logical_size {
                     anyhow::bail!("CUDA: write exceeds logical buffer size");
                 }
@@ -6769,7 +6765,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
             .dispatch(4, 1, 1);
 
         let mut submission = scheme.submit()?;
-        let bytes1 = (&mut submission >> &buffer).take::<u8>()?;
+        let bytes1 = (&mut submission >> &buffer).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -6786,7 +6782,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
 
         // Stable resubmit without rebinding withdraw (would dirty IR).
         let mut submission = scheme.submit()?;
-        let bytes2 = (&mut submission >> &buffer).take::<u8>()?;
+        let bytes2 = (&mut submission >> &buffer).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
 
         let after_second = stats.snapshot();
@@ -7571,7 +7567,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .dispatch_shape_parcel(&*shape)?;
 
         let mut submission = scheme.submit()?;
-        let bytes1 = (&mut submission >> &work).take::<u8>()?;
+        let bytes1 = (&mut submission >> &work).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes1), &[2, 4, 6, 8]);
 
         let after_first = stats.snapshot();
@@ -7583,7 +7579,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes2 = (&mut submission >> &work).take::<u8>()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[4, 8, 12, 16]);
         let after_second = stats.snapshot();
         assert_eq!(
@@ -7641,7 +7637,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .dispatch_shape_parcel(&*shape)?;
 
         let mut submission = scheme.submit()?;
-        let bytes = (&mut submission >> &work).take::<u8>()?;
+        let bytes = (&mut submission >> &work).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes), &[0, 0, 0, 0]);
         let snap = stats.snapshot();
         assert!(snap.captures >= 1, "clear+indirect launches must capture: {snap:?}");
@@ -7654,7 +7650,7 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let captures_after_first = snap.captures;
         let launches_after_first = snap.launches;
         let mut submission = scheme.submit()?;
-        let bytes2 = (&mut submission >> &work).take::<u8>()?;
+        let bytes2 = (&mut submission >> &work).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes2), &[0, 0, 0, 0]);
         let after = stats.snapshot();
         assert_eq!(
@@ -7694,8 +7690,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
             .dispatch(4, 1, 1);
 
         let mut submission = scheme.submit()?;
-        let bytes_a = (&mut submission >> &a).take::<u8>()?;
-        let bytes_b = (&mut submission >> &b).take::<u8>()?;
+        let bytes_a = (&mut submission >> &a).take::<u8>()?.to_vec();
+        let bytes_b = (&mut submission >> &b).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a), &[2, 4, 6, 8]);
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b), &[0, 0, 0, 0]);
 
@@ -7712,8 +7708,8 @@ void cs_main(Scattered<DispatchShape> shape, ThreadId id) {
         let launches_after_first = after_first.launches;
 
         let mut submission = scheme.submit()?;
-        let bytes_a2 = (&mut submission >> &a).take::<u8>()?;
-        let bytes_b2 = (&mut submission >> &b).take::<u8>()?;
+        let bytes_a2 = (&mut submission >> &a).take::<u8>()?.to_vec();
+        let bytes_b2 = (&mut submission >> &b).take::<u8>()?.to_vec();
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_a2), &[4, 8, 12, 16]);
         // Cleared every resubmit, then doubled from zeros → still zeros.
         assert_eq!(bytemuck::cast_slice::<u8, u32>(&bytes_b2), &[0, 0, 0, 0]);

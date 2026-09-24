@@ -84,9 +84,9 @@ pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
-pub use exchange::{DepositTarget, DepositTransaction, MemoryExchange};
+pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
-pub use host_claim::{HostView, PendingHostRead};
+pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
