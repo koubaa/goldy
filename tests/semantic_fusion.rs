@@ -140,6 +140,14 @@ fn assert_one_semantic_region(scheme: &Scheme, nodes: usize) {
     assert_eq!(scheme.executed_node_count(), 1);
 }
 
+/// The single fused region's structure.
+fn structure(scheme: &Scheme) -> String {
+    scheme.fusion_report().regions[0]
+        .structure
+        .clone()
+        .expect("a semantic region has a structure")
+}
+
 /// Whether matrix products run on the Goldy kernels that semantic fusion describes.
 fn stdlib_matmul(device: &Runtime) -> bool {
     device.backend_type() != BackendType::Metal
@@ -174,6 +182,55 @@ fn contraction_with_a_pointwise_epilogue() {
     );
     assert_one_semantic_region(&scheme, 2);
     assert_eq!(scheme.fusion_report().regions[0].forwarded, 1);
+    // The product stays a contraction, and the residual update reads it as an epilogue.
+    assert_eq!(
+        structure(&scheme),
+        "contraction p2[i0] = sum{s1<100 by 32x2}(p0[i0, s1] * p1[s1])\n\
+         output p3[i0] = p3[i0] + p2[i0]\n"
+    );
+}
+
+#[test]
+fn sibling_contractions_with_a_gated_epilogue() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    // out = silu(W1 @ x) * (W3 @ x), where silu(g) = g / (1 + exp(-g)).
+    let init = [
+        Init::F32(TensorShape::matrix(ROWS, INNER), data(1, ROWS * INNER)),
+        Init::F32(TensorShape::matrix(ROWS, INNER), data(5, ROWS * INNER)),
+        Init::F32(TensorShape::vector(INNER), data(2, INNER)),
+        Init::F32(TensorShape::vector(ROWS), vec![0.0; ROWS as usize]),
+        Init::F32(TensorShape::vector(ROWS), vec![0.0; ROWS as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            rec.matmul_into("gate", t[0].view(), t[2].view(), t[3].view())?;
+            rec.matmul_into("up", t[1].view(), t[2].view(), t[4].view())?;
+            let negated = rec.neg("neg", t[3].view())?;
+            let exp = rec.exp("exp", negated.view())?;
+            let denominator = rec.add_scalar("denominator", exp.view(), 1.0)?;
+            let silu = rec.div("silu", t[3].view(), denominator.view())?;
+            let out = rec.mul("gated", silu.view(), t[4].view())?;
+            Ok((vec![negated, exp, denominator, silu, out], Vec::new()))
+        },
+        5,
+    );
+    assert_one_semantic_region(&scheme, 7);
+    let structure = structure(&scheme);
+    assert_eq!(
+        structure.lines().filter(|l| l.starts_with("contraction")).count(),
+        2,
+        "{structure}"
+    );
+    assert!(
+        structure.ends_with("shared rhs of p2 and rhs of p4\n"),
+        "both products read the same input: {structure}"
+    );
 }
 
 #[test]
@@ -239,6 +296,7 @@ fn pointwise_tensor_chain() {
         5,
     );
     assert_one_semantic_region(&scheme, 6);
+    assert!(!structure(&scheme).contains("contraction"));
 }
 
 #[compute(workgroup_size = [64, 1, 1])]

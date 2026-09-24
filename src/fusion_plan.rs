@@ -173,6 +173,10 @@ pub struct FusionRegion {
     /// Forwarded scheme-local temporaries that exist only in registers: the fused
     /// dispatch never stores them and binds no storage for them.
     pub elided: usize,
+    /// For a [`FusionTier::Semantic`] region, its contractions with the prologues
+    /// defining their factors and the epilogues reading their results, and the factors
+    /// they share, one per line. Operands are named `p{n}` by the fused parcel they bind.
+    pub structure: Option<String>,
     pub status: FusionRegionStatus,
 }
 
@@ -310,7 +314,14 @@ impl Program {
     fn locality(&self) -> (usize, usize) {
         match self {
             Program::Composed(definition) => (definition.forwarded.len(), definition.elided.len()),
-            Program::Semantic(program) => (program.forwarded, 0),
+            Program::Semantic(program) => (program.forwarded(), 0),
+        }
+    }
+
+    fn structure(&self) -> Option<String> {
+        match self {
+            Program::Composed(_) => None,
+            Program::Semantic(program) => Some(program.structure()),
         }
     }
 
@@ -700,6 +711,7 @@ impl FusionPlanner {
                         tier: r.program.tier(),
                         forwarded,
                         elided,
+                        structure: r.program.structure(),
                         status: r.status.clone(),
                     }
                 })

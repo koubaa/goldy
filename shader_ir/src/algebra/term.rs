@@ -165,6 +165,15 @@ impl Term {
         Term::Scalar(param)
     }
 
+    /// Argument `n` of an operation's element-wise term, such as a
+    /// [`Map`](super::Map) body.
+    pub fn arg(n: usize) -> Term {
+        Term::Read {
+            value: ValueId(n as u32),
+            index: Vec::new(),
+        }
+    }
+
     pub fn index_value(index: impl Into<Affine>) -> Term {
         Term::IndexValue(index.into())
     }

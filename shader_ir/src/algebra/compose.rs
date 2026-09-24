@@ -13,8 +13,9 @@ pub struct Appended {
     pub index_params: Vec<IndexParam>,
     pub scalars: Vec<ScalarParam>,
     /// Inputs of the appended region that now read a value the region defines rather
-    /// than storage.
-    pub forwarded: usize,
+    /// than storage: each input, by its id in the appended region, and the output it
+    /// reads.
+    pub forwards: Vec<(ValueId, ValueId)>,
     /// Outputs the appended region overwrites element for element, now temporaries.
     pub covered: Vec<ValueId>,
 }
@@ -180,7 +181,7 @@ impl Region {
             scalars: (0..next.scalar_names.len() as u32)
                 .map(|s| ScalarParam(s + scalars))
                 .collect(),
-            forwarded: 0,
+            forwards: Vec::new(),
             covered: Vec::new(),
         };
         for (id, value) in next.values() {
@@ -201,7 +202,7 @@ impl Region {
                                     .ok_or_else(|| ComposeError::Unforwardable {
                                         input: value.name.clone(),
                                     })?;
-                            appended.forwarded += 1;
+                            appended.forwards.push((id, writer));
                             forward
                         }
                         _ => {
