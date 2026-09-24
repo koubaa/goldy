@@ -17,7 +17,7 @@ use crate::buffer::{Allocation, BufferSource};
 use crate::context::Context;
 use crate::cpu_dispatch::{CpuBindingExec, CpuDispatchExec, CpuMain};
 use crate::error::GoldyError;
-use crate::exchange::{DepositBinding, DepositClaim, DepositTarget};
+use crate::exchange::{DepositBinding, DepositClaim, DepositTarget, HostSink, HostSinkInner};
 use crate::parcel::Parcel;
 #[cfg(feature = "graphics")]
 use crate::render_target::RenderTarget;
@@ -189,6 +189,10 @@ impl Submission {
     /// Crate-internal clearing epoch for this submission.
     pub(crate) fn timeline_value(&self) -> TimelineValue {
         self.handle.timeline_value()
+    }
+
+    pub(crate) fn scheme_id(&self) -> u64 {
+        self.handle.scheme_id()
     }
 
     pub(crate) fn context(&self) -> &Context {
@@ -727,6 +731,7 @@ pub(crate) struct SchemeDesc {
     prior_built_accels: HashSet<u64>,
     cpu_dispatches: Vec<CpuDispatchExec>,
     deposits: Vec<Arc<DepositBinding>>,
+    host_sinks: Vec<Arc<HostSinkInner>>,
     #[cfg(feature = "graphics")]
     present_bindings: Vec<PresentBinding>,
     #[cfg(feature = "graphics")]
@@ -745,6 +750,7 @@ impl SchemeDesc {
             prior_built_accels: HashSet::new(),
             cpu_dispatches: Vec::new(),
             deposits: Vec::new(),
+            host_sinks: Vec::new(),
             #[cfg(feature = "graphics")]
             present_bindings: Vec::new(),
             #[cfg(feature = "graphics")]
@@ -801,6 +807,13 @@ impl SchemeDesc {
             return Err(GoldyError::Validation(
                 "include: child scheme binds a memory deposit. \
                  hint: deposits are single-use at the submitting root; record the deposit on the parent"
+                    .into(),
+            ));
+        }
+        if !self.host_sinks.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme binds a host sink. \
+                 hint: host sinks publish submission-scoped occurrences and must be recorded on the submitting root"
                     .into(),
             ));
         }
@@ -1473,6 +1486,73 @@ impl Scheme {
         });
         self.desc.deposits.push(Arc::clone(&binding));
         Ok(crate::exchange::DepositTransaction { inner: binding })
+    }
+
+    /// Record a device-to-host copy into a ledger-tracked sink parcel.
+    pub(crate) fn register_host_sink(&mut self, source: &Parcel) -> Result<HostSink, GoldyError> {
+        if !source.is_homed_on(&self.ctx) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "host sink source belongs to a different context"
+            )));
+        }
+        let src_resource = source.resource_id();
+        if !matches!(src_resource, ResourceId::Buffer(_) | ResourceId::BufferRange { .. }) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "host sink requires a buffer parcel source"
+            )));
+        }
+        let byte_size = source.byte_size();
+        if byte_size == 0 {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "host sink requires a non-zero source byte size"
+            )));
+        }
+
+        let handle = {
+            let runtime = self.ctx.runtime();
+            let mut backend = runtime.inner.backend.lock().unwrap();
+            backend
+                .alloc_readback_buffer(runtime.inner.handle, byte_size)
+                .map_err(|e| self.ctx.classify(e))?
+        };
+        let stamp = Arc::new(crate::parcel::ParcelStamp::new(Arc::downgrade(
+            &self.ctx.runtime().inner,
+        )));
+        let inner = Arc::new(HostSinkInner {
+            scheme_id: self.scheme_id,
+            ctx: self.ctx.clone(),
+            handle,
+            byte_size,
+            stamp: Arc::clone(&stamp),
+        });
+        let sink_resource = ResourceId::Buffer(handle);
+
+        self.mark_structure_dirty();
+        self.desc.register_parcel_stamp(source);
+        self.desc.register_stamp_parts(sink_resource, stamp);
+        self.desc.ir.nodes.push(TaskNode {
+            group: None,
+            label: "host_sink".into(),
+            bindings: vec![
+                ResourceBinding {
+                    resource: src_resource,
+                    access: NodeAccess::Read,
+                },
+                ResourceBinding {
+                    resource: sink_resource,
+                    access: NodeAccess::Overwrite,
+                },
+            ],
+            kind: NodeKind::CopyBuffer {
+                src: src_resource,
+                src_offset: 0,
+                dst: sink_resource,
+                dst_offset: 0,
+                size: byte_size,
+            },
+        });
+        self.desc.host_sinks.push(Arc::clone(&inner));
+        Ok(HostSink { inner })
     }
 
     /// Append a CPU-writable buffer → texture copy node (identity only; no bytes in IR).
@@ -4947,6 +5027,47 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
 
     fn read_u32(frame: &mut Submission, parcel: &crate::Parcel) -> Vec<u32> {
         (frame >> parcel).take::<u32>().expect("host take").to_vec()
+    }
+
+    #[test]
+    fn host_sink_copies_in_submission_and_gates_replay_while_view_lives() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let source = u32_buffer(&device, &[11, 22, 33, 44]);
+        let (allocs_before, frees_before) = mock_readback_counts(&device);
+
+        let mut scheme = Scheme::new(&ctx);
+        let sink = MemoryExchange::new(&ctx)
+            .bind_host_sink(&mut scheme, source.whole())
+            .expect("bind host sink");
+        assert_eq!(sink.byte_size(), 16);
+        assert!(matches!(
+            scheme.desc.ir.nodes.last().map(|node| &node.kind),
+            Some(NodeKind::CopyBuffer { .. })
+        ));
+        let (allocs_after, _) = mock_readback_counts(&device);
+        assert_eq!(allocs_after - allocs_before, 1);
+
+        let mut submission = scheme.submit().expect("submit sink copy");
+        let view = (&mut submission >> &sink).take::<u32>().expect("take host sink");
+        assert_eq!(&*view, &[11, 22, 33, 44]);
+
+        let err = scheme.submit().expect_err("live sink view must gate overwrite");
+        assert!(err.to_string().contains("host view is live"), "{err}");
+        drop(view);
+
+        let mut replay = scheme.submit().expect("replay after sink view drop");
+        assert_eq!(
+            &*(&mut replay >> &sink).take::<u32>().expect("take replayed sink"),
+            &[11, 22, 33, 44]
+        );
+
+        drop(sink);
+        let (_, frees_while_scheme_lives) = mock_readback_counts(&device);
+        assert_eq!(frees_while_scheme_lives, frees_before);
+        drop(scheme);
+        let (_, frees_after) = mock_readback_counts(&device);
+        assert_eq!(frees_after - frees_before, 1);
     }
 
     #[test]

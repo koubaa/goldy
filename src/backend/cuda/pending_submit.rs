@@ -111,8 +111,16 @@ pub(super) enum CudaSubmitBody {
     },
 }
 
+/// Where a deferred host write lands on the worker.
+pub(super) enum HostWriteTarget {
+    /// Device memory, written with an HtoD on the context stream.
+    Device(Arc<Mutex<CudaSlice<u8>>>),
+    /// `CPU_WRITABLE` pinned staging. Retained `WriteFromHost` nodes read it at replay.
+    Staging(Arc<Mutex<super::pinned_host::CudaPinnedHost>>),
+}
+
 pub(super) struct MaterializedHostWrite {
-    pub memory: Arc<Mutex<CudaSlice<u8>>>,
+    pub target: HostWriteTarget,
     pub abs_offset: u64,
     pub data: Arc<[u8]>,
 }
@@ -1287,16 +1295,28 @@ fn run_dynamic_prefix(
         timeline::host_wait_event(event)?;
     }
     for write in deferred_writes {
-        let mut memory = write.memory.lock().unwrap();
         let start = write.abs_offset as usize;
         let end = start + write.data.len();
-        let mut view = memory
-            .try_slice_mut(start..end)
-            .context("CUDA: deferred host write out of bounds")?;
-        stream
-            .memcpy_htod(write.data.as_ref(), &mut view)
-            .context("CUDA: deferred host write HtoD failed")?;
-        maybe_validate_sync(stream, "deferred host write")?;
+        match &write.target {
+            HostWriteTarget::Device(memory) => {
+                let mut memory = memory.lock().unwrap();
+                let mut view = memory
+                    .try_slice_mut(start..end)
+                    .context("CUDA: deferred host write out of bounds")?;
+                stream
+                    .memcpy_htod(write.data.as_ref(), &mut view)
+                    .context("CUDA: deferred host write HtoD failed")?;
+                maybe_validate_sync(stream, "deferred host write")?;
+            }
+            HostWriteTarget::Staging(host) => {
+                let mut host = host.lock().unwrap();
+                let dst = host
+                    .as_mut_slice()
+                    .get_mut(start..end)
+                    .context("CUDA: deferred host write exceeds pinned staging")?;
+                dst.copy_from_slice(&write.data);
+            }
+        }
     }
     for event in stream_waits {
         stream
@@ -1659,14 +1679,14 @@ pub(super) fn buffer_device_arg(
 
 pub(super) fn materialize_deferred_writes(
     writes: &[DeferredHostWrite],
-    resolve: impl Fn(crate::backend::BufferHandle) -> Result<(Arc<Mutex<CudaSlice<u8>>>, u64)>,
+    mut resolve: impl FnMut(&DeferredHostWrite) -> Result<(HostWriteTarget, u64)>,
 ) -> Result<Vec<MaterializedHostWrite>> {
     let mut out = Vec::with_capacity(writes.len());
     for write in writes {
-        let (memory, base_offset) = resolve(write.buffer)?;
+        let (target, abs_offset) = resolve(write)?;
         out.push(MaterializedHostWrite {
-            memory,
-            abs_offset: base_offset + write.offset,
+            target,
+            abs_offset,
             data: Arc::clone(&write.data),
         });
     }
