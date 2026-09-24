@@ -16,8 +16,9 @@ pub(crate) struct ComputePipelineGpu {
 impl Drop for ComputePipelineGpu {
     fn drop(&mut self) {
         tracing::trace!("Destroying compute pipeline");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_compute_pipeline(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_compute_pipeline(self.handle);
+        }
     }
 }
 

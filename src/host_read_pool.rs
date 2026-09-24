@@ -99,7 +99,9 @@ impl HostReadStagingPool {
         if entries.is_empty() {
             return;
         }
-        let mut backend = device.inner.backend.lock().unwrap();
+        let Ok(mut backend) = device.inner.backend.lock() else {
+            return;
+        };
         for entry in entries.drain(..) {
             backend.free_readback_buffer(entry.handle);
         }

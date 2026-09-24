@@ -432,8 +432,9 @@ pub(crate) struct HostSinkInner {
 impl Drop for HostSinkInner {
     fn drop(&mut self) {
         self.stamp.mark_dead();
-        let mut backend = self.ctx.runtime().inner.backend.lock().unwrap();
-        backend.free_readback_buffer(self.handle);
+        if let Ok(mut backend) = self.ctx.runtime().inner.backend.lock() {
+            backend.free_readback_buffer(self.handle);
+        }
     }
 }
 

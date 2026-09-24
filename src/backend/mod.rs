@@ -866,10 +866,12 @@ pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHand
 }
 /// Destroy `ctx` without holding the global backend lock across blocking GPU work.
 pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>, ctx: ContextHandle) {
-    if let Some(handle) = {
-        let mut guard = backend.lock().unwrap();
-        guard.detach_context_for_destroy(ctx)
-    } {
+    let Ok(mut guard) = backend.lock() else {
+        return;
+    };
+    let detached = guard.detach_context_for_destroy(ctx);
+    drop(guard);
+    if let Some(handle) = detached {
         run_context_destroy(handle);
     }
 }
