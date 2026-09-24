@@ -24,7 +24,7 @@ use crate::render_target::RenderTarget;
 use crate::retained_pool::StampedParcel;
 #[cfg(feature = "graphics")]
 use crate::swapchain_pool::{AcquiredPresent, PresentLease, SwapchainPool};
-use crate::task_graph::cross_submit::{ResourceKey, ResourceKeyMap};
+use crate::task_graph::cross_submit::{NetAccess, ResourceKey, ResourceKeyMap};
 #[cfg(feature = "graphics")]
 use crate::task_graph::DeferredPresentAcquire;
 use crate::task_graph::IrSubmitState;
@@ -717,6 +717,17 @@ struct IrSubmitPrep {
     deposit_claims: std::collections::HashMap<u32, Option<DepositClaim>>,
 }
 
+/// Topology-derived submit inputs reused while the scheme remains structurally clean.
+///
+/// Dynamic ledger epochs and concrete deposit backings are intentionally absent: those
+/// are resolved per submission. Keeping the static scans here makes the clean replay
+/// path proportional to dynamic resources rather than the recorded node count.
+#[derive(Default)]
+struct IrSubmitStatic {
+    net_access: ResourceKeyMap<NetAccess>,
+    deposit_ids: Vec<u32>,
+}
+
 /// Recorded work: graph IR, keepalives, and topology side tables.
 ///
 /// Distinct from [`Scheme`]'s per-Context instance state (retention, dirty flags,
@@ -888,6 +899,8 @@ pub struct Scheme {
     record_errors: Vec<String>,
     /// Per-dispatch-site shader specialization predictor (see `specialization.rs`).
     specialization: crate::specialization::SchemePredictor,
+    /// Cached topology-only analysis for the submit hot path.
+    submit_static: Option<IrSubmitStatic>,
     /// Counters of yielding nodes, keyed by node index.
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
 }
@@ -921,6 +934,7 @@ impl Scheme {
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             specialization: crate::specialization::SchemePredictor::new(),
+            submit_static: None,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             record_errors: Vec::new(),
             yield_stats: HashMap::new(),
@@ -1070,6 +1084,7 @@ impl Scheme {
 
     fn mark_structure_dirty(&mut self) {
         self.dirty = SchemeDirty::Structure;
+        self.submit_static = None;
     }
 
     fn mark_params_dirty(&mut self) {
@@ -2115,6 +2130,28 @@ impl Scheme {
             .defer_host_write(&ready_after.last_referenced(), buffer, offset, data);
     }
 
+    fn ensure_submit_static(&mut self) -> &IrSubmitStatic {
+        self.submit_static.get_or_insert_with(|| {
+            let mut deposit_ids: Vec<u32> = self
+                .desc
+                .ir
+                .nodes
+                .iter()
+                .flat_map(|node| node.bindings.iter())
+                .filter_map(|binding| match binding.resource {
+                    ResourceId::Deposit(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            deposit_ids.sort_unstable();
+            deposit_ids.dedup();
+            IrSubmitStatic {
+                net_access: crate::task_graph::cross_submit::net_access_per_resource(&self.desc.ir),
+                deposit_ids,
+            }
+        })
+    }
+
     fn prepare_ir_submit(&mut self) -> Result<IrSubmitPrep, GoldyError> {
         if !self.desc.all_stamps_alive() {
             // Dropping a retained-pool resource invalidates schemes that still bind it.
@@ -2150,18 +2187,20 @@ impl Scheme {
 
         {
             let _tz = crate::tracy_zone!("scheme.submit.easement_gate");
-            use crate::task_graph::cross_submit::net_access_per_resource;
-            let net = net_access_per_resource(&self.desc.ir);
             let ctx = self.ctx.backend_handle();
-            for (key, access) in &net {
-                if access.writes {
-                    if let Some(stamp) = self.desc.resource_stamps().get(key) {
-                        stamp.drain_pending_for_submit_gate(ctx);
-                        if stamp.host_claim_count() > 0 {
-                            return Err(GoldyError::Validation(
-                                "cannot write a parcel while a host view is live; drop the HostView first".into(),
-                            ));
-                        }
+            let writes: Vec<ResourceKey> = self
+                .ensure_submit_static()
+                .net_access
+                .iter()
+                .filter_map(|(key, access)| access.writes.then_some(*key))
+                .collect();
+            for key in writes {
+                if let Some(stamp) = self.desc.resource_stamps().get(&key) {
+                    stamp.drain_pending_for_submit_gate(ctx);
+                    if stamp.host_claim_count() > 0 {
+                        return Err(GoldyError::Validation(
+                            "cannot write a parcel while a host view is live; drop the HostView first".into(),
+                        ));
                     }
                 }
             }
@@ -2215,14 +2254,7 @@ impl Scheme {
     }
 
     fn claim_deposits_into(&mut self, prep: &mut IrSubmitPrep) -> Result<(), GoldyError> {
-        let mut referenced = HashSet::new();
-        for node in &self.desc.ir.nodes {
-            for b in &node.bindings {
-                if let ResourceId::Deposit(id) = b.resource {
-                    referenced.insert(id);
-                }
-            }
-        }
+        let referenced = self.ensure_submit_static().deposit_ids.clone();
         for id in referenced {
             let binding =
                 self.desc.deposits.get(id as usize).ok_or_else(|| {
@@ -2271,10 +2303,14 @@ impl Scheme {
             self.submit_state.has_cb_replay() && (structurally_dirty || topo_dirty || retention_recorded);
 
         if on_record_path {
-            use crate::task_graph::cross_submit::{net_access_per_resource, reregister_scheme_topology};
-            let net = net_access_per_resource(&self.desc.ir);
+            use crate::task_graph::cross_submit::reregister_scheme_topology;
+            let net = &self
+                .submit_static
+                .as_ref()
+                .expect("submit static analysis prepared before submission")
+                .net_access;
             self.prev_topology_parcels = reregister_scheme_topology(
-                &net,
+                net,
                 self.desc.resource_stamps(),
                 &self.prev_topology_parcels,
                 self.scheme_id,
@@ -2379,10 +2415,12 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(
-            &self.desc.ir,
-            &self.desc.prior_built_accels,
-        )?;
+        if prep.structurally_dirty {
+            crate::task_graph::validate::validate_graph_with_prior_built_accels(
+                &self.desc.ir,
+                &self.desc.prior_built_accels,
+            )?;
+        }
 
         let submit_result = {
             let grant_count = self.desc.present_transactions.len();
@@ -2553,10 +2591,12 @@ impl Scheme {
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
-        crate::task_graph::validate::validate_graph_with_prior_built_accels(
-            &self.desc.ir,
-            &self.desc.prior_built_accels,
-        )?;
+        if prep.structurally_dirty {
+            crate::task_graph::validate::validate_graph_with_prior_built_accels(
+                &self.desc.ir,
+                &self.desc.prior_built_accels,
+            )?;
+        }
         let mut present_slots = Vec::new();
         let mut partial = crate::task_graph::PartitionSubmitResult::default();
         let mut partial_tv = self.ctx.gpu_progress();
@@ -7833,6 +7873,35 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
             "settled staging parcel must be reused"
         );
         let _ = scheme.submit().unwrap();
+    }
+
+    #[test]
+    fn structural_mutation_rebuilds_cached_submit_analysis() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let a = device
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let b = device
+            .acquire_buffer(16, BufferKind::Scattered, Some(4), BufferFlags::empty(), None)
+            .unwrap();
+        let memory = MemoryExchange::new(&ctx);
+        let mut scheme = Scheme::new(&ctx);
+
+        let _first = memory
+            .bind_deposit(&mut scheme, DepositTarget::buffer(a.whole(), 16))
+            .unwrap();
+        assert_eq!(scheme.ensure_submit_static().deposit_ids, vec![0]);
+        assert!(scheme.submit_static.is_some());
+
+        let _second = memory
+            .bind_deposit(&mut scheme, DepositTarget::buffer(b.whole(), 16))
+            .unwrap();
+        assert!(
+            scheme.submit_static.is_none(),
+            "recording a structural mutation must invalidate topology-derived submit analysis"
+        );
+        assert_eq!(scheme.ensure_submit_static().deposit_ids, vec![0, 1]);
     }
 
     #[test]

@@ -679,6 +679,37 @@ impl CrossSubmitScratch {
         }
         &self.submit_sync
     }
+
+    /// Plan dynamic ledger waits from topology-derived access and stamp inputs.
+    ///
+    /// Clean retained submits cache these inputs so the hot path only snapshots
+    /// current epochs and derives waits; it does not rescan GraphIR.
+    pub fn plan_precomputed(
+        &mut self,
+        net: &ResourceKeyMap<NetAccess>,
+        registry: &[(ResourceKey, Arc<ParcelStamp>)],
+        submitting_ctx: ContextHandle,
+        separate_graphics: bool,
+    ) -> &SubmitSync {
+        self.clear();
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
+            build_ledger_snapshot_into(&mut self.ledger, registry);
+        }
+        {
+            let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
+            compute_cross_submit_sync_into(
+                &mut self.submit_sync,
+                &mut self.wait_map,
+                &mut self.cpu_wait_map,
+                net,
+                &self.ledger,
+                submitting_ctx,
+                separate_graphics,
+            );
+        }
+        &self.submit_sync
+    }
 }
 
 /// After a successful submit, record this submission's access on each touched stamp.
