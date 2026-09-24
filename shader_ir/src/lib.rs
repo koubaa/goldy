@@ -6,10 +6,14 @@
 //! that source so it can be lowered on its own or composed with other definitions.
 //! Raw hand-written Slang continues to parse into the same ABI shape via Goldy's
 //! virtual-main path.
+//!
+//! [`algebra`] describes tensor computations in symbolic index notation, for fusions
+//! derived from the mathematics of an operation rather than from its kernel body.
 
 #![forbid(unsafe_code)]
 
 mod abi;
+pub mod algebra;
 mod emit;
 mod forward;
 mod fuse;
