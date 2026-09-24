@@ -19,10 +19,12 @@ pub const TENSOR_LAYOUT_SLANG_PREAMBLE: &str = r#"struct GoldyTensorLayout {
     uint s1;
     uint s2;
     uint s3;
-    uint pad;
+    uint flags;
 };
 
 uint goldy_tensor_offset(GoldyTensorLayout L, uint i) {
+    if ((L.flags & 1u) != 0u)
+        return L.off + i;
     uint rest = i;
     uint i3 = rest % L.d3;
     rest = rest / L.d3;

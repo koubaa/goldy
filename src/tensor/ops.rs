@@ -569,7 +569,7 @@ fn empty_coords() -> GoldyTensorLayout {
         numel: 0,
         shape: [1; MAX_TENSOR_RANK],
         stride: [0; MAX_TENSOR_RANK],
-        pad: 0,
+        flags: 0,
     }
 }
 

@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acquire, add, matmul, and fill; NumPy conversion copies through memory exchanges.
 
 - **Semantic MatMul** — `scheme.matmul(label, MatMulDesc)` records a backend-neutral
-  GEMM/GEMV node. CUDA realizes it with cuBLAS (`cublasSgemv` / `cublasSgemm`) by
-  default; Metal uses MPS; every other backend (and `GOLDY_MATMUL=fallback`) runs
-  Goldy's portable stdlib kernel. Realization happens on first submit and is retained.
+  GEMM/GEMV node. CUDA realizes GEMM with cuBLAS and GEMV with Goldy's single-pass
+  `gemv_f32` (cuBLAS `sgemv` splits K into two kernels for decode-sized matrices);
+  Metal uses MPS; every other backend runs Goldy's portable stdlib kernels.
+  `GOLDY_MATMUL=library` forces cuBLAS / MPS and `GOLDY_MATMUL=fallback` forces the
+  stdlib kernels. Realization happens on first submit and is retained.
 
 ### Removed
 
@@ -46,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
 
 - **CUDA host-claim readback** — withdraw staging is cacheable pinned host memory filled by one context-stream DtoH. `take()` no longer does a device-wide stream drain and second DtoH. Eager `CPU_READABLE` placement and streaming identities are not in this change.
+
+- **Contiguous tensor indexing** — `GoldyTensorLayout` gains a `flags` word. Packed
+  views set `FLAG_CONTIGUOUS`, and `goldy_tensor_offset` returns `offset + i`
+  without per-axis div/mod.
+
+### Fixed
+
+- **CUDA strided GEMV** — native `n = 1` MatMul passes `ldb` / `ldc` as the cuBLAS
+  `incx` / `incy`. It previously assumed unit strides for `x` and `y`.
 
 ## [0.3.0] - 2026-09-19
 

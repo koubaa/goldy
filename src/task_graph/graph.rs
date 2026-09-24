@@ -636,6 +636,7 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             node.c.hash(h);
             node.resource_slots.hash(h);
             node.native.hash(h);
+            node.fallback.hash(h);
             node.fallback_pipeline.hash(h);
         }
     }
@@ -836,6 +837,7 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 node.c.hash(&mut h);
                 hash_resource_slots_for_fingerprint(&node.resource_slots, &mut h);
                 node.native.hash(&mut h);
+                node.fallback.hash(&mut h);
                 node.fallback_pipeline.hash(&mut h);
             }
             NodeKind::CopyBufferToTexture {
