@@ -9,8 +9,9 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, FusionRegionStatus, FusionTier, GoldyError, NodeId, RequestAdapterOptions, Runtime,
-    RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels, TensorRecorder, TensorShape,
+    compute, BackendType, ContractionPrecision, FusionRegionStatus, FusionSchedule, FusionTier, GoldyError, NodeId,
+    RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels, TensorRecorder,
+    TensorShape,
 };
 use std::sync::Mutex;
 
@@ -153,6 +154,25 @@ fn stdlib_matmul(device: &Runtime) -> bool {
     device.backend_type() != BackendType::Metal
 }
 
+/// The single fused region's schedule.
+fn schedule(scheme: &Scheme) -> FusionSchedule {
+    scheme.fusion_report().regions[0]
+        .schedule
+        .expect("a semantic region has a schedule")
+}
+
+/// The schedule of a matrix-vector product's region: lane groups of 32, four to a
+/// workgroup, which exchange through the subgroup when a subgroup holds whole groups.
+fn gemv_schedule(device: &Runtime) -> FusionSchedule {
+    FusionSchedule::Lanes {
+        lanes: 32,
+        subgroup: device
+            .capabilities()
+            .subgroup_width
+            .is_some_and(|w| w >= 32 && w.is_multiple_of(32) && 128u32.is_multiple_of(w)),
+    }
+}
+
 const ROWS: u32 = 70;
 const INNER: u32 = 100;
 
@@ -182,6 +202,7 @@ fn contraction_with_a_pointwise_epilogue() {
     );
     assert_one_semantic_region(&scheme, 2);
     assert_eq!(scheme.fusion_report().regions[0].forwarded, 1);
+    assert_eq!(schedule(&scheme), gemv_schedule(&device));
     // The product stays a contraction, and the residual update reads it as an epilogue.
     assert_eq!(
         structure(&scheme),
@@ -231,6 +252,149 @@ fn sibling_contractions_with_a_gated_epilogue() {
         structure.ends_with("shared rhs of p2 and rhs of p4\n"),
         "both products read the same input: {structure}"
     );
+    // Both products share one strided loop and one exchange, and stay exact.
+    assert_eq!(schedule(&scheme), gemv_schedule(&device));
+}
+
+/// `C = A @ B` for `A` of `GEMM.0 × GEMM.2` and `B` of `GEMM.2 × GEMM.1`: no extent
+/// a multiple of the 16-square matrix tile.
+const GEMM: (u32, u32, u32) = (40, 72, 100);
+
+fn gemm_init() -> [Init; 3] {
+    let (m, n, k) = GEMM;
+    [
+        Init::F32(TensorShape::matrix(m, k), data(6, m * k)),
+        Init::F32(TensorShape::matrix(k, n), data(7, k * n)),
+        Init::F32(TensorShape::matrix(m, n), vec![0.0; (m * n) as usize]),
+    ]
+}
+
+/// `C = A @ B`, then `max(C, 0)`.
+fn gemm_relu(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
+    rec.matmul_into("project", t[0].view(), t[1].view(), t[2].view())?;
+    let relu = rec.max_scalar("relu", t[2].view(), 0.0)?;
+    Ok((vec![relu], Vec::new()))
+}
+
+#[test]
+fn matrix_product_with_an_epilogue_stays_exact_by_default() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    let scheme = fused_matches_unfused(&device, &gemm_init(), gemm_relu, 5);
+    assert_eq!(scheme.contraction_precision(), ContractionPrecision::Exact);
+    if library_gemm(&device) {
+        // The library sums in its own order, which no exact fusion can reproduce.
+        assert!(scheme.fusion_report().regions.is_empty());
+        return;
+    }
+    assert_one_semantic_region(&scheme, 2);
+    assert_eq!(schedule(&scheme), FusionSchedule::Threads);
+}
+
+/// Whether general matrix products run on the backend library (cuBLAS) by default.
+fn library_gemm(device: &Runtime) -> bool {
+    device.backend_type() == BackendType::Cuda
+}
+
+/// `x` rounded to the nearest f16, ties to even (normal range).
+fn round_f16(x: f32) -> f32 {
+    let bits = x.to_bits();
+    f32::from_bits((bits + 0x0fff + ((bits >> 13) & 1)) & !0x1fff)
+}
+
+#[test]
+fn matrix_product_on_matrix_units_when_rounding_is_admitted() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) || !device.capabilities().matrix_multiply {
+        return;
+    }
+    let _specialization = goldy::test_support::SpecializationOverride::force_disabled();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let mut scheme = Scheme::new(&ctx);
+    scheme.set_automatic_fusion(true);
+    scheme.set_contraction_precision(ContractionPrecision::F16Factors);
+    let init = gemm_init();
+    let mut t = tensors(&device, &init);
+    let (allocated, _) = gemm_relu(&mut kernels.recorder(&mut scheme), &t).expect("record");
+    t.extend(allocated);
+
+    let (m, n, k) = GEMM;
+    let [Init::F32(_, a), Init::F32(_, b), _] = &init else {
+        unreachable!("f32 operands")
+    };
+    let product = |round: fn(f32) -> f32| -> Vec<f64> {
+        (0..m * n)
+            .map(|e| {
+                let (i, j) = (e / n, e % n);
+                (0..k)
+                    .map(|s| f64::from(round(a[(i * k + s) as usize])) * f64::from(round(b[(s * n + j) as usize])))
+                    .sum()
+            })
+            .collect()
+    };
+    let (exact, rounded) = (product(|x| x), product(round_f16));
+    let mut fused_frames = 0;
+    for frame in 1..=4 {
+        let mut sub = scheme.submit().expect("submit");
+        let got: Vec<Vec<f32>> = t[2..]
+            .iter()
+            .map(|t| {
+                (&mut sub >> t.buffer())
+                    .take::<u8>()
+                    .expect("take")
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect()
+            })
+            .collect();
+        drop(sub);
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+        let fused = scheme.executed_node_count() == 1;
+        let (mut from_rounded, mut from_exact) = (0f64, 0f64);
+        for (e, (&c, &relu)) in got[0].iter().zip(&got[1]).enumerate() {
+            assert_eq!(relu, c.max(0.0), "frame {frame}: the epilogue reads the product");
+            from_rounded = from_rounded.max((f64::from(c) - rounded[e]).abs());
+            from_exact = from_exact.max((f64::from(c) - exact[e]).abs());
+        }
+        // Only f32 summation separates the fused result from the product of the rounded
+        // factors; rounding the factors moves it far more.
+        let rounding = exact
+            .iter()
+            .zip(&rounded)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max);
+        assert!(from_exact < 0.05, "frame {frame}: {from_exact}");
+        if fused {
+            fused_frames += 1;
+            assert!(
+                from_rounded < 1e-4 && from_rounded * 10.0 < rounding,
+                "frame {frame}: {from_rounded} vs {rounding}"
+            );
+        }
+    }
+    assert!(fused_frames > 0);
+    assert_one_semantic_region(&scheme, 2);
+    assert_eq!(schedule(&scheme), FusionSchedule::Matrix);
+
+    // Exact contractions again: the region replans onto the exact schedule, or, for a
+    // library product, runs as recorded.
+    scheme.set_contraction_precision(ContractionPrecision::Exact);
+    for _ in 0..4 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+    }
+    if library_gemm(&device) {
+        assert!(scheme.fusion_report().regions.is_empty());
+        assert_eq!(scheme.executed_node_count(), 2);
+    } else {
+        assert_one_semantic_region(&scheme, 2);
+        assert_eq!(schedule(&scheme), FusionSchedule::Threads);
+    }
 }
 
 #[test]

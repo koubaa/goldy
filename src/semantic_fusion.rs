@@ -6,9 +6,11 @@
 //! matrix product is a [`Contraction`] whose axes carry their roles, so its structure
 //! survives composition. Automatic fusion (`fusion_plan.rs`) composes adjacent sites in
 //! a [`Graph`], which forwards what one site stores to the later sites that read it, and
-//! lowers the composed region to one kernel with [`algebra::lower`]. Each lifted
-//! reduction names the association its recorded kernel uses and lowering reproduces it,
-//! so the synthesized kernel stores what the recorded sequence stores, bit for bit.
+//! lowers the composition to one kernel with [`algebra::lower_graph`], choosing among
+//! the schedules the device's [`Target`] offers. Each lifted reduction names the
+//! association its recorded kernel uses and lowering reproduces it, so the synthesized
+//! kernel stores what the recorded sequence stores, bit for bit, unless the scheme
+//! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units.
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -24,8 +26,8 @@ use crate::parcel::Parcel;
 use crate::task_graph::{DispatchDim, NodeKind, ResourceId, TaskNode};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
-    self, BinaryOp, Contraction, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand, Params, ParcelId, ReduceOrder,
-    Storage, Term, UnaryOp,
+    self, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand, Params,
+    ParcelId, ReduceOrder, Storage, Target, Term, UnaryOp,
 };
 use goldy_shader_ir::{
     BinOp, BuiltinFn, ElementType, Expr, FusionRejection, KernelDef, KernelId, ParamCategory, ScalarType, Stmt,
@@ -65,6 +67,10 @@ pub(crate) struct SemanticSite {
     pub(crate) sources: Vec<IndexSource>,
     /// The node user slot each scalar parameter binds, by parameter.
     pub(crate) scalars: Vec<usize>,
+    /// Whether `op` sums in the association the recorded node does. A library product
+    /// sums in its own, so its site joins a region only under a
+    /// [`ContractionPrecision`] that lets contractions reassociate.
+    pub(crate) exact: bool,
 }
 
 /// A [`SemanticSite`] under construction.
@@ -115,8 +121,29 @@ impl SiteBuilder {
             parcels: self.parcels,
             sources: self.sources,
             scalars: self.scalars,
+            exact: true,
         })
     }
+}
+
+/// `C = op(A) @ op(B)` on the backend library, as a sequential contraction: a site that
+/// states what the product is but not how the library sums it.
+pub(crate) fn library_matmul(
+    desc: &MatMulDesc,
+    fallback: MatMulFallback,
+    operands: [(&MatMulOperand, SiteParcel); 3],
+) -> Option<SemanticSite> {
+    use crate::ops::matmul::{packed_leading_dim, OperandKind};
+    let kinds = [OperandKind::A, OperandKind::B, OperandKind::C];
+    let packed = operands
+        .iter()
+        .zip(kinds)
+        .all(|((o, _), kind)| o.leading_dim == packed_leading_dim(desc, kind));
+    if fallback != MatMulFallback::Gemm || !packed {
+        return None;
+    }
+    let site = matmul(desc, fallback, operands)?;
+    Some(SemanticSite { exact: false, ..site })
 }
 
 /// `C = op(A) @ op(B)` as the stdlib kernel `fallback` computes it.
@@ -489,8 +516,21 @@ impl SemanticProgram {
     }
 }
 
-/// Compose `sites`, in execution order, and lower the composition to one kernel.
-pub(crate) fn synthesize(sites: &[&SemanticSite]) -> Result<SemanticProgram, FusionRejection> {
+/// What a device with `caps` offers semantic fusion.
+pub(crate) fn target(caps: &crate::runtime::RuntimeCapabilities) -> Target {
+    Target {
+        subgroup: caps.subgroup_width,
+        matrix: caps.matrix_multiply,
+    }
+}
+
+/// Compose `sites`, in execution order, and lower the composition to one kernel for
+/// `target`, rounding contractions no more than `precision` admits.
+pub(crate) fn synthesize(
+    sites: &[&SemanticSite],
+    target: &Target,
+    precision: ContractionPrecision,
+) -> Result<SemanticProgram, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
     let mut graph = Graph::default();
     let mut sources = Vec::new();
@@ -528,7 +568,7 @@ pub(crate) fn synthesize(sites: &[&SemanticSite]) -> Result<SemanticProgram, Fus
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
     }
-    let lowered = algebra::lower(graph.region(), &sources).map_err(|e| FusionRejection::Semantic {
+    let lowered = algebra::lower_graph(&graph, &sources, target, precision).map_err(|e| FusionRejection::Semantic {
         stage: sites.len() - 1,
         reason: e.to_string(),
     })?;

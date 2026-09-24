@@ -120,7 +120,14 @@ fn composition_forwards_an_epilogue() {
     assert_eq!(bits(&run(&inlined, &env)), want);
 
     let lowered = lower(&fused, &[]).unwrap();
-    assert_eq!(lowered.schedule, Schedule::Lanes { lanes: 32, elements: 4 });
+    assert_eq!(
+        lowered.schedule,
+        Schedule::Lanes {
+            lanes: 32,
+            elements: 4,
+            exchange: Exchange::Workgroup
+        }
+    );
     assert_eq!(lowered.groups, [3, 1, 1]);
     assert_eq!(lowered.kernel.workgroup_size, [128, 1, 1]);
     assert_eq!(

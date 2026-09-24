@@ -14,7 +14,7 @@
 //! An elided parameter has no parcel to fall back on, so [`elide_body`] routes every
 //! access through its register, including the positions forwarding leaves on memory.
 
-use crate::{BinOp, Expr, Stmt, UnaryOp};
+use crate::{BinOp, Expr, MatrixOp, Stmt, UnaryOp};
 use std::collections::{HashMap, HashSet};
 
 /// The locals that cache one forwarded parameter's element inside a stage function.
@@ -196,6 +196,12 @@ impl<'a> Rewriter<'a> {
                     count: self.replace(count),
                     scratch: scratch.clone(),
                 });
+            }
+            Stmt::Matrix(op) => {
+                if let MatrixOp::Accumulator { name } = op {
+                    self.bind(name);
+                }
+                out.push(stmt.clone());
             }
             Stmt::Expr(e) => {
                 self.materialize(&[e], out);
@@ -482,6 +488,12 @@ impl Eliminator<'_> {
                 count: self.expr(count),
                 scratch: scratch.clone(),
             },
+            Stmt::Matrix(op) => {
+                if let MatrixOp::Accumulator { name } = op {
+                    self.bind(name);
+                }
+                stmt.clone()
+            }
             Stmt::Expr(e) => Stmt::Expr(self.expr(e)),
         }
     }

@@ -4,7 +4,7 @@
 //! definition binds must be made collision-free and every formal parameter mapped
 //! to the composed entry's parameter.
 
-use crate::{Expr, ShaderKernel, Stmt};
+use crate::{Expr, MatrixOp, ShaderKernel, Stmt};
 use std::collections::HashMap;
 
 /// What a name bound by a kernel definition denotes.
@@ -171,6 +171,20 @@ impl Renamer<'_> {
                 count: self.expr(count),
                 scratch: self.resolve(scratch),
             },
+            Stmt::Matrix(op) => Stmt::Matrix(match op {
+                MatrixOp::Accumulator { name } => MatrixOp::Accumulator {
+                    name: self.bind(name, SymbolKind::Local),
+                },
+                MatrixOp::MulAdd { acc, a, b } => MatrixOp::MulAdd {
+                    acc: self.resolve(acc),
+                    a: self.resolve(a),
+                    b: self.resolve(b),
+                },
+                MatrixOp::Store { acc, dest } => MatrixOp::Store {
+                    acc: self.resolve(acc),
+                    dest: self.resolve(dest),
+                },
+            }),
             Stmt::Expr(expr) => Stmt::Expr(self.expr(expr)),
         }
     }

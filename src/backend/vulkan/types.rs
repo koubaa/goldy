@@ -838,6 +838,8 @@ pub(crate) struct PhysicalDeviceInfo {
     pub mesh_shaders: bool,
     /// `VK_EXT_mesh_shader` `taskShader` feature.
     pub amplification_shaders: bool,
+    /// See [`crate::runtime::RuntimeCapabilities::subgroup_width`].
+    pub subgroup_width: Option<u32>,
 }
 
 /// Per-context async submission stream (timeline, poller, command pool).

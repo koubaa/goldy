@@ -1,8 +1,8 @@
 //! Emit canonical `[goldy_compute]` Slang from a lowered [`ShaderKernel`].
 
 use crate::{
-    BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam, ShaderKernel, SourceMap, Stmt, UnaryOp,
-    WorkgroupReduceOp, TENSOR_LAYOUT_SLANG, TENSOR_META_PARAM,
+    BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam, MatrixOp, ShaderKernel, SourceMap, Stmt, UnaryOp,
+    WorkgroupReduceOp, MATRIX_TILE, TENSOR_LAYOUT_SLANG, TENSOR_META_PARAM,
 };
 use std::collections::HashMap;
 
@@ -312,6 +312,7 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask
             count,
             scratch,
         } => emit_workgroup_softmax(out, level, *n, buf, base, count, scratch, builtins, tensor_slots),
+        Stmt::Matrix(op) => emit_matrix(out, level, op),
         Stmt::Expr(expr) => {
             out.push_str(&format!("{pad}{};\n", emit_expr(expr, builtins, tensor_slots)));
         }
@@ -553,6 +554,45 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slot
         BuiltinFn::Float3 => format!("float3({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::Float4 => format!("float4({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::Uint2 => format!("uint2({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::SubgroupLane => {
+            assert!(args.is_empty());
+            "WaveGetLaneIndex()".to_string()
+        }
+        BuiltinFn::SubgroupRead => {
+            assert_eq!(args.len(), 2);
+            format!("WaveReadLaneAt({})", join_args(args, builtins, tensor_slots))
+        }
+    }
+}
+
+fn matrix_type(elem: &str, usage: &str) -> String {
+    format!(
+        "linalg.CoopMat<{elem}, MemoryScope.Subgroup, {MATRIX_TILE}, {MATRIX_TILE}, linalg.CoopMatMatrixUse.{usage}>"
+    )
+}
+
+fn emit_matrix(out: &mut String, level: usize, op: &MatrixOp) {
+    let pad = indent(level);
+    let accumulator = matrix_type("float", "MatrixAccumulator");
+    let row_major = "linalg.CoopMatMatrixLayout.RowMajor";
+    match op {
+        MatrixOp::Accumulator { name } => out.push_str(&format!("{pad}{accumulator} {name} = {accumulator}(0.0);\n")),
+        MatrixOp::MulAdd { acc, a, b } => {
+            let a = format!(
+                "{}.Load<{row_major}>({a}, 0, {MATRIX_TILE})",
+                matrix_type("half", "MatrixA")
+            );
+            let b = format!(
+                "{}.Load<{row_major}>({b}, 0, {MATRIX_TILE})",
+                matrix_type("half", "MatrixB")
+            );
+            out.push_str(&format!(
+                "{pad}{acc} = linalg.coopMatMulAdd<float, false>({a}, {b}, {acc});\n"
+            ));
+        }
+        MatrixOp::Store { acc, dest } => {
+            out.push_str(&format!("{pad}{acc}.Store<{row_major}>({dest}, 0, {MATRIX_TILE});\n"));
+        }
     }
 }
 

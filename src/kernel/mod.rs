@@ -29,8 +29,8 @@ pub(crate) use prepare::access_kind_to_node;
 pub mod ir {
     pub use goldy_shader_ir::{
         assemble_virtual_entry, compose, emit_canonical_compute_source, lower_body, tensor_slot_map, BinOp, BodyEnv,
-        BuiltinFn, Expr, FusionLimits, FusionStage, LoweredBody, ShaderKernel, Stmt, SymbolKind, UnaryOp,
-        VirtualEntrySignature, WorkgroupReduceOp, PORTABLE_WORKGROUP_BYTES, VIRTUAL_ENTRY_NAME,
+        BuiltinFn, Expr, FusionLimits, FusionStage, LoweredBody, MatrixOp, ShaderKernel, Stmt, SymbolKind, UnaryOp,
+        VirtualEntrySignature, WorkgroupReduceOp, MATRIX_TILE, PORTABLE_WORKGROUP_BYTES, VIRTUAL_ENTRY_NAME,
     };
 }
 pub use prepare::{dump_kernel_artifacts, prepare_kernel, PreparedKernel, SchemeNodeStart, TensorShapeEnv};

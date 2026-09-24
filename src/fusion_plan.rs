@@ -31,7 +31,7 @@ use crate::kernel::{
 };
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
-use crate::semantic_fusion::{lift_kernel, synthesize, SemanticProgram, SemanticSite};
+use crate::semantic_fusion::{lift_kernel, synthesize, target as semantic_target, SemanticProgram, SemanticSite};
 use crate::shader::ShaderProvenance;
 use crate::task_graph::{
     DispatchDim, GraphIR, GroupInfo, NodeAccess, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId,
@@ -39,6 +39,7 @@ use crate::task_graph::{
 use crate::temporary::{TemporaryUse, TEMPORARY_SLOT_PLACEHOLDER};
 use crate::types::ResourceAccess;
 use crate::SchemeLabel;
+use goldy_shader_ir::algebra::{ContractionPrecision, Target};
 use goldy_shader_ir::{FusedDefinition, FusionRejection, KernelDef, KernelId};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -177,7 +178,38 @@ pub struct FusionRegion {
     /// defining their factors and the epilogues reading their results, and the factors
     /// they share, one per line. Operands are named `p{n}` by the fused parcel they bind.
     pub structure: Option<String>,
+    /// For a [`FusionTier::Semantic`] region, how its kernel maps onto the device.
+    pub schedule: Option<FusionSchedule>,
     pub status: FusionRegionStatus,
+}
+
+/// How a [`FusionTier::Semantic`] region's kernel maps its outputs onto the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionSchedule {
+    /// One thread per output element.
+    Threads,
+    /// A group of `lanes` threads per output element, which exchange partial sums
+    /// through subgroup reads when `subgroup`, else through workgroup memory. Either
+    /// way the sums associate as the recorded kernels do.
+    Lanes { lanes: u32, subgroup: bool },
+    /// One subgroup per output tile, with contractions on matrix units: their factors
+    /// rounded to f16 and summed in f32. Only a scheme that admits
+    /// [`crate::ContractionPrecision::F16Factors`] runs it.
+    Matrix,
+}
+
+impl From<goldy_shader_ir::algebra::Schedule> for FusionSchedule {
+    fn from(schedule: goldy_shader_ir::algebra::Schedule) -> Self {
+        use goldy_shader_ir::algebra::{Exchange, Schedule};
+        match schedule {
+            Schedule::Threads { .. } => FusionSchedule::Threads,
+            Schedule::Lanes { lanes, exchange, .. } => FusionSchedule::Lanes {
+                lanes,
+                subgroup: exchange == Exchange::Subgroup,
+            },
+            Schedule::Matrix { .. } => FusionSchedule::Matrix,
+        }
+    }
 }
 
 /// How a [`FusionRegion`]'s fused program is derived.
@@ -325,6 +357,13 @@ impl Program {
         }
     }
 
+    fn schedule(&self) -> Option<FusionSchedule> {
+        match self {
+            Program::Composed(_) => None,
+            Program::Semantic(program) => Some(program.lowered.schedule.into()),
+        }
+    }
+
     fn compile(&self, device: &Runtime) -> anyhow::Result<PreparedKernel> {
         match self {
             Program::Composed(definition) => prepare_fused(device, definition),
@@ -358,6 +397,7 @@ pub(crate) struct FusionPlanner {
     failures_seen: HashSet<KernelId>,
     plan: Option<Plan>,
     events: FusionEvents,
+    precision: ContractionPrecision,
 }
 
 impl FusionPlanner {
@@ -371,7 +411,17 @@ impl FusionPlanner {
             failures_seen: HashSet::new(),
             plan: None,
             events: FusionEvents::default(),
+            precision: ContractionPrecision::Exact,
         }
+    }
+
+    pub(crate) fn precision(&self) -> ContractionPrecision {
+        self.precision
+    }
+
+    /// Admit `precision` from the next plan on; the caller replans.
+    pub(crate) fn set_precision(&mut self, precision: ContractionPrecision) {
+        self.precision = precision;
     }
 
     pub(crate) fn events(&self) -> FusionEvents {
@@ -446,7 +496,8 @@ impl FusionPlanner {
         temporaries: &[TemporaryUse],
     ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
-            self.match_regions(ir, sites, semantic, temporaries);
+            let target = semantic_target(&device.capabilities());
+            self.match_regions(ir, sites, semantic, temporaries, &target);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;
                 return None;
@@ -516,10 +567,11 @@ impl FusionPlanner {
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
         temporaries: &[TemporaryUse],
+        target: &Target,
     ) {
         self.regions.clear();
         self.rejected.clear();
-        let taken = self.match_semantic(ir, sites, semantic);
+        let taken = self.match_semantic(ir, sites, semantic, target);
         let view = |i: usize| -> Option<StageView<'_>> {
             if taken[i] {
                 return None;
@@ -595,6 +647,7 @@ impl FusionPlanner {
         ir: &GraphIR,
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
+        target: &Target,
     ) -> Vec<bool> {
         let n = ir.nodes.len();
         let lifted: HashMap<usize, SemanticSite> = sites
@@ -602,8 +655,10 @@ impl FusionPlanner {
             .filter(|(i, _)| !semantic.contains_key(i))
             .filter_map(|(&i, site)| Some((i as usize, lift_kernel(site, ir.nodes.get(i as usize)?)?)))
             .collect();
-        let site = |i: usize| semantic.get(&(i as u32)).or_else(|| lifted.get(&i));
-        let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic.contains_key(&(i as u32)));
+        let reassociates = self.precision != ContractionPrecision::Exact;
+        let semantic = |i: usize| semantic.get(&(i as u32)).filter(|s| s.exact || reassociates);
+        let site = |i: usize| semantic(i).or_else(|| lifted.get(&i));
+        let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic(i).is_some());
         let mut taken = vec![false; n];
         let mut start = 0;
         while start < n {
@@ -617,7 +672,7 @@ impl FusionPlanner {
             while end < n && ir.nodes[end].group == ir.nodes[start].group {
                 let Some(next) = site(end) else { break };
                 run.push(next);
-                match synthesize(&run) {
+                match synthesize(&run, target, self.precision) {
                     Ok(program) => {
                         best = Some(program);
                         end += 1;
@@ -712,6 +767,7 @@ impl FusionPlanner {
                         forwarded,
                         elided,
                         structure: r.program.structure(),
+                        schedule: r.program.schedule(),
                         status: r.status.clone(),
                     }
                 })

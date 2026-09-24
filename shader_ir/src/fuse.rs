@@ -23,8 +23,8 @@ use crate::abi::StableHasher;
 use crate::forward::{elide_body, forward_body, zero_literal, ForwardedLocal};
 use crate::{
     assemble_virtual_entry, emit_canonical_compute_source, lower_body, AccessKind, BodyEnv, BuiltinFn, BuiltinMask,
-    Expr, KernelDef, KernelId, KernelParam, LoweredBody, ParamCategory, ShaderKernel, SourceMap, Stmt, SymbolKind,
-    VirtualEntrySignature, KERNEL_ABI_VERSION,
+    Expr, KernelDef, KernelId, KernelParam, LoweredBody, MatrixOp, ParamCategory, ShaderKernel, SourceMap, Stmt,
+    SymbolKind, VirtualEntrySignature, KERNEL_ABI_VERSION,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -928,6 +928,8 @@ impl UseWalker<'_> {
                     self.escape(f);
                 }
             }
+            Stmt::Matrix(MatrixOp::Accumulator { name }) => self.bind(name, Value::Unknown),
+            Stmt::Matrix(_) => {}
             Stmt::Expr(e) => self.expr(e),
         }
     }

@@ -311,6 +311,7 @@ impl VulkanBackend {
                         ray_tracing_pipelines: rt_mesh.ray_tracing_pipelines,
                         mesh_shaders: rt_mesh.mesh_shaders,
                         amplification_shaders: rt_mesh.amplification_shaders,
+                        subgroup_width: device::query_subgroup_width(&instance, handle),
                     })
                 } else {
                     rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));

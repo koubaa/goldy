@@ -2,8 +2,8 @@
 //! retain their structured definition at runtime.
 
 use goldy_shader_ir::{
-    AccessKind, BinOp, BuiltinFn, BuiltinMask, Expr, KernelParam, ParamCategory, ScalarType, ShaderKernel, Stmt,
-    TensorDimSpec, TensorShapeSpec, UnaryOp, WorkgroupReduceOp,
+    AccessKind, BinOp, BuiltinFn, BuiltinMask, Expr, KernelParam, MatrixOp, ParamCategory, ScalarType, ShaderKernel,
+    Stmt, TensorDimSpec, TensorShapeSpec, UnaryOp, WorkgroupReduceOp,
 };
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -230,6 +230,23 @@ fn stmt(s: &Stmt) -> TokenStream {
                 }
             }
         }
+        Stmt::Matrix(op) => {
+            let op = match op {
+                MatrixOp::Accumulator { name } => {
+                    let name = string(name);
+                    quote! { Accumulator { name: #name } }
+                }
+                MatrixOp::MulAdd { acc, a, b } => {
+                    let (acc, a, b) = (string(acc), string(a), string(b));
+                    quote! { MulAdd { acc: #acc, a: #a, b: #b } }
+                }
+                MatrixOp::Store { acc, dest } => {
+                    let (acc, dest) = (string(acc), string(dest));
+                    quote! { Store { acc: #acc, dest: #dest } }
+                }
+            };
+            quote! { ::goldy::kernel::ir::Stmt::Matrix(::goldy::kernel::ir::MatrixOp::#op) }
+        }
         Stmt::Expr(e) => {
             let e = expr(e);
             quote! { ::goldy::kernel::ir::Stmt::Expr(#e) }
@@ -349,6 +366,8 @@ fn builtin_fn(func: BuiltinFn) -> TokenStream {
         BuiltinFn::Float4 => quote! { Float4 },
         BuiltinFn::Uint2 => quote! { Uint2 },
         BuiltinFn::WorkgroupBarrier => quote! { WorkgroupBarrier },
+        BuiltinFn::SubgroupLane => quote! { SubgroupLane },
+        BuiltinFn::SubgroupRead => quote! { SubgroupRead },
     };
     quote! { ::goldy::kernel::ir::BuiltinFn::#variant }
 }
