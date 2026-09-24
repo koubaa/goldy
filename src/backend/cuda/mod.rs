@@ -2035,8 +2035,6 @@ impl CudaBackend {
             .collect()
     }
 
-    /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
-    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     /// Pinned staging that receives host writes to `buffer` at `offset`, as
     /// `(staging owner, offset within that staging, logical size of buffer)`.
     /// Views of a staged parent write through the parent.
@@ -2051,6 +2049,8 @@ impl CudaBackend {
         Ok(buf.has_host_staging().then_some((buffer, offset, buf.size)))
     }
 
+    /// NativeAndTwin buffers whose memory is written by `ops` (for retained graph dirty lists).
+    #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     fn native_twin_buffers_written_by_ops(&self, ops: &[CudaOp]) -> Vec<BufferHandle> {
         let mut memories = Vec::new();
         for op in ops {
