@@ -375,6 +375,34 @@ fn fusing(ctx: &goldy::Context) -> Scheme {
     scheme
 }
 
+/// `((input * 2 + 1) * 3 + 1)` for the first `stages` of that sequence, past `N` the sentinel.
+fn temporary_chain_reference(stages: usize) -> Vec<f32> {
+    let ops: [fn(f32) -> f32; 4] = [|x| x * 2.0, |x| x + 1.0, |x| x * 3.0, |x| x + 1.0];
+    input_data()
+        .into_iter()
+        .enumerate()
+        .map(|(i, x)| {
+            if i < N as usize {
+                ops[..stages].iter().fold(x, |x, op| op(x))
+            } else {
+                SENTINEL
+            }
+        })
+        .collect()
+}
+
+/// Record `input → scale → t0 → bias → t1 → scale → t2 → bias → output` over temporaries.
+fn record_temporary_chain(scheme: &mut Scheme, k: &Chain, p: &[Buffer]) -> anyhow::Result<()> {
+    let t: Vec<_> = (0..3)
+        .map(|_| scheme.temporary_buffer::<f32>(LEN))
+        .collect::<Result<_, _>>()?;
+    k.scale.invoke(&p[0], &t[0], N, 2.0).over_1d(N).record(scheme, "a")?;
+    k.bias.invoke(&t[0], &t[1], N, 1.0).over_1d(N).record(scheme, "b")?;
+    k.scale.invoke(&t[1], &t[2], N, 3.0).over_1d(N).record(scheme, "c")?;
+    k.bias.invoke(&t[2], &p[1], N, 1.0).over_1d(N).record(scheme, "d")?;
+    Ok(())
+}
+
 /// Record [`chain`] as two recorded dispatches; returns the second node.
 fn record_chain(scheme: &mut Scheme, k: &Chain, p: &[Buffer]) -> anyhow::Result<goldy::NodeId> {
     let [scale, bias] = <[_; 2]>::try_from(chain(k, p)).map_err(|_| anyhow::anyhow!("two stages"))?;
@@ -795,6 +823,99 @@ fn main() {
                 for f in 1..=3 {
                     submit_and_check(&mut scheme, &p, &want, &format!("fused with shift, frame {f}"))?;
                 }
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("temporaries_share_storage_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let p = buffers(&device, &[input_data(), sentinel()])?;
+                let want = [input_data(), temporary_chain_reference(4)];
+                let ctx = device.create_context()?;
+                let mut scheme = Scheme::new(&ctx);
+                scheme.set_automatic_fusion(false);
+                record_temporary_chain(&mut scheme, &k, &p)?;
+                for f in 1..=4 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.temporary_storage_count(), 2, "t0 and t2 share one buffer");
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("temporary_elision_keeps_every_parcel_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let p = buffers(&device, &[input_data(), sentinel()])?;
+                let want = [input_data(), temporary_chain_reference(4)];
+                let ctx = device.create_context()?;
+                let mut scheme = fusing(&ctx);
+                record_temporary_chain(&mut scheme, &k, &p)?;
+
+                submit_and_check(&mut scheme, &p, &want, "frame 1")?;
+                assert_eq!(
+                    scheme.temporary_storage_count(),
+                    2,
+                    "unfused, the temporaries need storage"
+                );
+                for f in 2..=3 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.executed_node_count(), 1);
+                let report = scheme.fusion_report();
+                assert_eq!(report.regions[0].status, FusionRegionStatus::Promoted);
+                assert_eq!((report.regions[0].forwarded, report.regions[0].elided), (3, 3));
+                assert_eq!(scheme.temporary_storage_count(), 0, "every temporary is elided");
+                for f in 4..=6 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("elided frame {f}"))?;
+                }
+                assert_eq!(scheme.replay_stats().records, 2, "the elided plan replays");
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("temporary_read_outside_the_region_is_stored_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let shift_k = shift::Kernel::prepare(&device)?;
+                let p = buffers(&device, &[input_data(), sentinel(), sentinel()])?;
+                let doubled = temporary_chain_reference(1);
+                let shifted: Vec<f32> = (0..LEN)
+                    .map(|i| if i + 1 < N as usize { doubled[i + 1] } else { SENTINEL })
+                    .collect();
+                let want = [input_data(), temporary_chain_reference(2), shifted];
+                let ctx = device.create_context()?;
+                let mut scheme = fusing(&ctx);
+                let t = scheme.temporary_buffer::<f32>(LEN)?;
+                k.scale
+                    .invoke(&p[0], &t, N, 2.0)
+                    .over_1d(N)
+                    .record(&mut scheme, "scale")?;
+                k.bias
+                    .invoke(&t, &p[1], N, 1.0)
+                    .over_1d(N)
+                    .record(&mut scheme, "bias")?;
+                shift_k.invoke(&t, &p[2], N).over_1d(N).record(&mut scheme, "shift")?;
+                for f in 1..=5 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.executed_node_count(), 2);
+                let region = &scheme.fusion_report().regions[0];
+                assert_eq!((region.forwarded, region.elided), (1, 0));
+                assert_eq!(scheme.temporary_storage_count(), 1);
                 Ok(())
             }
         }),

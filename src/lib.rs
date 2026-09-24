@@ -78,6 +78,7 @@ pub mod signal;
 pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
 pub mod swapchain_pool;
+pub(crate) mod temporary;
 pub(crate) mod timeline;
 pub mod transient_pool;
 pub(crate) mod vram_allocator;
@@ -104,6 +105,7 @@ pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
 pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
+pub use temporary::Temporary;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types

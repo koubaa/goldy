@@ -14,9 +14,13 @@
 //! Such a parameter's element is also forwarded from stage to stage in registers (see
 //! [`FusedDefinition::forwarded`]), so a consumer does not reload what a producer just
 //! stored. [`FusedDefinition::conservative`] turns forwarding off and keeps every load.
+//!
+//! A forwarded parameter whose parcel nothing outside the fused dispatch observes may
+//! also be elided ([`FusedDefinition::elide`]): the fused entry no longer binds it, and
+//! its element exists only in registers.
 
 use crate::abi::StableHasher;
-use crate::forward::{forward_body, zero_literal, ForwardedLocal};
+use crate::forward::{elide_body, forward_body, zero_literal, ForwardedLocal};
 use crate::{
     assemble_virtual_entry, emit_canonical_compute_source, lower_body, AccessKind, BodyEnv, BuiltinFn, BuiltinMask,
     Expr, KernelDef, KernelId, KernelParam, LoweredBody, ParamCategory, ShaderKernel, SourceMap, Stmt, SymbolKind,
@@ -30,7 +34,7 @@ pub const PORTABLE_WORKGROUP_BYTES: u32 = 16 * 1024;
 
 /// Bump when [`FusedDefinition::lower`] changes the program it emits for the same
 /// constituents, so [`FusedDefinition::id`] stops matching earlier fused programs.
-pub const FUSION_ABI_VERSION: u32 = 2;
+pub const FUSION_ABI_VERSION: u32 = 3;
 
 /// One constituent of a composition, in execution order.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +76,10 @@ pub struct FusedDefinition {
     /// registers across stages, in ascending order. Stores still reach the parcel;
     /// loads after a store or an earlier load read the register instead.
     pub forwarded: Vec<usize>,
+    /// Forwarded parameters the fused entry does not bind, in ascending order. Their
+    /// element exists only in registers: stores and loads use the register alone.
+    /// Empty unless [`Self::elide`] was called.
+    pub elided: Vec<usize>,
 }
 
 /// One constituent of a [`FusedDefinition`].
@@ -332,13 +340,14 @@ pub fn compose(
         type_decls,
         dependence_rank,
         forwarded,
+        elided: Vec::new(),
     })
 }
 
 impl FusedDefinition {
     /// Identity of the fused program: the constituent kernel ids, the argument map, the
-    /// workgroup size and the forwarded parameters, under the kernel and fusion ABI
-    /// versions.
+    /// workgroup size and the forwarded and elided parameters, under the kernel and
+    /// fusion ABI versions.
     ///
     /// Every other field is derived from these, so definitions with one id lower to the
     /// same program up to source-location comments.
@@ -355,9 +364,11 @@ impl FusedDefinition {
                 h.u64(j as u64);
             }
         }
-        h.u64(self.forwarded.len() as u64);
-        for &j in &self.forwarded {
-            h.u64(j as u64);
+        for list in [&self.forwarded, &self.elided] {
+            h.u64(list.len() as u64);
+            for &j in list {
+                h.u64(j as u64);
+            }
         }
         h.finish()
     }
@@ -366,6 +377,33 @@ impl FusedDefinition {
     /// reaches its parcel.
     pub fn conservative(mut self) -> Self {
         self.forwarded.clear();
+        self.elided.clear();
+        self
+    }
+
+    /// Stop binding the fused parameters in `params` whose parcels nothing outside this
+    /// dispatch observes, and keep their elements in registers only.
+    ///
+    /// The caller vouches that the contents of each such parcel are undefined when the
+    /// dispatch starts and unobserved after it ends (a scheme-local temporary used by no
+    /// other dispatch). A parameter stays bound unless it is forwarded and every stage
+    /// reaches it only through element accesses (no `len()`, `dim()` or `rank()`).
+    pub fn elide(mut self, params: &[usize]) -> Self {
+        let uses: Vec<Vec<Use>> = self.stages.iter().map(|s| formal_uses(&s.definition)).collect();
+        let element_only = |j: usize| {
+            self.stages
+                .iter()
+                .zip(&uses)
+                .all(|(s, uses)| s.args.iter().zip(uses).all(|(&a, u)| a != j || !u.whole))
+        };
+        let mut elided: Vec<usize> = params
+            .iter()
+            .copied()
+            .filter(|j| self.forwarded.contains(j) && element_only(*j))
+            .collect();
+        elided.sort_unstable();
+        elided.dedup();
+        self.elided = elided;
         self
     }
 
@@ -409,26 +447,37 @@ impl FusedDefinition {
             let param = &self.params[j];
             let local = forwarded_local(j);
             let zero = zero_literal(&param.slang_type).expect("forwarded params have a forwardable element type");
-            body.stmts.push_str(&format!(
-                "    {} {} = {zero};\n    bool {} = false;\n",
-                param.slang_type, local.value, local.ok
-            ));
+            body.stmts
+                .push_str(&format!("    {} {} = {zero};\n", param.slang_type, local.value));
+            if !self.elided.contains(&j) {
+                body.stmts.push_str(&format!("    bool {} = false;\n", local.ok));
+            }
         }
         for (k, stage) in self.stages.iter().enumerate() {
             let def = &stage.definition;
             let function = stage_function_name(k, &def.name);
+            let bound = |j: &usize| !self.elided.contains(j);
+            let elided: HashMap<String, String> = def
+                .params
+                .iter()
+                .zip(&stage.args)
+                .filter(|(_, j)| !bound(j))
+                .map(|(formal, &j)| (formal.name.clone(), forwarded_local(j).value))
+                .collect();
             let locals: HashMap<String, ForwardedLocal> = def
                 .params
                 .iter()
                 .zip(&stage.args)
-                .filter(|(_, j)| self.forwarded.contains(j))
+                .filter(|(_, j)| self.forwarded.contains(j) && bound(j))
                 .map(|(formal, &j)| (formal.name.clone(), forwarded_local(j)))
                 .collect();
-            let stmts = if locals.is_empty() {
-                std::borrow::Cow::Borrowed(&def.body)
-            } else {
-                std::borrow::Cow::Owned(forward_body(&def.body, &locals))
-            };
+            let mut stmts = std::borrow::Cow::Borrowed(&def.body);
+            if !elided.is_empty() {
+                stmts = std::borrow::Cow::Owned(elide_body(&stmts, &elided));
+            }
+            if !locals.is_empty() {
+                stmts = std::borrow::Cow::Owned(forward_body(&stmts, &locals));
+            }
             let lowered = lower_body(
                 &stmts,
                 1,
@@ -443,9 +492,15 @@ impl FusedDefinition {
                 .params
                 .iter()
                 .zip(&stage.args)
+                .filter(|(_, j)| bound(j))
                 .map(|(formal, &j)| format!("{} {}", self.params[j].slang_param_type(), formal.name))
                 .collect();
-            let mut actuals: Vec<String> = stage.args.iter().map(|&j| self.params[j].name.clone()).collect();
+            let mut actuals: Vec<String> = stage
+                .args
+                .iter()
+                .filter(|j| bound(j))
+                .map(|&j| self.params[j].name.clone())
+                .collect();
             let mut passed: Vec<usize> = stage
                 .args
                 .iter()
@@ -457,9 +512,11 @@ impl FusedDefinition {
             for j in passed {
                 let local = forwarded_local(j);
                 formals.push(format!("inout {} {}", self.params[j].slang_type, local.value));
-                formals.push(format!("inout bool {}", local.ok));
                 actuals.push(local.value);
-                actuals.push(local.ok);
+                if bound(&j) {
+                    formals.push(format!("inout bool {}", local.ok));
+                    actuals.push(local.ok);
+                }
             }
             for (ty, name) in builtin_params(def.builtins) {
                 formals.push(format!("{ty} {name}"));
@@ -477,7 +534,13 @@ impl FusedDefinition {
         }
         let sig = VirtualEntrySignature {
             workgroup_size: self.workgroup_size,
-            params: self.params.clone(),
+            params: self
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| !self.elided.contains(j))
+                .map(|(_, p)| p.clone())
+                .collect(),
             builtins: self.builtins,
             type_decls: self.type_decls.clone(),
             source_map: self
@@ -616,6 +679,8 @@ struct Use {
     reads: bool,
     writes: bool,
     index: Index,
+    /// The formal is also used as a whole resource (`len()`, `dim()`, `rank()`, or passed on).
+    whole: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -783,7 +848,16 @@ impl UseWalker<'_> {
             reads: true,
             writes: true,
             index: Index::Other,
+            whole: true,
         };
+    }
+
+    /// `base` is queried as a whole resource; its elements are not accessed.
+    fn whole(&mut self, base: &Expr) {
+        match self.resource_expr(base) {
+            Some(f) => self.uses[f].whole = true,
+            None => self.expr(base),
+        }
     }
 
     fn block(&mut self, stmts: &[Stmt]) {
@@ -880,16 +954,10 @@ impl UseWalker<'_> {
                     None => self.expr(base),
                 }
             }
-            Expr::Len { base } | Expr::Rank { base } => {
-                if self.resource_expr(base).is_none() {
-                    self.expr(base);
-                }
-            }
+            Expr::Len { base } | Expr::Rank { base } => self.whole(base),
             Expr::Dim { base, axis } => {
                 self.expr(axis);
-                if self.resource_expr(base).is_none() {
-                    self.expr(base);
-                }
+                self.whole(base);
             }
             Expr::Field { base, .. } => self.expr(base),
             Expr::Binary { left, right, .. } => {
@@ -1172,6 +1240,130 @@ mod tests {
         let structs = compose("ab", &[stage(&ta, &[0, 1, 2]), stage(&tb, &[1, 3, 4])], &LIMITS).unwrap();
         assert_eq!(structs.dependence_rank, Some(1));
         assert!(structs.forwarded.is_empty(), "struct elements stay in memory");
+    }
+
+    #[test]
+    fn an_elided_intermediate_lives_only_in_a_register() {
+        let (a, b) = (scale(), bias());
+        let fused = compose("scale+bias", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS).unwrap();
+        let elided = fused.clone().elide(&[1]);
+        assert_eq!(elided.elided, [1]);
+        assert_ne!(elided.id(), fused.id(), "elision changes the program");
+        assert_eq!(elided.scalar_origins(), fused.scalar_origins());
+
+        let slang = elided.lower().source.canonical_slang;
+        assert!(!slang.contains("k0_output"), "the intermediate is not bound: {slang}");
+        assert!(!slang.contains("_goldy_fwd1_ok"), "{slang}");
+        assert!(
+            slang.contains(
+                "void goldy_fused_0_scale(BufRO<float> input, uint count, inout float _goldy_fwd1, ThreadId _goldy_gid) {\n    \
+                 uint i = _goldy_gid.x;\n    \
+                 if ((i >= count)) {\n        return;\n    }\n    \
+                 _goldy_fwd1 = (input[i] * 2.0);\n}\n"
+            ),
+            "{slang}"
+        );
+        assert!(
+            slang.contains(
+                "void goldy_fused_1_bias(Scattered<float> output, uint count, inout float _goldy_fwd1, ThreadId _goldy_gid) {\n    \
+                 uint i = _goldy_gid.x;\n    \
+                 if ((i >= count)) {\n        return;\n    }\n    \
+                 output[i] = (_goldy_fwd1 + 1.0);\n}\n"
+            ),
+            "{slang}"
+        );
+        assert!(
+            slang.contains(
+                "void cs_main(BufRO<float> k0_input, uint k0_count, Scattered<float> k1_output, uint k1_count, ThreadId _goldy_gid) {\n    \
+                 float _goldy_fwd1 = 0.0;\n    \
+                 goldy_fused_0_scale(k0_input, k0_count, _goldy_fwd1, _goldy_gid);\n    \
+                 goldy_fused_1_bias(k1_output, k1_count, _goldy_fwd1, _goldy_gid);\n}\n"
+            ),
+            "{slang}"
+        );
+        assert!(elided.conservative().elided.is_empty());
+    }
+
+    #[test]
+    fn elision_reaches_accesses_forwarding_leaves_on_memory() {
+        let a = scale();
+        let mut b = bias();
+        // `if i < count && input[i] > 0.0 { let input = 3.0; output[i] = input; }`
+        b.body[2] = Stmt::If {
+            cond: bin(
+                BinOp::And,
+                bin(BinOp::Lt, var("i"), var("count")),
+                bin(BinOp::Gt, at("input", var("i")), Expr::LitF32(0.0)),
+            ),
+            then_body: vec![
+                Stmt::Let {
+                    name: "input".into(),
+                    mutable: false,
+                    ty: Some("float".into()),
+                    init: Expr::LitF32(3.0),
+                },
+                Stmt::Assign {
+                    target: at("output", var("i")),
+                    value: var("input"),
+                },
+            ],
+            else_body: None,
+        };
+        // `while input[i] > 1.0 { output[i] = 0.0; }`
+        b.body.push(Stmt::While {
+            cond: bin(BinOp::Gt, at("input", var("i")), Expr::LitF32(1.0)),
+            body: vec![Stmt::Assign {
+                target: at("output", var("i")),
+                value: Expr::LitF32(0.0),
+            }],
+        });
+        let fused = compose("a+b", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS)
+            .unwrap()
+            .elide(&[1]);
+        assert_eq!(fused.elided, [1]);
+        let slang = fused.lower().source.canonical_slang;
+        let consumer = &slang[slang.find("void goldy_fused_1_bias").unwrap()..];
+        assert!(
+            consumer.contains("if (((i < count) && (_goldy_fwd1 > 0.0))) {"),
+            "a short-circuit operand reads the register: {consumer}"
+        );
+        assert!(
+            consumer.contains("float input = 3.0;\n        output[i] = input;"),
+            "a shadowing local is not the formal: {consumer}"
+        );
+        assert!(consumer.contains("while ((_goldy_fwd1 > 1.0))"), "{consumer}");
+        assert!(!consumer.contains("input["), "{consumer}");
+    }
+
+    #[test]
+    fn elision_keeps_parameters_it_cannot_prove() {
+        let (a, b) = (scale(), bias());
+        let fused = compose("ab", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_eq!(
+            fused.clone().elide(&[0, 1, 3]).elided,
+            [1],
+            "only forwarded parameters are elided"
+        );
+
+        let mut sized = bias();
+        // `if i >= input.len() { return; }`
+        sized.body[1] = Stmt::If {
+            cond: bin(
+                BinOp::Ge,
+                var("i"),
+                Expr::Len {
+                    base: Box::new(var("input")),
+                },
+            ),
+            then_body: vec![Stmt::Return { value: None }],
+            else_body: None,
+        };
+        let fused = compose("ab", &[stage(&a, &[0, 1, 2]), stage(&sized, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_eq!(fused.forwarded, [1], "a length query is not an element access");
+        assert!(
+            fused.elide(&[1]).elided.is_empty(),
+            "the length of an unbound parcel is unknown"
+        );
     }
 
     #[test]

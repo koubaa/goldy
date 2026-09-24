@@ -36,6 +36,7 @@ use crate::task_graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
 use crate::task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
 use crate::task_graph::{DispatchDim, GraphIR, GroupInfo, NodeAccess, NodeKind, ResourceBinding, TaskNode};
+use crate::temporary::{Temporary, TemporaryDecl, TemporaryStorage, TemporaryUse, TEMPORARY_SLOT_PLACEHOLDER};
 use crate::timeline::TimelineValue;
 #[cfg(feature = "graphics")]
 use crate::timeline::{PromiseResolver, TimelinePromise};
@@ -756,12 +757,19 @@ pub(crate) struct SchemeDesc {
     present_transactions: Vec<PresentTransactionInfo>,
     /// Generated-kernel dispatches automatic fusion may fuse, keyed by node index.
     kernel_sites: HashMap<u32, crate::fusion_plan::KernelSite>,
+    /// Temporaries declared by [`Scheme::temporary_buffer`], indexed by id.
+    temporaries: Vec<TemporaryDecl>,
+    /// Every recorded binding of a temporary. Lowering patches these positions of the
+    /// executed IR, so they stay valid after the logical ids are replaced.
+    temporary_uses: Vec<TemporaryUse>,
 }
 
 impl SchemeDesc {
     fn new() -> Self {
         Self {
             kernel_sites: HashMap::new(),
+            temporaries: Vec::new(),
+            temporary_uses: Vec::new(),
             ir: GraphIR::default(),
             interned_leases: Vec::new(),
             record_constants: Vec::new(),
@@ -804,6 +812,15 @@ impl SchemeDesc {
         self.stamp_targets.push(stamp);
     }
 
+    /// Stop tracking `resource`, whose parcel the scheme no longer binds.
+    fn forget_stamp(&mut self, resource: ResourceId) {
+        if let Some(key) = ResourceKey::from_resource_id(resource) {
+            if let Some(old) = self.resource_stamps.remove(&key) {
+                self.stamp_targets.retain(|s| !Arc::ptr_eq(s, &old));
+            }
+        }
+    }
+
     fn all_stamps_alive(&self) -> bool {
         self.resource_stamps.values().all(|s| s.is_alive()) && self.stamp_targets.iter().all(|s| s.is_alive())
     }
@@ -821,6 +838,13 @@ impl SchemeDesc {
             return Err(GoldyError::Validation(
                 "include: child scheme binds a transient parcel. \
                  hint: lease-epoch semantics across two submitters are not admitted in v1"
+                    .into(),
+            ));
+        }
+        if !self.temporary_uses.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme binds a scheme-local temporary. \
+                 hint: temporaries belong to the scheme that declared them; declare and bind them on the parent"
                     .into(),
             ));
         }
@@ -919,6 +943,8 @@ pub struct Scheme {
     submit_static: Option<IrSubmitStatic>,
     /// Counters of yielding nodes, keyed by node index.
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
+    /// Pool buffers the executed IR's temporaries are lowered onto.
+    temporary_storage: TemporaryStorage,
 }
 
 /// The IR a scheme submits: its promoted fusion plan, else what was recorded.
@@ -968,7 +994,43 @@ impl Scheme {
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             record_errors: Vec::new(),
             yield_stats: HashMap::new(),
+            temporary_storage: TemporaryStorage::default(),
         }
+    }
+
+    /// Declare a scheme-local temporary buffer of `len` elements of `T`.
+    ///
+    /// A temporary carries dataflow between this scheme's nodes within one submission
+    /// and is never observable outside it: its contents are undefined when a submission
+    /// starts, temporaries whose lifetimes do not overlap may share storage, and a fused
+    /// dispatch that is its only user may elide its storage entirely. Use a [`crate::Buffer`]
+    /// for anything read back, shared with another scheme, or kept across submissions.
+    ///
+    /// Declaring a temporary does not allocate. Storage comes from the context's
+    /// transient pool when a submission first needs it and returns there when the
+    /// scheme's structure stops needing it or the scheme drops.
+    pub fn temporary_buffer<T: bytemuck::Pod>(&mut self, len: usize) -> Result<Temporary, GoldyError> {
+        let stride = std::mem::size_of::<T>();
+        if len == 0 || stride == 0 {
+            return Err(GoldyError::Validation(format!(
+                "temporary_buffer: a temporary needs at least one element of non-zero size \
+                 (got {len} elements of {stride} bytes)"
+            )));
+        }
+        let stride = u32::try_from(stride)
+            .map_err(|_| GoldyError::Validation(format!("temporary_buffer: element stride {stride} exceeds u32")))?;
+        let id = u32::try_from(self.desc.temporaries.len())
+            .map_err(|_| GoldyError::Validation("temporary_buffer: too many temporaries".into()))?;
+        let temporary = Temporary::new(self.scheme_id, id, len as u64, stride);
+        self.desc.temporaries.push(temporary.decl());
+        Ok(temporary)
+    }
+
+    /// Number of pool buffers backing this scheme's temporaries after its last
+    /// structural submission.
+    #[doc(hidden)]
+    pub fn temporary_storage_count(&self) -> usize {
+        self.temporary_storage.backing_count()
     }
 
     /// Counters from the last submission of a yielding node (see [`crate::petition`]).
@@ -1203,7 +1265,12 @@ impl Scheme {
             return;
         }
         let device = self.ctx.runtime().clone();
-        if let Some(plan) = self.fusion.step(&device, &self.desc.ir, &self.desc.kernel_sites) {
+        if let Some(plan) = self.fusion.step(
+            &device,
+            &self.desc.ir,
+            &self.desc.kernel_sites,
+            &self.desc.temporary_uses,
+        ) {
             self.promote_fusion_plan(plan);
         }
     }
@@ -1972,6 +2039,7 @@ impl Scheme {
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
             kernel_site: None,
+            temporary_uses: Vec::new(),
         }
     }
 
@@ -2000,6 +2068,7 @@ impl Scheme {
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
             kernel_site: None,
+            temporary_uses: Vec::new(),
         }
     }
 
@@ -2381,6 +2450,9 @@ impl Scheme {
 
         self.realize_matmul_nodes()?;
         self.step_fusion();
+        if self.dirty == SchemeDirty::Structure {
+            self.lower_temporaries()?;
+        }
 
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         {
@@ -2434,6 +2506,27 @@ impl Scheme {
             deposit_resolutions: HashMap::new(),
             deposit_claims: HashMap::new(),
         })
+    }
+
+    /// Place the executed IR's temporaries on pool storage and track what it binds.
+    fn lower_temporaries(&mut self) -> Result<(), GoldyError> {
+        let (ir, uses) = match self.fusion.plan_mut() {
+            Some(plan) => (&mut plan.ir, &plan.temporary_uses),
+            None => (&mut self.desc.ir, &self.desc.temporary_uses),
+        };
+        if uses.is_empty() && self.temporary_storage.backing_count() == 0 {
+            return Ok(());
+        }
+        let lowered = self
+            .temporary_storage
+            .lower(&self.ctx, ir, uses, &self.desc.temporaries)?;
+        for resource in lowered.released {
+            self.desc.forget_stamp(resource);
+        }
+        for (resource, stamp) in lowered.bound {
+            self.desc.register_stamp_parts(resource, stamp);
+        }
+        Ok(())
     }
 
     fn realize_matmul_nodes(&mut self) -> Result<(), GoldyError> {
@@ -3457,6 +3550,7 @@ impl Drop for Scheme {
         for exec in std::mem::take(&mut self.desc.cpu_dispatches) {
             exec.release(&ctx);
         }
+        self.temporary_storage.release_all(&ctx);
         // Interned lease Arcs drop here (after wait_until). Pool return is in
         // `LeaseInner::drop` when the last clone — including the caller's `Lease` — is gone.
         let _interned = std::mem::take(&mut self.desc.interned_leases);
@@ -3698,6 +3792,8 @@ pub struct SchemeNodeBuilder<'a> {
     yield_points: Vec<(String, crate::petition::YieldPoint)>,
     /// Kernel and arguments of a generated-kernel record, for automatic fusion.
     kernel_site: Option<crate::fusion_plan::SiteDraft>,
+    /// Temporaries bound so far; their `node` is filled in when the node is pushed.
+    temporary_uses: Vec<TemporaryUse>,
 }
 
 /// The parts of a [`crate::ComputePipeline`] a scheme node copies at record time.
@@ -3766,6 +3862,45 @@ impl<'a> SchemeNodeBuilder<'a> {
         self.resource_slots.push(slot);
         if self.yielding.is_some() {
             self.yield_parcels.push(bindable.buffer_parcel().map(|p| (p, access)));
+        }
+        self
+    }
+
+    /// Declare that this node accesses a temporary of this scheme, as the next shader
+    /// resource slot (see [`Scheme::temporary_buffer`]).
+    pub fn with_temporary(mut self, temporary: &Temporary, access: NodeAccess) -> Self {
+        let slot_idx = self.resource_slots.len();
+        if temporary.scheme_id != self.scheme.scheme_id {
+            self.scheme.record_errors.push(format!(
+                "with_temporary on `{}`: the temporary belongs to another scheme. \
+                 hint: temporaries are scheme-local; declare one on this scheme or bind a Buffer",
+                self.label
+            ));
+            self.kernel_site = None;
+            self.resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);
+            return self;
+        }
+        let descriptor = self
+            .slot_access
+            .get(slot_idx)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| node_access_to_resource_access(access));
+        let resource = temporary.resource_id();
+        if let Some(site) = self.kernel_site.as_mut() {
+            site.resource(Some(resource), slot_idx, descriptor);
+        }
+        self.temporary_uses.push(TemporaryUse {
+            node: u32::MAX,
+            binding: self.bindings.len() as u32,
+            slot: slot_idx as u32,
+            descriptor,
+            temporary: temporary.id,
+        });
+        self.bindings.push(ResourceBinding { resource, access });
+        self.resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);
+        if self.yielding.is_some() {
+            self.yield_parcels.push(None);
         }
         self
     }
@@ -3897,6 +4032,12 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// The node keeps the user's bindings for graph ordering but stages nothing: the
     /// driver re-binds the same parcels in the sub-schemes it submits.
     fn push_yield_driver(self, dispatch: (u32, u32, u32)) -> NodeId {
+        if !self.temporary_uses.is_empty() {
+            self.scheme.record_errors.push(format!(
+                "`{}`: yielding scripts cannot bind scheme-local temporaries. hint: bind a Buffer",
+                self.label
+            ));
+        }
         let pipelines = self.yielding.expect("push_yield_driver on a yielding builder");
         let label = self.label;
         let record = crate::petition::YieldRecord {
@@ -3968,6 +4109,7 @@ impl<'a> SchemeNodeBuilder<'a> {
         let resource = parcel.resource_id();
         self.scheme.desc.register_stamp_parts(resource, parcel.stamp_handle());
         self.register_specialization_site();
+        self.commit_temporary_uses();
         let mut bindings = self.bindings;
         bindings.push(ResourceBinding {
             resource,
@@ -4004,6 +4146,15 @@ impl<'a> SchemeNodeBuilder<'a> {
         }
     }
 
+    /// Hand the temporaries this node binds to the scheme, as uses of the node about to be pushed.
+    fn commit_temporary_uses(&mut self) {
+        let node = self.scheme.desc.ir.nodes.len() as u32;
+        self.scheme
+            .desc
+            .temporary_uses
+            .extend(self.temporary_uses.drain(..).map(|u| TemporaryUse { node, ..u }));
+    }
+
     fn push_dispatch_node(mut self, dispatch: DispatchDim) -> NodeId {
         #[cfg(feature = "graphics")]
         {
@@ -4037,6 +4188,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 }
             }
         }
+        self.commit_temporary_uses();
         self.scheme.desc.ir.nodes.push(TaskNode {
             group: None,
             label: self.label,
@@ -9521,5 +9673,287 @@ mod fusion_plan_tests {
         assert_eq!(fused.label.as_str(), "child/scale+child/bias");
         assert_eq!(parent.desc.ir.groups[0].node_range, 0..2);
         assert_eq!(parent.fusion.plan().unwrap().ir.groups[0].node_range, 0..1);
+    }
+
+    /// Resource each binding of executed node `exec` names.
+    fn bound(scheme: &Scheme, exec: usize) -> Vec<ResourceId> {
+        executed(scheme, exec).bindings.iter().map(|b| b.resource).collect()
+    }
+
+    fn is_pool_buffer(resource: ResourceId) -> bool {
+        matches!(resource, ResourceId::Buffer(_))
+    }
+
+    #[test]
+    fn a_region_local_temporary_is_elided() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 2);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let t = scheme.temporary_buffer::<f32>(64).unwrap();
+        k.scale
+            .invoke(&p[0], &t, 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "scale")
+            .unwrap();
+        k.bias
+            .invoke(&t, &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "bias")
+            .unwrap();
+
+        frame(&mut scheme);
+        assert_eq!(
+            scheme.temporary_storage_count(),
+            1,
+            "unfused, the temporary needs storage"
+        );
+        let backing = bound(&scheme, 0)[1];
+        assert!(is_pool_buffer(backing));
+        assert_eq!(bound(&scheme, 1)[0], backing);
+        let NodeKind::Dispatch { resource_slots, .. } = &executed(&scheme, 0).kind else {
+            unreachable!()
+        };
+        assert!(!resource_slots.contains(&TEMPORARY_SLOT_PLACEHOLDER));
+
+        frames(&mut scheme, 2);
+        assert_eq!(scheme.executed_node_count(), 1);
+        let region = &scheme.fusion_report().regions[0];
+        assert_eq!((region.forwarded, region.elided), (1, 1));
+        assert_eq!(
+            bound(&scheme, 0),
+            [p[0].whole().resource_id(), p[1].whole().resource_id()]
+        );
+        assert_eq!(
+            scheme.temporary_storage_count(),
+            0,
+            "elided storage goes back to the pool"
+        );
+        assert!(!scheme
+            .desc
+            .resource_stamps()
+            .contains_key(&ResourceKey::from_resource_id(backing).unwrap()));
+        frames(&mut scheme, 2);
+    }
+
+    #[test]
+    fn a_temporary_bound_outside_the_region_keeps_its_storage() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let t = scheme.temporary_buffer::<f32>(64).unwrap();
+        k.scale
+            .invoke(&p[0], &t, 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "scale")
+            .unwrap();
+        k.bias
+            .invoke(&t, &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "bias")
+            .unwrap();
+        // Reads a neighbour's element, so it cannot join the region.
+        k.shift
+            .invoke(&t, &p[2], 64)
+            .over_1d(64)
+            .record(&mut scheme, "shift")
+            .unwrap();
+
+        frames(&mut scheme, 3);
+        assert_eq!(scheme.executed_node_count(), 2);
+        let region = &scheme.fusion_report().regions[0];
+        assert_eq!((region.forwarded, region.elided), (1, 0));
+        assert_eq!(scheme.temporary_storage_count(), 1);
+        let fused = bound(&scheme, 0);
+        assert_eq!(fused.len(), 3);
+        assert!(is_pool_buffer(fused[1]));
+        assert_eq!(
+            bound(&scheme, 1)[0],
+            fused[1],
+            "shift reads what the fused dispatch stored"
+        );
+    }
+
+    #[test]
+    fn temporaries_with_disjoint_lifetimes_share_storage() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 2);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(false);
+        let t: Vec<Temporary> = (0..3).map(|_| scheme.temporary_buffer::<f32>(64).unwrap()).collect();
+        let wide = scheme.temporary_buffer::<f32>(128).unwrap();
+        k.scale
+            .invoke(&p[0], &t[0], 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "a")
+            .unwrap();
+        k.bias
+            .invoke(&t[0], &t[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "b")
+            .unwrap();
+        k.scale
+            .invoke(&t[1], &t[2], 64, 3.0)
+            .over_1d(64)
+            .record(&mut scheme, "c")
+            .unwrap();
+        k.bias
+            .invoke(&t[2], &wide, 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "d")
+            .unwrap();
+        k.scale
+            .invoke(&wide, &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "e")
+            .unwrap();
+
+        frame(&mut scheme);
+        let (t0, t1, t2, w) = (
+            bound(&scheme, 0)[1],
+            bound(&scheme, 1)[1],
+            bound(&scheme, 2)[1],
+            bound(&scheme, 3)[1],
+        );
+        assert_eq!(t0, t2, "t0 is dead before t2 is born");
+        assert_ne!(t0, t1);
+        assert!(w != t0 && w != t1, "a different size never shares");
+        assert_eq!(scheme.temporary_storage_count(), 3);
+    }
+
+    #[test]
+    fn temporaries_of_parallel_work_do_not_share() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 4);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(false);
+        let t = [
+            scheme.temporary_buffer::<f32>(64).unwrap(),
+            scheme.temporary_buffer::<f32>(64).unwrap(),
+        ];
+        k.scale
+            .invoke(&p[0], &t[0], 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "a0")
+            .unwrap();
+        k.bias
+            .invoke(&t[0], &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "b0")
+            .unwrap();
+        k.scale
+            .invoke(&p[2], &t[1], 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "a1")
+            .unwrap();
+        k.bias
+            .invoke(&t[1], &p[3], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "b1")
+            .unwrap();
+
+        frame(&mut scheme);
+        assert_ne!(
+            bound(&scheme, 0)[1],
+            bound(&scheme, 2)[1],
+            "sharing would serialize the chains"
+        );
+        assert_eq!(scheme.temporary_storage_count(), 2);
+    }
+
+    #[test]
+    fn temporaries_stay_on_their_scheme() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 2);
+        let ctx = device.create_context().unwrap();
+        assert!(Scheme::new(&ctx).temporary_buffer::<f32>(0).is_err());
+
+        let mut owner = Scheme::new(&ctx);
+        let t = owner.temporary_buffer::<f32>(64).unwrap();
+        let mut other = Scheme::new(&ctx);
+        k.scale
+            .invoke(&p[0], &t, 64, 2.0)
+            .over_1d(64)
+            .record(&mut other, "scale")
+            .unwrap();
+        assert!(matches!(other.submit(), Err(GoldyError::Validation(m)) if m.contains("another scheme")));
+
+        k.scale
+            .invoke(&p[0], &t, 64, 2.0)
+            .over_1d(64)
+            .record(&mut owner, "scale")
+            .unwrap();
+        k.bias
+            .invoke(&t, &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut owner, "bias")
+            .unwrap();
+        let mut parent = Scheme::new(&ctx);
+        assert!(matches!(parent.include("child", &owner), Err(GoldyError::Validation(m)) if m.contains("temporary")));
+    }
+
+    #[test]
+    fn storage_follows_the_structure_and_returns_on_drop() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(false);
+        let t = [
+            scheme.temporary_buffer::<f32>(64).unwrap(),
+            scheme.temporary_buffer::<f32>(64).unwrap(),
+        ];
+        k.scale
+            .invoke(&p[0], &t[0], 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "a")
+            .unwrap();
+        k.bias
+            .invoke(&t[0], &p[1], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "b")
+            .unwrap();
+        frames(&mut scheme, 2);
+        let first = bound(&scheme, 0)[1];
+        assert_eq!(scheme.replay_stats().records, 1, "a clean resubmit does not re-lower");
+
+        // A second chain in the same wave as the first needs a second buffer; the first keeps its own.
+        k.scale
+            .invoke(&p[0], &t[1], 64, 2.0)
+            .over_1d(64)
+            .record(&mut scheme, "c")
+            .unwrap();
+        k.bias
+            .invoke(&t[1], &p[2], 64, 1.0)
+            .over_1d(64)
+            .record(&mut scheme, "d")
+            .unwrap();
+        frame(&mut scheme);
+        assert_eq!(bound(&scheme, 0)[1], first, "lowering keeps a temporary on its buffer");
+        assert_eq!(scheme.temporary_storage_count(), 2);
+        assert_eq!(bound(&scheme, 2)[1], bound(&scheme, 3)[0]);
+
+        let held = ctx.transient_outstanding_bytes().buffer;
+        drop(scheme);
+        assert_eq!(
+            held - ctx.transient_outstanding_bytes().buffer,
+            2 * 256,
+            "drop returns storage to the pool"
+        );
     }
 }

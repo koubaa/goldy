@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fusion_fallbacks` and `fusion_compile_failures`. `test_support` gains `FusionCompileFault`
   and `wait_for_fusion_compiles`.
 
+- **Scheme-local temporaries** — `Scheme::temporary_buffer::<T>(len)` declares a `Temporary`,
+  a buffer whose contents exist only within one submission of that scheme. It binds like a
+  buffer (`SchemeNodeBuilder::with_temporary`, or a buffer argument of a generated kernel's
+  `record` / `invoke`). At structural submits the scheme places temporaries on buffers from
+  the context transient pool, and temporaries with the same shape and non-overlapping
+  lifetimes share one buffer. When automatic fusion forwards a temporary that only one fused
+  region binds, the temporary lives in registers and gets no storage
+  (`FusedDefinition::elided`, `FusionRegion::elided`). `FUSION_ABI_VERSION` is 3.
+
 ### Removed
 
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.

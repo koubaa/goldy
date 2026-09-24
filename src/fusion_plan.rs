@@ -14,13 +14,20 @@
 //! compile it needs has finished, leaving regions whose compile failed unfused. Any
 //! structural change drops the plan; compiled fused pipelines stay cached by
 //! [`KernelId`], so the same regions re-promote without compiling again.
+//!
+//! A region whose fused dispatch forwards a scheme-local temporary ([`crate::Temporary`])
+//! that no node outside the region binds elides it: the temporary lives only in
+//! registers and the fused dispatch does not bind it.
 
 use crate::backend::ComputePipelineHandle;
 use crate::kernel::{access_kind_to_node, admit, prepare_fused, ArgShape, PreparedKernel, StageView};
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
 use crate::shader::ShaderProvenance;
-use crate::task_graph::{DispatchDim, GraphIR, GroupInfo, NodeKind, ResourceBinding, ResourceId, TaskNode};
+use crate::task_graph::{
+    DispatchDim, GraphIR, GroupInfo, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId,
+};
+use crate::temporary::{TemporaryUse, TEMPORARY_SLOT_PLACEHOLDER};
 use crate::types::ResourceAccess;
 use crate::SchemeLabel;
 use goldy_shader_ir::{FusedDefinition, FusionRejection, KernelDef, KernelId};
@@ -67,7 +74,10 @@ impl SiteDraft {
         let resource = resource.filter(|r| {
             matches!(
                 r,
-                ResourceId::Buffer(_) | ResourceId::BufferRange { .. } | ResourceId::Texture(_)
+                ResourceId::Buffer(_)
+                    | ResourceId::BufferRange { .. }
+                    | ResourceId::Texture(_)
+                    | ResourceId::TransientBuffer(_)
             )
         });
         self.args.push(SiteArg::Resource {
@@ -150,6 +160,9 @@ pub struct FusionRegion {
     pub kernel: KernelId,
     /// Parcels whose values the fused dispatch forwards between constituents in registers.
     pub forwarded: usize,
+    /// Forwarded scheme-local temporaries that exist only in registers: the fused
+    /// dispatch never stores them and binds no storage for them.
+    pub elided: usize,
     pub status: FusionRegionStatus,
 }
 
@@ -189,6 +202,8 @@ pub(crate) struct Plan {
     /// Recorded node of every executed node that is not fused.
     recorded_of: Vec<Option<u32>>,
     pub(crate) fused: Vec<FusedNode>,
+    /// Every binding of a temporary in `ir`.
+    pub(crate) temporary_uses: Vec<TemporaryUse>,
 }
 
 /// One executed dispatch standing for a run of recorded ones.
@@ -334,9 +349,17 @@ impl FusionPlanner {
     }
 
     /// Advance planning at the top of a submit. Returns a plan for the scheme to promote.
-    pub(crate) fn step(&mut self, device: &Runtime, ir: &GraphIR, sites: &HashMap<u32, KernelSite>) -> Option<Plan> {
+    ///
+    /// `temporaries` lists every recorded binding of a scheme-local temporary.
+    pub(crate) fn step(
+        &mut self,
+        device: &Runtime,
+        ir: &GraphIR,
+        sites: &HashMap<u32, KernelSite>,
+        temporaries: &[TemporaryUse],
+    ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
-            self.match_regions(ir, sites);
+            self.match_regions(ir, sites, temporaries);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;
                 return None;
@@ -360,13 +383,15 @@ impl FusionPlanner {
 
         let mut fused = Vec::new();
         for (region, outcome) in self.regions.iter_mut().zip(outcomes) {
-            let built = outcome.and_then(|kernel| {
-                fused_node(ir, sites, region, &kernel).map(|(node, scalar_slots)| (node, scalar_slots, kernel))
-            });
+            let built = outcome.and_then(|kernel| fused_node(ir, sites, region, &kernel).map(|node| (node, kernel)));
             match built {
-                Ok((node, scalar_slots, kernel)) => {
+                Ok((node, kernel)) => {
                     region.status = FusionRegionStatus::Promoted;
-                    fused.push((region.nodes.clone(), node, scalar_slots, kernel));
+                    fused.push(Built {
+                        nodes: region.nodes.clone(),
+                        node,
+                        kernel,
+                    });
                 }
                 Err(err) => {
                     if self.failures_seen.insert(region.id) {
@@ -387,11 +412,11 @@ impl FusionPlanner {
         }
         self.events.promotions += 1;
         tracing::debug!(regions = fused.len(), "kernel fusion: plan promoted");
-        Some(assemble(ir, fused))
+        Some(assemble(ir, fused, temporaries))
     }
 
     /// Greedily grow maximal admissible runs of adjacent kernel sites in one group.
-    fn match_regions(&mut self, ir: &GraphIR, sites: &HashMap<u32, KernelSite>) {
+    fn match_regions(&mut self, ir: &GraphIR, sites: &HashMap<u32, KernelSite>, temporaries: &[TemporaryUse]) {
         self.regions.clear();
         self.rejected.clear();
         let view = |i: usize| -> Option<StageView<'_>> {
@@ -441,6 +466,7 @@ impl FusionPlanner {
             }
             match best {
                 Some(definition) => {
+                    let definition = elide_local_temporaries(definition, start..end, sites, temporaries);
                     self.regions.push(Region {
                         nodes: start..end,
                         id: definition.id(),
@@ -468,6 +494,7 @@ impl FusionPlanner {
                 id = %region.id,
                 stages = region.definition.stages.len(),
                 forwarded = region.definition.forwarded.len(),
+                elided = region.definition.elided.len(),
                 "kernel fusion: compiling"
             );
             let device = device.clone();
@@ -509,6 +536,7 @@ impl FusionPlanner {
                     labels: labels(&r.nodes),
                     kernel: r.id,
                     forwarded: r.definition.forwarded.len(),
+                    elided: r.definition.elided.len(),
                     status: r.status.clone(),
                 })
                 .collect(),
@@ -525,13 +553,64 @@ impl FusionPlanner {
     }
 }
 
-/// The executed node of `region` and, per constituent, the fused slot of each user slot.
+/// The recorded parcel fused parameter `j` of the region starting at recorded node `start` binds.
+fn param_resource(
+    definition: &FusedDefinition,
+    start: usize,
+    sites: &HashMap<u32, KernelSite>,
+    j: usize,
+) -> Option<ResourceId> {
+    definition.stages.iter().enumerate().find_map(|(k, s)| {
+        let i = s.args.iter().position(|&a| a == j)?;
+        match sites.get(&((start + k) as u32))?.args.get(i)? {
+            SiteArg::Resource { resource, .. } => *resource,
+            SiteArg::Scalar { .. } => None,
+        }
+    })
+}
+
+/// Elide every forwarded temporary that no recorded node outside `nodes` binds.
+fn elide_local_temporaries(
+    definition: FusedDefinition,
+    nodes: Range<usize>,
+    sites: &HashMap<u32, KernelSite>,
+    temporaries: &[TemporaryUse],
+) -> FusedDefinition {
+    let local: Vec<usize> = definition
+        .forwarded
+        .iter()
+        .copied()
+        .filter(|&j| match param_resource(&definition, nodes.start, sites, j) {
+            Some(ResourceId::TransientBuffer(TransientId(t))) => temporaries
+                .iter()
+                .filter(|u| u.temporary == t)
+                .all(|u| nodes.contains(&(u.node as usize))),
+            _ => false,
+        })
+        .collect();
+    if local.is_empty() {
+        definition
+    } else {
+        definition.elide(&local)
+    }
+}
+
+/// An executed fused dispatch before it has a position in the plan.
+struct DraftNode {
+    node: TaskNode,
+    /// Per constituent: the fused user slot each of its user slots binds.
+    scalar_slots: Vec<Vec<usize>>,
+    /// Temporaries `node` binds; assembly fills in the node index.
+    temporaries: Vec<TemporaryUse>,
+}
+
+/// The executed node of `region`.
 fn fused_node(
     ir: &GraphIR,
     sites: &HashMap<u32, KernelSite>,
     region: &Region,
     kernel: &PreparedKernel,
-) -> Result<(TaskNode, Vec<Vec<usize>>), String> {
+) -> Result<DraftNode, String> {
     let definition = &region.definition;
     let pipeline = kernel.pipeline();
     let mut constituents = Vec::with_capacity(region.nodes.len());
@@ -552,8 +631,12 @@ fn fused_node(
     let mut bindings = Vec::new();
     let mut resource_slots = Vec::new();
     let mut user_slots = Vec::new();
+    let mut temporaries = Vec::new();
     let mut scalar_slots: Vec<Vec<usize>> = constituents.iter().map(|c| vec![0; c.2.len()]).collect();
     for (j, param) in definition.params.iter().enumerate() {
+        if definition.elided.contains(&j) {
+            continue;
+        }
         let mut uses = definition.stages.iter().enumerate().flat_map(|(k, s)| {
             s.args
                 .iter()
@@ -569,12 +652,23 @@ fn fused_node(
                     resource: Some(resource),
                     slot,
                     descriptor,
-                } if want.is_none_or(|w| is_uav(w) == is_uav(descriptor)) => Some((k, resource, slot)),
+                } if want.is_none_or(|w| is_uav(w) == is_uav(descriptor)) => Some((k, resource, slot, descriptor)),
                 _ => None,
             });
-            let (k, resource, slot) =
+            let (k, resource, slot, descriptor) =
                 chosen.ok_or_else(|| format!("no recorded view of `{}` matches the fused signature", param.name))?;
-            resource_slots.push(constituents[k].1[slot]);
+            if let ResourceId::TransientBuffer(TransientId(temporary)) = resource {
+                temporaries.push(TemporaryUse {
+                    node: u32::MAX,
+                    binding: bindings.len() as u32,
+                    slot: resource_slots.len() as u32,
+                    descriptor: want.unwrap_or(descriptor),
+                    temporary,
+                });
+                resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);
+            } else {
+                resource_slots.push(constituents[k].1[slot]);
+            }
             let access = param
                 .access
                 .ok_or_else(|| format!("resource `{}` declares no access", param.name))?;
@@ -612,24 +706,36 @@ fn fused_node(
             dispatch: constituents[0].3.clone(),
         },
     };
-    Ok((node, scalar_slots))
+    Ok(DraftNode {
+        node,
+        scalar_slots,
+        temporaries,
+    })
 }
 
 fn is_uav(access: ResourceAccess) -> bool {
     access != ResourceAccess::Read
 }
 
-type Built = (Range<usize>, TaskNode, Vec<Vec<usize>>, Arc<PreparedKernel>);
+/// A promoted region: its recorded run, executed node and pipeline.
+struct Built {
+    nodes: Range<usize>,
+    node: DraftNode,
+    kernel: Arc<PreparedKernel>,
+}
 
 /// The execution plan running each of `fused` in place of its recorded run.
-fn assemble(ir: &GraphIR, mut fused: Vec<Built>) -> Plan {
-    fused.sort_by_key(|f| f.0.start);
+///
+/// `temporaries` lists the recorded IR's temporary bindings.
+fn assemble(ir: &GraphIR, mut fused: Vec<Built>, temporaries: &[TemporaryUse]) -> Plan {
+    fused.sort_by_key(|f| f.nodes.start);
     let n = ir.nodes.len();
     let mut plan = Plan {
         ir: GraphIR::default(),
         exec_of: vec![0; n],
         recorded_of: Vec::with_capacity(n),
         fused: Vec::with_capacity(fused.len()),
+        temporary_uses: Vec::new(),
     };
     // Executed nodes created before each recorded node (and before the end).
     let mut before = vec![0usize; n + 1];
@@ -637,19 +743,24 @@ fn assemble(ir: &GraphIR, mut fused: Vec<Built>) -> Plan {
     let mut r = 0;
     while r < n {
         let exec = plan.ir.nodes.len();
-        if fused.peek().is_some_and(|f| f.0.start == r) {
-            let (nodes, node, scalar_slots, kernel) = fused.next().expect("peeked");
+        if fused.peek().is_some_and(|f| f.nodes.start == r) {
+            let Built { nodes, node, kernel } = fused.next().expect("peeked");
             for c in nodes.clone() {
                 plan.exec_of[c] = exec as u32;
                 before[c] = if c == r { exec } else { exec + 1 };
             }
-            plan.ir.nodes.push(node);
+            plan.ir.nodes.push(node.node);
             plan.recorded_of.push(None);
+            plan.temporary_uses.extend(
+                node.temporaries
+                    .into_iter()
+                    .map(|u| TemporaryUse { node: exec as u32, ..u }),
+            );
             r = nodes.end;
             plan.fused.push(FusedNode {
                 exec: exec as u32,
                 nodes,
-                scalar_slots,
+                scalar_slots: node.scalar_slots,
                 kernel,
             });
         } else {
@@ -660,6 +771,13 @@ fn assemble(ir: &GraphIR, mut fused: Vec<Built>) -> Plan {
             r += 1;
         }
     }
+    let unfused = temporaries
+        .iter()
+        .filter(|u| plan.recorded_of[plan.exec_of[u.node as usize] as usize].is_some());
+    plan.temporary_uses.extend(unfused.map(|u| TemporaryUse {
+        node: plan.exec_of[u.node as usize],
+        ..*u
+    }));
     before[n] = plan.ir.nodes.len();
     plan.ir.groups = ir
         .groups

@@ -10,6 +10,9 @@
 //!
 //! Only parameters whose every access in every stage names the thread's own index are
 //! forwarded; admission establishes that before a parameter is listed.
+//!
+//! An elided parameter has no parcel to fall back on, so [`elide_body`] routes every
+//! access through its register, including the positions forwarding leaves on memory.
 
 use crate::{BinOp, Expr, Stmt, UnaryOp};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +31,19 @@ pub(crate) fn forward_body(body: &[Stmt], locals: &HashMap<String, ForwardedLoca
         shadowed: vec![HashSet::new()],
     };
     rewriter.block(body)
+}
+
+/// Rewrite `body` so every element access to a formal in `locals` reads or writes the
+/// named local instead.
+///
+/// Every access to such a formal must name the thread's own element, and the formal
+/// must not be used as a whole resource; afterwards the body no longer mentions it.
+pub(crate) fn elide_body(body: &[Stmt], locals: &HashMap<String, String>) -> Vec<Stmt> {
+    let mut eliminator = Eliminator {
+        locals,
+        shadowed: vec![HashSet::new()],
+    };
+    eliminator.block(body)
 }
 
 /// Zero literal of a forwardable element type, or `None` when the type is not forwardable.
@@ -352,6 +368,179 @@ impl<'a> Rewriter<'a> {
                 field: field.clone(),
             },
             other => other.clone(),
+        }
+    }
+}
+
+struct Eliminator<'a> {
+    locals: &'a HashMap<String, String>,
+    /// Names bound by `let`, `for` or workgroup arrays, per scope; they hide formals.
+    shadowed: Vec<HashSet<String>>,
+}
+
+impl Eliminator<'_> {
+    fn local(&self, base: &Expr) -> Option<&str> {
+        let Expr::Var(name) = base else {
+            return None;
+        };
+        if self.shadowed.iter().any(|s| s.contains(name)) {
+            return None;
+        }
+        self.locals.get(name).map(String::as_str)
+    }
+
+    fn bind(&mut self, name: &str) {
+        self.shadowed
+            .last_mut()
+            .expect("eliminator always has a scope")
+            .insert(name.to_string());
+    }
+
+    fn block(&mut self, stmts: &[Stmt]) -> Vec<Stmt> {
+        self.shadowed.push(HashSet::new());
+        let out = stmts.iter().map(|s| self.stmt(s)).collect();
+        self.shadowed.pop();
+        out
+    }
+
+    fn stmt(&mut self, stmt: &Stmt) -> Stmt {
+        match stmt {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                init,
+            } => {
+                let init = self.expr(init);
+                self.bind(name);
+                Stmt::Let {
+                    name: name.clone(),
+                    mutable: *mutable,
+                    ty: ty.clone(),
+                    init,
+                }
+            }
+            Stmt::Assign { target, value } => Stmt::Assign {
+                value: self.expr(value),
+                target: self.target(target),
+            },
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => Stmt::If {
+                cond: self.expr(cond),
+                then_body: self.block(then_body),
+                else_body: else_body.as_ref().map(|b| self.block(b)),
+            },
+            Stmt::While { cond, body } => Stmt::While {
+                cond: self.expr(cond),
+                body: self.block(body),
+            },
+            Stmt::ForRange { var, start, end, body } => {
+                let (start, end) = (self.expr(start), self.expr(end));
+                self.shadowed.push(HashSet::from([var.clone()]));
+                let body = self.block(body);
+                self.shadowed.pop();
+                Stmt::ForRange {
+                    var: var.clone(),
+                    start,
+                    end,
+                    body,
+                }
+            }
+            Stmt::Return { value } => Stmt::Return {
+                value: value.as_ref().map(|v| self.expr(v)),
+            },
+            Stmt::WorkgroupArray { name, .. } => {
+                self.bind(name);
+                stmt.clone()
+            }
+            Stmt::WorkgroupReduce {
+                op,
+                n,
+                val,
+                scratch,
+                dest,
+            } => Stmt::WorkgroupReduce {
+                op: *op,
+                n: *n,
+                val: self.expr(val),
+                scratch: scratch.clone(),
+                dest: self.target(dest),
+            },
+            Stmt::WorkgroupSoftmax {
+                n,
+                buf,
+                base,
+                count,
+                scratch,
+            } => Stmt::WorkgroupSoftmax {
+                n: *n,
+                buf: buf.clone(),
+                base: self.expr(base),
+                count: self.expr(count),
+                scratch: scratch.clone(),
+            },
+            Stmt::Expr(e) => Stmt::Expr(self.expr(e)),
+        }
+    }
+
+    fn target(&self, target: &Expr) -> Expr {
+        match target {
+            Expr::Index { base, index } => match self.local(base) {
+                Some(local) => Expr::Var(local.to_string()),
+                None => Expr::Index {
+                    base: Box::new(self.target(base)),
+                    index: Box::new(self.expr(index)),
+                },
+            },
+            Expr::Field { base, field } => Expr::Field {
+                base: Box::new(self.target(base)),
+                field: field.clone(),
+            },
+            other => self.expr(other),
+        }
+    }
+
+    fn expr(&self, expr: &Expr) -> Expr {
+        let boxed = |e: &Expr| Box::new(self.expr(e));
+        match expr {
+            Expr::Index { base, index } => match self.local(base) {
+                Some(local) => Expr::Var(local.to_string()),
+                None => Expr::Index {
+                    base: boxed(base),
+                    index: boxed(index),
+                },
+            },
+            Expr::Binary { op, left, right } => Expr::Binary {
+                op: *op,
+                left: boxed(left),
+                right: boxed(right),
+            },
+            Expr::Field { base, field } => Expr::Field {
+                base: boxed(base),
+                field: field.clone(),
+            },
+            Expr::Len { base } => Expr::Len { base: boxed(base) },
+            Expr::Rank { base } => Expr::Rank { base: boxed(base) },
+            Expr::Dim { base, axis } => Expr::Dim {
+                base: boxed(base),
+                axis: boxed(axis),
+            },
+            Expr::Unary { op, expr } => Expr::Unary {
+                op: *op,
+                expr: boxed(expr),
+            },
+            Expr::Cast { expr, ty } => Expr::Cast {
+                expr: boxed(expr),
+                ty: ty.clone(),
+            },
+            Expr::Call { func, args } => Expr::Call {
+                func: *func,
+                args: args.iter().map(|a| self.expr(a)).collect(),
+            },
+            Expr::LitU32(_) | Expr::LitI32(_) | Expr::LitF32(_) | Expr::LitBool(_) | Expr::Var(_) => expr.clone(),
         }
     }
 }
