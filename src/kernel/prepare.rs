@@ -31,7 +31,7 @@ impl TensorShapeEnv {
 /// Runtime-scoped prepared kernel: compiled pipeline + ABI metadata.
 pub struct PreparedKernel {
     pipeline: Arc<ComputePipeline>,
-    def: KernelDef,
+    def: Arc<KernelDef>,
 }
 
 impl PreparedKernel {
@@ -61,8 +61,12 @@ impl PreparedKernel {
         scheme: &'a mut Scheme,
         label: impl Into<crate::SchemeLabel>,
     ) -> SchemeNodeStart<'a> {
+        let mut builder = scheme.node(label, self.pipeline.as_ref());
+        if crate::fusion_plan::fusable_kernel(&self.def) {
+            builder.begin_kernel_site(Arc::clone(&self.def));
+        }
         SchemeNodeStart {
-            builder: scheme.node(label, self.pipeline.as_ref()),
+            builder,
             workgroup_size: self.def.workgroup_size,
             def: &self.def,
             resource_i: 0,
@@ -202,7 +206,7 @@ impl<'a> SchemeNodeStart<'a> {
     }
 }
 
-pub(super) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
+pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
     match access {
         goldy_shader_ir::AccessKind::Read => NodeAccess::Read,
         goldy_shader_ir::AccessKind::Write => NodeAccess::Write,
@@ -253,7 +257,7 @@ pub(super) fn prepare_kernel_as(
 
     Ok(PreparedKernel {
         pipeline: Arc::new(pipeline),
-        def,
+        def: Arc::new(def),
     })
 }
 

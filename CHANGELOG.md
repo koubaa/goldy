@@ -37,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Explicit kernel fusion** — generated kernels gain `invoke(args..)`, which returns an
   `Invocation` (a dispatch as a value) once a grid is given. `FusedKernel::prepare` composes a
   sequence of invocations into one compute pipeline, and `FusedKernel::record` records it
-  as one dispatch node. Every intermediate parcel is still stored and reloaded, and fused
-  results match the unfused sequence byte for byte. Composition is conservative: stages
+  as one dispatch node. Every intermediate parcel is still stored, and fused results match
+  the unfused sequence byte for byte. Composition is conservative: stages
   must share workgroup size and grid, and a parcel shared between stages with a write must
   be accessed at the thread's own index. Otherwise `FusionError::Rejected` names the reason
   (`FusionRejection`). Tensor-bound kernels are not yet fusable. `goldy::kernel::ir::compose`
@@ -52,6 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FusedKernel::scalar_slot(stage, formal)` and `FusedDefinition::scalar_origins` map fused
   scalar slots to constituent scalars, and specialization trace events name baked slots that
   way (`1:damp.enabled=0x1`). `RecordedDispatch::node` returns the recorded `NodeId`.
+
+- **Value forwarding** — a fused dispatch keeps a parcel element that crosses stages at the
+  thread's own index in a register. A consumer reads the producer's value instead of
+  reloading it, and every store still reaches the parcel. This applies to scalar buffer
+  elements and is on for every fused definition (`FusedDefinition::forwarded`).
+  `FusedKernel::prepare_conservative` and `FusedDefinition::conservative` keep every load.
+
+- **Automatic fusion of retained schemes** (off by default; `Scheme::set_automatic_fusion(true)`
+  turns it on for one scheme, `GOLDY_FUSION=1` for every scheme that does not call it) — a retained
+  scheme fuses each maximal run of adjacent generated-kernel dispatches that `FusedKernel`
+  admission accepts. It derives an execution plan once its structure has survived a submit,
+  and compiles the fused pipelines on worker threads while the recorded dispatches keep
+  running. It then switches to the plan in one structural re-record. The recorded graph is
+  never rewritten: recording, `include`, or re-pipelining or re-gridding a constituent
+  returns to it. The regions then re-promote from the scheme's fused-pipeline cache, and a
+  failed compile leaves its region unfused. `set_node_param` on a constituent reaches the
+  fused dispatch. `Scheme::fusion_report` lists the regions (with their status) and the
+  rejected runs (with their `FusionRejection`). `ReplayStats` counts `fusion_promotions`,
+  `fusion_fallbacks` and `fusion_compile_failures`. `test_support` gains `FusionCompileFault`
+  and `wait_for_fusion_compiles`.
 
 ### Removed
 
@@ -81,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `KernelDef` gains a `definition` field and no longer implements `Eq`
   (`PartialEq` remains). Hand-authored and parsed Slang set it to `None`.
+
+- **Breaking:** `ReplayStats` gains `fusion_promotions`, `fusion_fallbacks` and
+  `fusion_compile_failures`, so struct literals need the new fields or `..Default::default()`.
+  `FusedDefinition` gains `forwarded`. `FUSION_ABI_VERSION` is now 2 because forwarding is
+  part of the fused identity.
 
 ### Fixed
 

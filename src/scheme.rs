@@ -666,6 +666,13 @@ pub struct ReplayStats {
     /// Promoted sites switched back to the caller's pipeline because a baked param changed
     /// (or specialization was turned off).
     pub specialization_demotions: u64,
+    /// Automatic fusion plans promoted (each is one structural re-record).
+    pub fusion_promotions: u64,
+    /// Promoted fusion plans dropped because the recorded structure changed (or automatic
+    /// fusion was turned off); the scheme ran the recorded IR on its next submit.
+    pub fusion_fallbacks: u64,
+    /// Fused programs that failed to compile or bind; their regions run unfused.
+    pub fusion_compile_failures: u64,
 }
 
 /// How much of a retained scheme the next [`Scheme::submit`] must rebuild.
@@ -747,11 +754,14 @@ pub(crate) struct SchemeDesc {
     present_bindings: Vec<PresentBinding>,
     #[cfg(feature = "graphics")]
     present_transactions: Vec<PresentTransactionInfo>,
+    /// Generated-kernel dispatches automatic fusion may fuse, keyed by node index.
+    kernel_sites: HashMap<u32, crate::fusion_plan::KernelSite>,
 }
 
 impl SchemeDesc {
     fn new() -> Self {
         Self {
+            kernel_sites: HashMap::new(),
             ir: GraphIR::default(),
             interned_leases: Vec::new(),
             record_constants: Vec::new(),
@@ -898,11 +908,29 @@ pub struct Scheme {
     /// Record-time diagnostics flushed on [`Self::submit`].
     record_errors: Vec<String>,
     /// Per-dispatch-site shader specialization predictor (see `specialization.rs`).
+    ///
+    /// Sites are keyed by node index in the executed IR ([`executed_ir`]).
     specialization: crate::specialization::SchemePredictor,
+    /// Automatic fusion planner and its promoted execution plan (see `fusion_plan.rs`).
+    fusion: crate::fusion_plan::FusionPlanner,
+    /// [`Self::set_automatic_fusion`]; `None` follows `GOLDY_FUSION`.
+    automatic_fusion: Option<bool>,
     /// Cached topology-only analysis for the submit hot path.
     submit_static: Option<IrSubmitStatic>,
     /// Counters of yielding nodes, keyed by node index.
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
+}
+
+/// The IR a scheme submits: its promoted fusion plan, else what was recorded.
+fn executed_ir<'a>(desc: &'a SchemeDesc, fusion: &'a crate::fusion_plan::FusionPlanner) -> &'a GraphIR {
+    fusion.plan().map_or(&desc.ir, |plan| &plan.ir)
+}
+
+fn executed_ir_mut<'a>(desc: &'a mut SchemeDesc, fusion: &'a mut crate::fusion_plan::FusionPlanner) -> &'a mut GraphIR {
+    match fusion.plan_mut() {
+        Some(plan) => &mut plan.ir,
+        None => &mut desc.ir,
+    }
 }
 
 fn parcel_gpu_buffer(parcel: &Parcel) -> Result<(BufferHandle, u64), GoldyError> {
@@ -934,6 +962,8 @@ impl Scheme {
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             specialization: crate::specialization::SchemePredictor::new(),
+            fusion: crate::fusion_plan::FusionPlanner::new(),
+            automatic_fusion: None,
             submit_static: None,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),
             record_errors: Vec::new(),
@@ -987,8 +1017,9 @@ impl Scheme {
             ));
         }
         child.desc.validate_for_include()?;
-        let id = self.copy_child_desc(label.into(), child);
+        // Drops a promoted fusion plan first: copied sites are keyed by recorded index.
         self.mark_structure_dirty();
+        let id = self.copy_child_desc(label.into(), child);
         Ok(GroupBuilder { scheme: self, id })
     }
 
@@ -1072,9 +1103,118 @@ impl Scheme {
         self.desc
             .prior_built_accels
             .extend(child.desc.prior_built_accels.iter().copied());
-        self.specialization
-            .copy_sites_from(&child.specialization, node_offset as u32);
+        for (&node, site) in &child.desc.kernel_sites {
+            self.desc.kernel_sites.insert(node + node_offset as u32, site.clone());
+        }
+        let offset = node_offset as u32;
+        match child.fusion.plan() {
+            None => self
+                .specialization
+                .copy_sites_mapped(&child.specialization, |node| Some(node + offset)),
+            Some(plan) => {
+                // The child's sites follow its executed IR; its fused constituents start over.
+                self.specialization
+                    .copy_sites_mapped(&child.specialization, |exec| Some(plan.recorded_of(exec)? + offset));
+                for c in plan.fused.iter().flat_map(|f| f.nodes.clone()) {
+                    self.register_constituent_site(c + node_offset);
+                }
+            }
+        }
         wrapper
+    }
+
+    /// Give recorded constituent `node` its own predictor site again.
+    fn register_constituent_site(&mut self, node: usize) {
+        let Some(site) = self.desc.kernel_sites.get(&(node as u32)) else {
+            return;
+        };
+        let recorded = &self.desc.ir.nodes[node];
+        if let NodeKind::Dispatch { user_slots, .. } = &recorded.kind {
+            self.specialization.register_site(
+                node as u32,
+                site.universal,
+                &site.provenance,
+                recorded.label.clone(),
+                user_slots,
+            );
+        }
+    }
+
+    /// Run the recorded IR again: move predictor sites back and forget the plan.
+    ///
+    /// Callers mark the scheme structurally dirty.
+    fn revert_fusion_plan(&mut self, plan: crate::fusion_plan::Plan) {
+        for f in &plan.fused {
+            self.specialization.remove_site(f.exec);
+        }
+        for (exec, node) in plan.ir.nodes.iter().enumerate() {
+            let Some(recorded) = plan.recorded_of(exec as u32) else {
+                continue;
+            };
+            if let (NodeKind::Dispatch { pipeline: ran, .. }, NodeKind::Dispatch { pipeline, .. }) =
+                (&node.kind, &mut self.desc.ir.nodes[recorded as usize].kind)
+            {
+                *pipeline = *ran;
+            }
+        }
+        self.specialization.rekey(|exec| plan.recorded_of(exec));
+        for c in plan.fused.iter().flat_map(|f| f.nodes.clone()) {
+            self.register_constituent_site(c);
+        }
+        tracing::debug!(scheme_id = self.scheme_id, "kernel fusion: plan dropped");
+    }
+
+    /// Switch to `plan`: constituents leave the predictor, fused nodes join it.
+    fn promote_fusion_plan(&mut self, plan: crate::fusion_plan::Plan) {
+        for c in plan.fused.iter().flat_map(|f| f.nodes.clone()) {
+            self.specialization.remove_site(c as u32);
+            if let (Some(site), NodeKind::Dispatch { pipeline, .. }) =
+                (self.desc.kernel_sites.get(&(c as u32)), &mut self.desc.ir.nodes[c].kind)
+            {
+                *pipeline = site.universal;
+            }
+        }
+        self.specialization.rekey(|node| plan.exec_of(node as usize));
+        for f in &plan.fused {
+            let node = &plan.ir.nodes[f.exec as usize];
+            if let NodeKind::Dispatch { user_slots, .. } = &node.kind {
+                let pipeline = f.kernel.pipeline();
+                self.specialization.register_site(
+                    f.exec,
+                    pipeline.handle,
+                    &pipeline.provenance,
+                    node.label.clone(),
+                    user_slots,
+                );
+            }
+        }
+        self.fusion.install(plan);
+        self.dirty = SchemeDirty::Structure;
+        self.submit_static = None;
+    }
+
+    /// Plan, compile or promote automatic fusion at the top of a submit.
+    fn step_fusion(&mut self) {
+        if !self.automatic_fusion() {
+            self.replan_fusion();
+            return;
+        }
+        if !self.record_errors.is_empty() {
+            return;
+        }
+        let device = self.ctx.runtime().clone();
+        if let Some(plan) = self.fusion.step(&device, &self.desc.ir, &self.desc.kernel_sites) {
+            self.promote_fusion_plan(plan);
+        }
+    }
+
+    /// Drop a promoted plan and plan again once the structure settles.
+    fn replan_fusion(&mut self) {
+        if let Some(plan) = self.fusion.reset() {
+            self.revert_fusion_plan(plan);
+            self.dirty = SchemeDirty::Structure;
+            self.submit_static = None;
+        }
     }
 
     /// True when the next [`Self::submit`] must re-record at least one partition.
@@ -1083,6 +1223,7 @@ impl Scheme {
     }
 
     fn mark_structure_dirty(&mut self) {
+        self.replan_fusion();
         self.dirty = SchemeDirty::Structure;
         self.submit_static = None;
     }
@@ -1102,10 +1243,14 @@ impl Scheme {
     /// Submission outcome counters.
     pub fn replay_stats(&self) -> ReplayStats {
         let spec = self.specialization.events();
+        let fusion = self.fusion.events();
         ReplayStats {
             specialization_warms: spec.warms,
             specialization_promotions: spec.promotions,
             specialization_demotions: spec.demotions,
+            fusion_promotions: fusion.promotions,
+            fusion_fallbacks: fusion.fallbacks,
+            fusion_compile_failures: fusion.compile_failures,
             ..self.stats
         }
     }
@@ -1826,6 +1971,7 @@ impl Scheme {
             yielding: None,
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
+            kernel_site: None,
         }
     }
 
@@ -1853,6 +1999,7 @@ impl Scheme {
             yielding: None,
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
+            kernel_site: None,
         }
     }
 
@@ -1971,6 +2118,11 @@ impl Scheme {
         pipeline: &crate::compute::ComputePipeline,
     ) -> Result<(), GoldyError> {
         self.intern_compute_pipeline(pipeline);
+        self.dispatch_node_mut(node, "set_node_pipeline")?;
+        if self.fusion.involves(node.index()) {
+            self.replan_fusion();
+        }
+        self.desc.kernel_sites.remove(&(node.index() as u32));
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
                 pipeline: slot,
@@ -1983,30 +2135,79 @@ impl Scheme {
             }
             _ => (false, Vec::new()),
         };
+        let exec = self.executed_node(node.index());
+        if let Some(plan) = self.fusion.plan_mut() {
+            if let NodeKind::Dispatch { pipeline: slot, .. } = &mut plan.ir.nodes[exec].kind {
+                *slot = pipeline.handle;
+            }
+        }
         let label = self.desc.ir.nodes[node.index()].label.clone();
-        self.specialization.register_site(
-            node.index() as u32,
-            pipeline.handle,
-            &pipeline.provenance,
-            label,
-            &slots,
-        );
+        self.specialization
+            .register_site(exec as u32, pipeline.handle, &pipeline.provenance, label, &slots);
         if changed {
             self.mark_params_dirty();
         }
         Ok(())
     }
 
+    /// Executed node recorded `node` runs as (itself unless a fusion plan is promoted).
+    fn executed_node(&self, node: usize) -> usize {
+        self.fusion
+            .plan()
+            .and_then(|plan| plan.exec_of(node))
+            .map_or(node, |exec| exec as usize)
+    }
+
     /// Whether the predictor currently runs `node` on a specialized variant rather than the
     /// pipeline the caller bound. Observable only through stats and this query; the dispatch
     /// computes the same thing either way.
     pub fn node_is_specialized(&self, node: NodeId) -> bool {
-        node.scheme_id == self.scheme_id && self.specialization.is_promoted(node.index() as u32)
+        node.scheme_id == self.scheme_id && self.specialization.is_promoted(self.executed_node(node.index()) as u32)
     }
 
     /// Block until every in-flight specialization compile has finished (test support).
     pub(crate) fn wait_for_specialization_compiles(&mut self) {
         self.specialization.wait_for_compiles();
+    }
+
+    /// Block until every in-flight fused compile has finished (test support).
+    pub(crate) fn wait_for_fusion_compiles(&mut self) {
+        self.fusion.wait_for_compiles();
+    }
+
+    /// Turn automatic fusion on or off for this scheme, whatever `GOLDY_FUSION` says.
+    ///
+    /// When on, the scheme fuses each run of adjacent generated-kernel dispatches that
+    /// [`crate::kernel::FusedKernel`] admission accepts, once its structure has survived a
+    /// submit. Turning it off returns to the recorded dispatches on the next submit.
+    pub fn set_automatic_fusion(&mut self, enabled: bool) {
+        self.automatic_fusion = Some(enabled);
+    }
+
+    /// Whether this scheme fuses automatically: [`Self::set_automatic_fusion`] if it was
+    /// called, else `GOLDY_FUSION` (off by default).
+    pub fn automatic_fusion(&self) -> bool {
+        self.automatic_fusion
+            .unwrap_or_else(crate::validation_env::fusion_enabled)
+    }
+
+    /// Which recorded dispatches automatic fusion runs, or tried to run, as one dispatch.
+    ///
+    /// Empty unless [`Self::automatic_fusion`] is on and the scheme's structure has
+    /// survived a submit. A region stays unfused until its fused pipeline compiles;
+    /// the report says why a region or neighbouring dispatches are not fused.
+    pub fn fusion_report(&self) -> crate::fusion_plan::FusionReport {
+        let scheme_id = self.scheme_id;
+        self.fusion.report(&self.desc.ir, |index| NodeId {
+            scheme_id,
+            index: index as u32,
+        })
+    }
+
+    /// Number of nodes the next submit executes: recorded nodes, less those fused away.
+    #[doc(hidden)]
+    pub fn executed_node_count(&self) -> usize {
+        executed_ir(&self.desc, &self.fusion).nodes.len()
     }
 
     #[cfg(test)]
@@ -2021,12 +2222,21 @@ impl Scheme {
         let next = DispatchDim::Direct { x, y, z };
         let changed = match self.dispatch_node_mut(node, "set_node_dispatch")? {
             NodeKind::Dispatch { dispatch, .. } if *dispatch != next => {
-                *dispatch = next;
+                *dispatch = next.clone();
                 true
             }
             _ => false,
         };
         if changed {
+            if self.fusion.involves(node.index()) {
+                self.replan_fusion();
+            }
+            let exec = self.executed_node(node.index());
+            if let Some(plan) = self.fusion.plan_mut() {
+                if let NodeKind::Dispatch { dispatch, .. } = &mut plan.ir.nodes[exec].kind {
+                    *dispatch = next;
+                }
+            }
             self.mark_params_dirty();
         }
         Ok(())
@@ -2059,9 +2269,18 @@ impl Scheme {
             _ => false,
         };
         if changed {
-            let index = node.index();
-            if let Some(universal) = self.specialization.on_param_changed(index as u32, param_index) {
-                if let NodeKind::Dispatch { pipeline, .. } = &mut self.desc.ir.nodes[index].kind {
+            let (exec, slot) = self
+                .fusion
+                .plan()
+                .and_then(|plan| plan.executed_param(node.index(), param_index))
+                .unwrap_or((node.index(), param_index));
+            let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
+            if let NodeKind::Dispatch { user_slots, .. } = &mut ir.nodes[exec].kind {
+                user_slots[slot] = value;
+            }
+            if let Some(universal) = self.specialization.on_param_changed(exec as u32, slot) {
+                let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
+                if let NodeKind::Dispatch { pipeline, .. } = &mut ir.nodes[exec].kind {
                     *pipeline = universal;
                 }
             }
@@ -2133,10 +2352,9 @@ impl Scheme {
     }
 
     fn ensure_submit_static(&mut self) -> &IrSubmitStatic {
+        let ir = executed_ir(&self.desc, &self.fusion);
         self.submit_static.get_or_insert_with(|| {
-            let mut deposit_ids: Vec<u32> = self
-                .desc
-                .ir
+            let mut deposit_ids: Vec<u32> = ir
                 .nodes
                 .iter()
                 .flat_map(|node| node.bindings.iter())
@@ -2148,7 +2366,7 @@ impl Scheme {
             deposit_ids.sort_unstable();
             deposit_ids.dedup();
             IrSubmitStatic {
-                net_access: crate::task_graph::cross_submit::net_access_per_resource(&self.desc.ir),
+                net_access: crate::task_graph::cross_submit::net_access_per_resource(ir),
                 deposit_ids,
             }
         })
@@ -2162,6 +2380,7 @@ impl Scheme {
         }
 
         self.realize_matmul_nodes()?;
+        self.step_fusion();
 
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         {
@@ -2171,10 +2390,8 @@ impl Scheme {
             let _tz = crate::tracy_zone!("scheme.submit.specialization");
             let was_clean = self.dirty == SchemeDirty::Clean && !topo_dirty;
             let device = self.ctx.runtime().clone();
-            if self
-                .specialization
-                .begin_submit(&device, &mut self.desc.ir, was_clean, topo_dirty)
-            {
+            let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
+            if self.specialization.begin_submit(&device, ir, was_clean, topo_dirty) {
                 self.mark_params_dirty();
             }
         }
@@ -2297,6 +2514,7 @@ impl Scheme {
             self.stats.clean_submits += 1;
         }
         self.specialization.end_submit();
+        self.fusion.end_submit();
         // Standalone upload partitions never increment `PartitionSubmitResult.records`,
         // but the first submit after IR mutation still counts as a scheme record.
         // Params-only mutation also counts: at least one partition typically re-records,
@@ -2417,13 +2635,13 @@ impl Scheme {
         self.claim_deposits_into(&mut prep)?;
         let mut deposit_claims = std::mem::take(&mut prep.deposit_claims);
 
-        validate_present_exchange_bindings(&self.desc.ir, &self.desc.present_transactions)?;
+        validate_present_exchange_bindings(executed_ir(&self.desc, &self.fusion), &self.desc.present_transactions)?;
         if let Some(msg) = self.record_errors.first() {
             return Err(GoldyError::Validation(msg.clone()));
         }
         if prep.structurally_dirty {
             crate::task_graph::validate::validate_graph_with_prior_built_accels(
-                &self.desc.ir,
+                executed_ir(&self.desc, &self.fusion),
                 &self.desc.prior_built_accels,
             )?;
         }
@@ -2525,7 +2743,7 @@ impl Scheme {
                     };
                 self.submit_state.submit_pipelined_and_retain_with_presents(
                     &self.ctx,
-                    &self.desc.ir,
+                    executed_ir(&self.desc, &self.fusion),
                     &mut present_slots,
                     deferred,
                     &prep.deposit_resolutions,
@@ -2577,7 +2795,7 @@ impl Scheme {
         self.finish_ir_submit_bookkeeping(tv, &part_result, &prep);
 
         let present_resolvers = claim_present_easement_promises(
-            &self.desc.ir,
+            executed_ir(&self.desc, &self.fusion),
             &self.desc.present_transactions,
             self.desc.resource_stamps(),
         );
@@ -2599,7 +2817,7 @@ impl Scheme {
         }
         if prep.structurally_dirty {
             crate::task_graph::validate::validate_graph_with_prior_built_accels(
-                &self.desc.ir,
+                executed_ir(&self.desc, &self.fusion),
                 &self.desc.prior_built_accels,
             )?;
         }
@@ -2610,7 +2828,7 @@ impl Scheme {
             .submit_state
             .submit_pipelined_and_retain_with_presents(
                 &self.ctx,
-                &self.desc.ir,
+                executed_ir(&self.desc, &self.fusion),
                 &mut present_slots,
                 None,
                 &prep.deposit_resolutions,
@@ -2663,9 +2881,11 @@ impl Scheme {
             if let Some(tv) = submitted_tv {
                 frame.note_submit_timeline(tv);
                 let (promise, resolver) = TimelinePromise::new();
-                for stamp in
-                    present_easement_source_stamps(&self.desc.ir, grant.binding_id, self.desc.resource_stamps())
-                {
+                for stamp in present_easement_source_stamps(
+                    executed_ir(&self.desc, &self.fusion),
+                    grant.binding_id,
+                    self.desc.resource_stamps(),
+                ) {
                     stamp.push_pending(promise.clone());
                 }
                 resolver.resolve(tv);
@@ -3476,6 +3696,8 @@ pub struct SchemeNodeBuilder<'a> {
     /// Buffer parcels behind each `with_parcel` call (yielding scripts only).
     yield_parcels: Vec<Option<(Parcel, NodeAccess)>>,
     yield_points: Vec<(String, crate::petition::YieldPoint)>,
+    /// Kernel and arguments of a generated-kernel record, for automatic fusion.
+    kernel_site: Option<crate::fusion_plan::SiteDraft>,
 }
 
 /// The parts of a [`crate::ComputePipeline`] a scheme node copies at record time.
@@ -3532,6 +3754,9 @@ impl<'a> SchemeNodeBuilder<'a> {
                  check BufferKind/TextureKind is compatible with NodeAccess"
             );
         });
+        if let Some(site) = self.kernel_site.as_mut() {
+            site.resource(resource_identity.as_ref().map(|(r, _)| *r), slot_idx, descriptor_access);
+        }
         if let Some((resource, maybe_stamp)) = resource_identity {
             if let Some(stamp) = maybe_stamp {
                 self.scheme.desc.register_stamp_parts(resource, stamp);
@@ -3575,6 +3800,7 @@ impl<'a> SchemeNodeBuilder<'a> {
 
     /// Register dependency on all parcels of a buffer without emitting shader slots.
     pub fn with_buffer_dependency(mut self, buffer: &crate::Buffer, access: NodeAccess) -> Self {
+        self.kernel_site = None;
         self.scheme.desc.register_buffer_stamps(buffer);
         for parcel in buffer.parcels() {
             self.bindings.push(ResourceBinding {
@@ -3595,8 +3821,16 @@ impl<'a> SchemeNodeBuilder<'a> {
             self.user_slots.len() < MAX_USER_SLOTS,
             "with_param: at most {MAX_USER_SLOTS} scalar params per dispatch"
         );
+        if let Some(site) = self.kernel_site.as_mut() {
+            site.scalar(self.user_slots.len());
+        }
         self.user_slots.push(value);
         self
+    }
+
+    /// Start collecting the kernel site of a generated-kernel record.
+    pub(crate) fn begin_kernel_site(&mut self, kernel: Arc<goldy_shader_ir::KernelDef>) {
+        self.kernel_site = Some(crate::fusion_plan::SiteDraft::new(kernel));
     }
 
     /// Declare explicit resource view handles (internal: present-lease slot bookkeeping).
@@ -3629,6 +3863,9 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// at submit time. Call order must match the shader's resource parameter order.
     #[cfg(feature = "graphics")]
     pub fn with_present_access(mut self, lease: &PresentLease, access: NodeAccess) -> Self {
+        if let Some(site) = self.kernel_site.as_mut() {
+            site.resource(None, self.resource_slots.len(), node_access_to_resource_access(access));
+        }
         let binding_id = self.scheme.intern_present_binding(lease);
         self.bindings.push(ResourceBinding {
             resource: ResourceId::PresentLease(binding_id),
@@ -3791,6 +4028,14 @@ impl<'a> SchemeNodeBuilder<'a> {
         // Present placeholders are resolved by declaration order, not binding index.
         if self.rt_pipeline.is_none() {
             self.register_specialization_site();
+            if let (Some(site), Some(provenance), DispatchDim::Direct { .. }) =
+                (self.kernel_site.take(), self.provenance.as_ref(), &dispatch)
+            {
+                if let Some(site) = site.finish(self.pipeline, provenance, self.bindings.len()) {
+                    let node = self.scheme.desc.ir.nodes.len() as u32;
+                    self.scheme.desc.kernel_sites.insert(node, site);
+                }
+            }
         }
         self.scheme.desc.ir.nodes.push(TaskNode {
             group: None,
@@ -8939,5 +9184,342 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
             assert_eq!(variant_compiles(&device), 1, "b promoted from a's variant");
             assert_eq!(bound_pipeline(&scheme, node_a), bound_pipeline(&scheme, node_b));
         }
+    }
+}
+
+#[cfg(test)]
+mod fusion_plan_tests {
+    use super::*;
+    use crate::fusion_plan::FusionRegionStatus;
+    use crate::runtime::Runtime;
+    use crate::specialization::SpecializationPolicy;
+    use crate::test_support::{mock_runtime, CbReuseOverride, FusionCompileFault, SpecializationOverride};
+    use goldy_shader_ir::FusionRejection;
+
+    #[goldy::compute(workgroup_size = [64, 1, 1])]
+    fn scale(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, factor: f32) {
+        let i = goldy::gpu::global_id().x;
+        if i < count {
+            output[i] = input[i] * factor;
+        }
+    }
+
+    #[goldy::compute(workgroup_size = [64, 1, 1])]
+    fn bias(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, bias: f32) {
+        let i = goldy::gpu::global_id().x;
+        if i < count {
+            output[i] = input[i] + bias;
+        }
+    }
+
+    #[goldy::compute(workgroup_size = [64, 1, 1])]
+    fn shift(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32) {
+        let i = goldy::gpu::global_id().x;
+        if i + 1 < count {
+            output[i] = input[i + 1];
+        }
+    }
+
+    struct Pins {
+        _cb: CbReuseOverride,
+        _spec: SpecializationOverride,
+    }
+
+    fn pins(specialize: bool) -> Pins {
+        Pins {
+            _cb: CbReuseOverride::force_enabled(),
+            _spec: if specialize {
+                SpecializationOverride::force_enabled()
+            } else {
+                SpecializationOverride::force_disabled()
+            },
+        }
+    }
+
+    struct Kernels {
+        scale: scale::Kernel,
+        bias: bias::Kernel,
+        shift: shift::Kernel,
+    }
+
+    fn kernels(device: &Runtime) -> Kernels {
+        Kernels {
+            scale: scale::Kernel::prepare(device).unwrap(),
+            bias: bias::Kernel::prepare(device).unwrap(),
+            shift: shift::Kernel::prepare(device).unwrap(),
+        }
+    }
+
+    fn parcels(device: &Runtime, n: usize) -> Vec<crate::Buffer> {
+        (0..n)
+            .map(|_| {
+                device
+                    .acquire_buffer(
+                        256,
+                        crate::types::BufferKind::Scattered,
+                        None,
+                        crate::types::BufferFlags::empty(),
+                        None,
+                    )
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// `scale` then `bias` through `p[1]`: one fusible region.
+    fn record_chain(scheme: &mut Scheme, k: &Kernels, p: &[crate::Buffer]) -> (NodeId, NodeId) {
+        let a = k.scale.invoke(&p[0], &p[1], 64, 2.0).over_1d(64);
+        let b = k.bias.invoke(&p[1], &p[2], 64, 1.0).over_1d(64);
+        (
+            a.record(scheme, "scale").unwrap().node(),
+            b.record(scheme, "bias").unwrap().node(),
+        )
+    }
+
+    /// Submit once and let any fused compile the submit started finish.
+    fn frame(scheme: &mut Scheme) {
+        scheme.submit().unwrap();
+        scheme.wait_for_fusion_compiles();
+        scheme.wait_for_specialization_compiles();
+    }
+
+    fn frames(scheme: &mut Scheme, n: u32) {
+        for _ in 0..n {
+            frame(scheme);
+        }
+    }
+
+    fn executed(scheme: &Scheme, exec: usize) -> &TaskNode {
+        &executed_ir(&scheme.desc, &scheme.fusion).nodes[exec]
+    }
+
+    fn fusing(ctx: &crate::Context) -> Scheme {
+        let mut scheme = Scheme::new(ctx);
+        scheme.set_automatic_fusion(true);
+        scheme
+    }
+
+    fn statuses(scheme: &Scheme) -> Vec<FusionRegionStatus> {
+        scheme.fusion_report().regions.into_iter().map(|r| r.status).collect()
+    }
+
+    #[test]
+    fn promotes_once_the_structure_settles_and_then_replays() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let (a, b) = record_chain(&mut scheme, &k, &p);
+
+        frame(&mut scheme);
+        assert!(statuses(&scheme).is_empty(), "a one-shot scheme plans nothing");
+        assert_eq!(scheme.executed_node_count(), 2);
+
+        frame(&mut scheme);
+        assert_eq!(statuses(&scheme), [FusionRegionStatus::Compiling]);
+        assert_eq!(scheme.executed_node_count(), 2, "unfused while compiling");
+        assert_eq!(scheme.replay_stats().records, 1);
+
+        frame(&mut scheme);
+        assert_eq!(statuses(&scheme), [FusionRegionStatus::Promoted]);
+        assert_eq!(scheme.executed_node_count(), 1);
+        assert_eq!(scheme.ir_node_count(), 2, "the recorded IR is untouched");
+        let stats = scheme.replay_stats();
+        assert_eq!(stats.fusion_promotions, 1);
+        assert_eq!(stats.records, 2, "promotion is one structural re-record");
+
+        frames(&mut scheme, 3);
+        let stats = scheme.replay_stats();
+        assert_eq!(stats.records, 2, "a promoted plan replays");
+        assert_eq!(stats.clean_submits, 4);
+
+        let report = scheme.fusion_report();
+        let region = &report.regions[0];
+        assert_eq!(region.nodes, [a, b]);
+        assert_eq!(region.labels, ["scale", "bias"]);
+        assert_eq!(region.forwarded, 1, "the intermediate is forwarded");
+        let fused = executed(&scheme, 0);
+        assert_eq!(fused.label.as_str(), "scale+bias");
+        assert_eq!(fused.bindings.len(), 3, "one binding per distinct parcel");
+    }
+
+    #[test]
+    fn a_failed_compile_keeps_the_recorded_dispatches() {
+        let _pins = pins(false);
+        let _fault = FusionCompileFault::install();
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        record_chain(&mut scheme, &k, &p);
+
+        frames(&mut scheme, 5);
+        assert_eq!(scheme.executed_node_count(), 2);
+        assert!(matches!(&statuses(&scheme)[..], [FusionRegionStatus::Failed(e)] if e.contains("injected")));
+        let stats = scheme.replay_stats();
+        assert_eq!(stats.fusion_compile_failures, 1);
+        assert_eq!(stats.fusion_promotions, 0);
+        assert_eq!(stats.records, 1, "a failed compile costs no re-record");
+    }
+
+    #[test]
+    fn a_structural_change_reverts_and_the_cache_re_promotes() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 4);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        record_chain(&mut scheme, &k, &p);
+        frames(&mut scheme, 3);
+        assert_eq!(scheme.executed_node_count(), 1);
+
+        // Reads its neighbour's element of the intermediate: may not join the region.
+        k.shift
+            .invoke(&p[2], &p[3], 64)
+            .over_1d(64)
+            .record(&mut scheme, "shift")
+            .unwrap();
+        assert_eq!(scheme.executed_node_count(), 3, "recording drops the plan at once");
+        assert_eq!(scheme.replay_stats().fusion_fallbacks, 1);
+
+        frame(&mut scheme);
+        assert_eq!(scheme.executed_node_count(), 3, "settling");
+        frame(&mut scheme);
+        assert_eq!(scheme.executed_node_count(), 2, "cache hit promotes without waiting");
+        let stats = scheme.replay_stats();
+        assert_eq!(stats.fusion_promotions, 2);
+        assert_eq!(stats.records, 4);
+
+        let report = scheme.fusion_report();
+        assert_eq!(report.regions.len(), 1);
+        let rejected = &report.rejected[0];
+        assert_eq!(rejected.labels.last().map(|l| l.as_str()), Some("shift"));
+        assert!(
+            matches!(&rejected.reason, FusionRejection::NonLocalDependence { stage: 2, formal, .. } if formal == "input"),
+            "{}",
+            rejected.reason
+        );
+    }
+
+    #[test]
+    fn set_node_param_reaches_the_fused_dispatch() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let (_, b) = record_chain(&mut scheme, &k, &p);
+        frames(&mut scheme, 3);
+        let records = scheme.replay_stats().records;
+
+        scheme.set_node_param(b, 1, 5.0f32.to_bits()).unwrap();
+        let NodeKind::Dispatch { user_slots, .. } = &executed(&scheme, 0).kind else {
+            unreachable!()
+        };
+        // k0_count, k0_factor, k1_count, k1_bias
+        assert_eq!(user_slots[3], 5.0f32.to_bits());
+        frame(&mut scheme);
+        assert_eq!(scheme.replay_stats().records, records + 1, "params-only re-record");
+        assert_eq!(scheme.executed_node_count(), 1, "a param change keeps the plan");
+
+        scheme.set_node_dispatch(b, 2, 1, 1).unwrap();
+        assert_eq!(
+            scheme.executed_node_count(),
+            2,
+            "a grid change on a constituent drops the plan"
+        );
+        let NodeKind::Dispatch { user_slots, .. } = &scheme.desc.ir.nodes[b.index()].kind else {
+            unreachable!()
+        };
+        assert_eq!(user_slots[1], 5.0f32.to_bits(), "the recorded node kept the value");
+    }
+
+    #[test]
+    fn the_fused_dispatch_specializes_and_a_constituent_param_demotes_it() {
+        let _pins = pins(true);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let (a, b) = record_chain(&mut scheme, &k, &p);
+        frames(&mut scheme, 3);
+        assert_eq!(scheme.executed_node_count(), 1);
+        let universal = scheme.fusion.plan().unwrap().fused[0].kernel.pipeline().handle;
+
+        frames(&mut scheme, SpecializationPolicy::DEFAULT_PROMOTE_AFTER + 1);
+        assert!(
+            scheme.node_is_specialized(a) && scheme.node_is_specialized(b),
+            "one fused site"
+        );
+        let NodeKind::Dispatch { pipeline, .. } = &executed(&scheme, 0).kind else {
+            unreachable!()
+        };
+        assert_ne!(*pipeline, universal);
+
+        scheme.set_node_param(b, 1, 3.0f32.to_bits()).unwrap();
+        assert!(!scheme.node_is_specialized(b), "demoted inside set_node_param");
+        let NodeKind::Dispatch { pipeline, .. } = &executed(&scheme, 0).kind else {
+            unreachable!()
+        };
+        assert_eq!(*pipeline, universal, "back to the universal fused pipeline");
+        assert_eq!(scheme.executed_node_count(), 1);
+    }
+
+    #[test]
+    fn turning_fusion_off_runs_the_recorded_ir() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        record_chain(&mut scheme, &k, &p);
+        frames(&mut scheme, 3);
+        assert_eq!(scheme.executed_node_count(), 1);
+
+        scheme.set_automatic_fusion(false);
+        assert!(!scheme.automatic_fusion());
+        let records = scheme.replay_stats().records;
+        frame(&mut scheme);
+        assert_eq!(scheme.executed_node_count(), 2);
+        let stats = scheme.replay_stats();
+        assert_eq!(stats.fusion_fallbacks, 1);
+        assert_eq!(stats.records, records + 1);
+        assert!(statuses(&scheme).is_empty());
+    }
+
+    #[test]
+    fn including_a_fused_child_copies_what_it_recorded() {
+        let _pins = pins(false);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut child = fusing(&ctx);
+        record_chain(&mut child, &k, &p);
+        frames(&mut child, 3);
+        assert_eq!(child.executed_node_count(), 1);
+
+        let mut parent = fusing(&ctx);
+        parent.include("child", &child).unwrap().finish();
+        assert_eq!(parent.ir_node_count(), 2);
+        assert_eq!(parent.executed_node_count(), 2);
+        frames(&mut parent, 3);
+        assert_eq!(
+            parent.executed_node_count(),
+            1,
+            "the parent fuses its own copy: {:?}",
+            parent.fusion_report()
+        );
+        let fused = executed(&parent, 0);
+        assert_eq!(fused.label.as_str(), "child/scale+child/bias");
+        assert_eq!(parent.desc.ir.groups[0].node_range, 0..2);
+        assert_eq!(parent.fusion.plan().unwrap().ir.groups[0].node_range, 0..1);
     }
 }

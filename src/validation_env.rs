@@ -178,6 +178,30 @@ thread_local! {
     static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_HOST_ACCESS_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_SPECIALIZATION_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_FUSION_COMPILE_FAULT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Make fused compiles started on this thread fail (tests of the unfused fallback).
+#[doc(hidden)]
+pub fn set_fusion_compile_fault(fail: bool) {
+    TEST_FUSION_COMPILE_FAULT.with(|c| c.set(fail));
+}
+
+pub(crate) fn fusion_compile_fault() -> bool {
+    TEST_FUSION_COMPILE_FAULT.with(|c| c.get())
+}
+
+/// Default for [`crate::Scheme::automatic_fusion`] on schemes that never called
+/// [`crate::Scheme::set_automatic_fusion`].
+///
+/// Off unless `GOLDY_FUSION=1` (or `true` / `yes` / `on`); see
+/// `docs/src/programming-model/rust-kernels.md`.
+#[must_use]
+pub(crate) fn fusion_enabled() -> bool {
+    match std::env::var("GOLDY_FUSION") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
 }
 
 /// Install a thread-local override for [`specialization_enabled`].

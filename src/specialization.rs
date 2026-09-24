@@ -357,23 +357,44 @@ impl SchemePredictor {
         self.sites.insert(node, site);
     }
 
-    /// Re-register child's tracked dispatch sites at `node_offset` in the parent IR.
-    pub(crate) fn copy_sites_from(&mut self, child: &Self, node_offset: u32) {
+    /// Re-register child's tracked dispatch sites at `map(child node)` in the parent IR;
+    /// `None` skips a site.
+    pub(crate) fn copy_sites_mapped(&mut self, child: &Self, map: impl Fn(u32) -> Option<u32>) {
         let snapshot: Vec<_> = child
             .sites
             .iter()
-            .map(|(&idx, site)| {
-                (
-                    idx + node_offset,
+            .filter_map(|(&idx, site)| {
+                Some((
+                    map(idx)?,
                     site.universal,
                     Arc::clone(&site.provenance),
                     site.label.clone(),
                     site.last.clone(),
-                )
+                ))
             })
             .collect();
         for (idx, universal, provenance, label, slots) in snapshot {
             self.register_site(idx, universal, &provenance, label, &slots);
+        }
+    }
+
+    /// Stop tracking `node`, releasing its variants through the retire queue.
+    pub(crate) fn remove_site(&mut self, node: u32) {
+        if let Some(site) = self.sites.remove(&node) {
+            self.retire_site(site);
+        }
+    }
+
+    /// Move every site to `map(node)`, keeping its history; `None` removes the site.
+    pub(crate) fn rekey(&mut self, map: impl Fn(u32) -> Option<u32>) {
+        let sites = std::mem::take(&mut self.sites);
+        for (node, site) in sites {
+            match map(node) {
+                Some(to) => {
+                    self.sites.insert(to, site);
+                }
+                None => self.retire_site(site),
+            }
         }
     }
 

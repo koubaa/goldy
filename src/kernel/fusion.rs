@@ -1,8 +1,9 @@
-//! Explicit conservative fusion of dispatch invocations.
+//! Explicit fusion of dispatch invocations.
 //!
 //! An [`Invocation`] is a prepared kernel plus its actual arguments and dispatch grid.
 //! [`FusedKernel`] lowers compatible invocations of generated kernels to one physical
-//! dispatch that preserves every parcel load and store of the unfused sequence.
+//! dispatch that preserves every parcel store of the unfused sequence. Retained schemes
+//! apply the same admission to recorded dispatches (see `fusion_plan`).
 
 use super::prepare::{access_kind_to_node, prepare_kernel_as};
 use super::{KernelBindable, KernelDef, KernelParam, PreparedKernel, RecordedDispatch, SchemeNodeStart};
@@ -14,7 +15,7 @@ use crate::shader::KernelIdentity;
 use crate::task_graph::analysis::resources_alias;
 use crate::task_graph::ResourceId;
 use goldy_shader_ir::{
-    compose, AccessKind, FusedDefinition, FusionLimits, FusionRejection, FusionStage, KernelId,
+    compose, AccessKind, FusedDefinition, FusionLimits, FusionRejection, FusionStage, KernelId, ShaderKernel,
     PORTABLE_WORKGROUP_BYTES,
 };
 
@@ -128,6 +129,27 @@ impl<'a> Invocation<'a> {
         self.groups
     }
 
+    fn shapes(&self) -> Vec<ArgShape> {
+        self.args
+            .iter()
+            .map(|a| match a {
+                KernelArg::Resource(r) => ArgShape::Resource(r.__goldy_kernel_identity().0),
+                KernelArg::Scalar(_) => ArgShape::Scalar,
+            })
+            .collect()
+    }
+
+    fn view(&self) -> StageView<'a> {
+        let def = self.kernel.def();
+        StageView {
+            kernel: &def.entry,
+            definition: def.definition.as_ref(),
+            workgroup_size: def.workgroup_size,
+            groups: self.groups,
+            args: self.shapes(),
+        }
+    }
+
     /// Record this invocation as its own dispatch node.
     pub fn record(
         &self,
@@ -141,7 +163,7 @@ impl<'a> Invocation<'a> {
                 def.entry
             )));
         }
-        if let Some(reason) = arity_mismatch(&def.params, &self.args) {
+        if let Some(reason) = arity_mismatch(&def.params, &self.shapes()) {
             return Err(GoldyError::Validation(format!(
                 "kernel `{}` invocation: {reason}",
                 def.entry
@@ -155,12 +177,32 @@ impl<'a> Invocation<'a> {
     }
 }
 
-fn arity_mismatch(params: &[KernelParam], args: &[KernelArg<'_>]) -> Option<String> {
+/// What admission needs to know about one actual argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgShape {
+    /// A resource and its parcel identity, when known.
+    Resource(Option<ResourceId>),
+    Scalar,
+}
+
+/// One dispatch as admission sees it, whether an [`Invocation`] or a recorded node.
+pub(crate) struct StageView<'a> {
+    /// Entry name, for rejections of opaque kernels.
+    pub kernel: &'a str,
+    /// Retained definition; `None` for hand-authored Slang.
+    pub definition: Option<&'a ShaderKernel>,
+    pub workgroup_size: [u32; 3],
+    pub groups: [u32; 3],
+    /// Actual arguments in declaration order.
+    pub args: Vec<ArgShape>,
+}
+
+fn arity_mismatch(params: &[KernelParam], args: &[ArgShape]) -> Option<String> {
     if params.len() != args.len() {
         return Some(format!("{} formals, {} arguments", params.len(), args.len()));
     }
     params.iter().zip(args).find_map(|(p, a)| {
-        let resource_arg = matches!(a, KernelArg::Resource(_));
+        let resource_arg = matches!(a, ArgShape::Resource(_));
         (p.category.is_resource() != resource_arg).then(|| {
             format!(
                 "`{}` expects a {} argument",
@@ -202,8 +244,10 @@ impl From<FusionError> for GoldyError {
 
 /// One compute pipeline that runs a sequence of invocations as one dispatch.
 ///
-/// Every constituent still loads and stores its parcels, so an intermediate parcel
-/// ends in the same state as after the unfused sequence.
+/// Every constituent still stores to its parcels, so an intermediate parcel ends in
+/// the same state as after the unfused sequence. A parcel that crosses stages is
+/// forwarded in registers within each thread (see [`FusedDefinition::forwarded`]);
+/// [`Self::prepare_conservative`] keeps every load instead.
 pub struct FusedKernel {
     prepared: PreparedKernel,
     definition: FusedDefinition,
@@ -215,21 +259,23 @@ impl FusedKernel {
     /// The fused pipeline depends on which actual arguments are the same parcel, not on
     /// the parcels themselves; [`Self::record`] accepts any invocations with that shape.
     pub fn prepare(device: &Runtime, stages: &[Invocation<'_>]) -> Result<Self, FusionError> {
-        let definition = admit(stages).inspect_err(|reason| {
+        Self::prepare_as(device, stages, false)
+    }
+
+    /// [`Self::prepare`] without value forwarding: every constituent load reaches its parcel.
+    pub fn prepare_conservative(device: &Runtime, stages: &[Invocation<'_>]) -> Result<Self, FusionError> {
+        Self::prepare_as(device, stages, true)
+    }
+
+    fn prepare_as(device: &Runtime, stages: &[Invocation<'_>], conservative: bool) -> Result<Self, FusionError> {
+        let views: Vec<StageView<'_>> = stages.iter().map(Invocation::view).collect();
+        let mut definition = admit(&views).inspect_err(|reason| {
             tracing::debug!(%reason, "kernel fusion rejected");
         })?;
-        let identity = KernelIdentity {
-            id: definition.id(),
-            scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
-        };
-        let prepared = prepare_kernel_as(device, definition.lower(), Some(identity)).map_err(FusionError::Compile)?;
-        tracing::debug!(
-            kernel = %definition.name,
-            id = %definition.id(),
-            stages = definition.stages.len(),
-            params = definition.params.len(),
-            "kernel fusion prepared"
-        );
+        if conservative {
+            definition = definition.conservative();
+        }
+        let prepared = prepare_fused(device, &definition).map_err(FusionError::Compile)?;
         Ok(Self { prepared, definition })
     }
 
@@ -267,7 +313,11 @@ impl FusedKernel {
         label: impl Into<crate::SchemeLabel>,
         stages: &[Invocation<'_>],
     ) -> Result<RecordedDispatch, GoldyError> {
-        let definition = admit(stages).map_err(FusionError::Rejected)?;
+        let views: Vec<StageView<'_>> = stages.iter().map(Invocation::view).collect();
+        let mut definition = admit(&views).map_err(FusionError::Rejected)?;
+        if self.definition.forwarded.is_empty() {
+            definition = definition.conservative();
+        }
         if definition != self.definition {
             return Err(GoldyError::Validation(format!(
                 "fused kernel `{}`: invocations do not compose to the definition it was prepared from",
@@ -289,15 +339,34 @@ impl FusedKernel {
     }
 }
 
-fn admit(stages: &[Invocation<'_>]) -> Result<FusedDefinition, FusionRejection> {
+/// Compile a fused definition under its fused-kernel identity, so its specialized
+/// variants are shared by every pipeline of that definition.
+pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> anyhow::Result<PreparedKernel> {
+    let identity = KernelIdentity {
+        id: definition.id(),
+        scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
+    };
+    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity))?;
+    tracing::debug!(
+        kernel = %definition.name,
+        id = %definition.id(),
+        stages = definition.stages.len(),
+        params = definition.params.len(),
+        forwarded = definition.forwarded.len(),
+        "kernel fusion prepared"
+    );
+    Ok(prepared)
+}
+
+/// Compose `stages` into one fused definition if they may run as one dispatch.
+pub(crate) fn admit(stages: &[StageView<'_>]) -> Result<FusedDefinition, FusionRejection> {
     let first = stages.first().ok_or(FusionRejection::Empty)?;
     let mut definitions = Vec::with_capacity(stages.len());
     for (k, s) in stages.iter().enumerate() {
-        let def = s.kernel.def();
-        let Some(definition) = &def.definition else {
+        let Some(definition) = s.definition else {
             return Err(FusionRejection::OpaqueDefinition {
                 stage: k,
-                kernel: def.entry.clone(),
+                kernel: s.kernel.to_string(),
             });
         };
         if definition.params.iter().any(|p| p.is_tensor) {
@@ -313,12 +382,11 @@ fn admit(stages: &[Invocation<'_>]) -> Result<FusedDefinition, FusionRejection> 
                 definition.name
             )));
         }
-        let expected = first.kernel.workgroup_size();
-        if def.workgroup_size != expected {
+        if s.workgroup_size != first.workgroup_size {
             return Err(FusionRejection::WorkgroupSize {
                 stage: k,
-                expected,
-                got: def.workgroup_size,
+                expected: first.workgroup_size,
+                got: s.workgroup_size,
             });
         }
         if s.groups != first.groups {
@@ -354,10 +422,7 @@ fn admit(stages: &[Invocation<'_>]) -> Result<FusedDefinition, FusionRejection> 
 }
 
 /// Fused parameter index of every formal: one per distinct parcel, one per scalar.
-fn argument_map(
-    stages: &[Invocation<'_>],
-    definitions: &[&goldy_shader_ir::ShaderKernel],
-) -> Result<Vec<Vec<usize>>, FusionRejection> {
+fn argument_map(stages: &[StageView<'_>], definitions: &[&ShaderKernel]) -> Result<Vec<Vec<usize>>, FusionRejection> {
     struct Parcel {
         id: ResourceId,
         fused: usize,
@@ -370,12 +435,12 @@ fn argument_map(
     for (k, (stage, definition)) in stages.iter().zip(definitions).enumerate() {
         let mut map = Vec::with_capacity(stage.args.len());
         for (i, (formal, arg)) in definition.params.iter().zip(&stage.args).enumerate() {
-            let KernelArg::Resource(resource) = arg else {
+            let &ArgShape::Resource(identity) = arg else {
                 map.push(next);
                 next += 1;
                 continue;
             };
-            let Some(id) = resource.__goldy_kernel_identity().0 else {
+            let Some(id) = identity else {
                 return Err(FusionRejection::UnknownIdentity {
                     stage: k,
                     formal: formal.name.clone(),

@@ -1,5 +1,6 @@
-//! Explicit conservative kernel fusion: every fused dispatch is compared against its
-//! unfused sequence on every bound parcel, not only the final output.
+//! Kernel fusion: every fused dispatch is compared against its unfused sequence, and
+//! value forwarding against conservative fusion, on every bound parcel, not only the
+//! final output. Automatic fusion of retained schemes is checked frame by frame.
 
 #![cfg(feature = "gpu")]
 #![allow(clippy::too_many_arguments)]
@@ -8,8 +9,8 @@
 mod submission;
 
 use goldy::{
-    compute, AccessKind, BackendType, Buffer, BufferKind, FusedKernel, FusionError, FusionRejection, Instance,
-    Invocation, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
+    compute, AccessKind, BackendType, Buffer, BufferKind, FusedKernel, FusionError, FusionRegionStatus,
+    FusionRejection, Instance, Invocation, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
 };
 use std::sync::Arc;
 
@@ -147,6 +148,7 @@ fn submit(
 ) -> anyhow::Result<(usize, Vec<Vec<u8>>)> {
     let ctx = device.create_context()?;
     let mut scheme = Scheme::new(&ctx);
+    scheme.set_automatic_fusion(false);
     record(&mut scheme)?;
     let nodes = scheme.ir_node_count();
     let mut frame = scheme.submit()?;
@@ -159,8 +161,9 @@ fn submit(
 
 type Stages<K> = for<'a> fn(&'a K, &'a [Buffer]) -> Vec<Invocation<'a>>;
 
-/// Run `stages` unfused and fused on copies of `init`; require identical bytes in
-/// every parcel. Returns the fused kernel and the final parcel contents.
+/// Run `stages` unfused, conservatively fused and fused with forwarding on copies of
+/// `init`; require identical bytes in every parcel. Returns the forwarding fused
+/// kernel and the final parcel contents.
 fn fuse_and_compare<K>(
     device: &Runtime,
     kernels: &K,
@@ -177,28 +180,45 @@ fn fuse_and_compare<K>(
     })?;
     assert_eq!(unfused_nodes, unfused.len());
 
-    let fused_parcels = buffers(device, init)?;
-    let fused_stages = stages(kernels, &fused_parcels);
-    let fused = FusedKernel::prepare(device, &fused_stages)?;
-    let (fused_nodes, got) = submit(device, &fused_parcels, |scheme| {
-        fused.record(scheme, "fused", &fused_stages)?;
-        Ok(())
-    })?;
-    assert_eq!(fused_nodes, 1, "fused stages must record one dispatch");
-    assert_eq!(fused.def().source.canonical_slang.matches("[goldy_compute]").count(), 1);
+    let run_fused = |prepare: fn(&Runtime, &[Invocation<'_>]) -> Result<FusedKernel, FusionError>,
+                     what: &str|
+     -> anyhow::Result<(FusedKernel, Vec<Vec<u8>>)> {
+        let parcels = buffers(device, init)?;
+        let fused_stages = stages(kernels, &parcels);
+        let fused = prepare(device, &fused_stages)?;
+        let (fused_nodes, got) = submit(device, &parcels, |scheme| {
+            fused.record(scheme, "fused", &fused_stages)?;
+            Ok(())
+        })?;
+        assert_eq!(fused_nodes, 1, "{what} stages must record one dispatch");
+        assert_eq!(fused.def().source.canonical_slang.matches("[goldy_compute]").count(), 1);
+        assert_same_parcels(&want, &got, what);
+        Ok((fused, got))
+    };
+    let (conservative, _) = run_fused(FusedKernel::prepare_conservative, "conservative")?;
+    assert!(conservative.definition().forwarded.is_empty());
+    let (fused, got) = run_fused(FusedKernel::prepare, "forwarded")?;
+    assert_eq!(
+        fused.id() == conservative.id(),
+        fused.definition().forwarded.is_empty(),
+        "forwarding is part of the fused identity"
+    );
 
-    for (p, (w, g)) in want.iter().zip(&got).enumerate() {
-        assert_eq!(w.len(), g.len(), "parcel {p} size");
+    let values = got.iter().map(|b| bytemuck::cast_slice(b).to_vec()).collect();
+    Ok((fused, values))
+}
+
+fn assert_same_parcels(want: &[Vec<u8>], got: &[Vec<u8>], what: &str) {
+    for (p, (w, g)) in want.iter().zip(got).enumerate() {
+        assert_eq!(w.len(), g.len(), "{what}: parcel {p} size");
         if let Some(i) = w.chunks(4).zip(g.chunks(4)).position(|(a, b)| a != b) {
             panic!(
-                "parcel {p} element {i}: unfused {:?} vs fused {:?}",
+                "{what}: parcel {p} element {i}: unfused {:?} vs fused {:?}",
                 f32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap()),
                 f32::from_le_bytes(g[i * 4..i * 4 + 4].try_into().unwrap()),
             );
         }
     }
-    let values = got.iter().map(|b| bytemuck::cast_slice(b).to_vec()).collect();
-    Ok((fused, values))
 }
 
 fn rejection(result: Result<FusedKernel, FusionError>) -> FusionRejection {
@@ -311,7 +331,55 @@ fn submit_and_check(scheme: &mut Scheme, parcels: &[Buffer], want: &[Vec<f32>], 
         }
     }
     goldy::test_support::wait_for_specialization_compiles(scheme);
+    goldy::test_support::wait_for_fusion_compiles(scheme);
     Ok(())
+}
+
+/// Every parcel of [`chain`] with `bias` for the second stage, then [`shift`] of its
+/// output when `shifted`.
+fn chain_reference(bias: f32, shifted: bool) -> Vec<Vec<f32>> {
+    let input = input_data();
+    let n = N as usize;
+    let temporary: Vec<f32> = (0..LEN)
+        .map(|i| if i < n / 2 { input[i] * 2.0 } else { SENTINEL })
+        .collect();
+    let output: Vec<f32> = (0..LEN)
+        .map(|i| if i < n { temporary[i] + bias } else { SENTINEL })
+        .collect();
+    let mut parcels = vec![input, temporary, output.clone()];
+    if shifted {
+        parcels.push(
+            (0..LEN)
+                .map(|i| if i + 1 < n { output[i + 1] } else { SENTINEL })
+                .collect(),
+        );
+    }
+    parcels
+}
+
+/// Pins for a retained scheme whose record counts the automatic fusion trials assert.
+fn auto_fusion_pins() -> (
+    goldy::test_support::SpecializationOverride,
+    goldy::test_support::CbReuseOverride,
+) {
+    (
+        goldy::test_support::SpecializationOverride::force_disabled(),
+        goldy::test_support::CbReuseOverride::force_enabled(),
+    )
+}
+
+/// A scheme that fuses automatically whatever `GOLDY_FUSION` says.
+fn fusing(ctx: &goldy::Context) -> Scheme {
+    let mut scheme = Scheme::new(ctx);
+    scheme.set_automatic_fusion(true);
+    scheme
+}
+
+/// Record [`chain`] as two recorded dispatches; returns the second node.
+fn record_chain(scheme: &mut Scheme, k: &Chain, p: &[Buffer]) -> anyhow::Result<goldy::NodeId> {
+    let [scale, bias] = <[_; 2]>::try_from(chain(k, p)).map_err(|_| anyhow::anyhow!("two stages"))?;
+    scale.record(scheme, "scale")?;
+    Ok(bias.record(scheme, "bias")?.node())
 }
 
 fn main() {
@@ -335,6 +403,11 @@ fn main() {
                 };
                 let init = [input_data(), sentinel(), sentinel()];
                 let (fused, got) = fuse_and_compare(&device, &k, &init, chain)?;
+                assert_eq!(
+                    fused.definition().forwarded,
+                    [1],
+                    "the intermediate stays in a register"
+                );
 
                 let params = &fused.definition().params;
                 let access: Vec<_> = params.iter().map(|p| (p.name.as_str(), p.access)).collect();
@@ -370,6 +443,8 @@ fn main() {
                 };
                 let init = [input_data(), sentinel(), sentinel(), sentinel()];
                 let (fused, got) = fuse_and_compare(&device, &k, &init, fork_join)?;
+                // k0_input, k0_output, k0_count, k1_output, ...: both branch outputs reach the join.
+                assert_eq!(fused.definition().forwarded, [1, 3]);
 
                 let resources: Vec<_> = fused
                     .definition()
@@ -408,6 +483,11 @@ fn main() {
                 };
                 let init = [input_data()];
                 let (fused, got) = fuse_and_compare(&device, &k, &init, in_place)?;
+                assert_eq!(
+                    fused.definition().forwarded,
+                    [0],
+                    "one register carries the in-place value"
+                );
 
                 let params = &fused.definition().params;
                 assert_eq!(params[0].name, "k0_data");
@@ -436,6 +516,10 @@ fn main() {
                 let (fused, got) = fuse_and_compare(&device, &k, &init, with_collective)?;
 
                 assert_eq!(fused.definition().dependence_rank, None);
+                assert!(
+                    fused.definition().forwarded.is_empty(),
+                    "the stages only share an input"
+                );
                 let slang = &fused.def().source.canonical_slang;
                 assert!(slang.contains("groupshared float _goldy_k1_scratch[64];"), "{slang}");
                 let input = input_data();
@@ -474,6 +558,7 @@ fn main() {
                 let p = buffers(&device, &init)?;
                 let ctx = device.create_context()?;
                 let mut scheme = Scheme::new(&ctx);
+                scheme.set_automatic_fusion(false);
                 let node = fused.record(&mut scheme, "scale+damp", &gated(&k, &p))?.node();
 
                 // Frame 1 records; stable fused slots warm on frame 3 and promote on frame 11.
@@ -586,6 +671,130 @@ fn main() {
                 let mut scheme = Scheme::new(&ctx);
                 assert!(fused.record(&mut scheme, "mismatch", &unshared).is_err());
                 assert_eq!(scheme.ir_node_count(), 0);
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("auto_fusion_promotes_and_replays_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let p = buffers(&device, &[input_data(), sentinel(), sentinel()])?;
+                let want = chain_reference(1.0, false);
+                let ctx = device.create_context()?;
+                let mut scheme = fusing(&ctx);
+                record_chain(&mut scheme, &k, &p)?;
+
+                // Frame 1 settles the structure, frame 2 compiles, frame 3 promotes.
+                for f in 1..=3 {
+                    assert_eq!(scheme.executed_node_count(), 2, "frame {f} runs as recorded");
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.executed_node_count(), 1);
+                let stats = scheme.replay_stats();
+                assert_eq!(stats.fusion_promotions, 1);
+                assert_eq!(stats.records, 2, "recorded once, re-recorded once to promote");
+                let report = scheme.fusion_report();
+                assert_eq!(report.regions.len(), 1);
+                assert_eq!(report.regions[0].status, FusionRegionStatus::Promoted);
+                assert_eq!(report.regions[0].forwarded, 1);
+
+                for f in 4..=8 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("fused frame {f}"))?;
+                }
+                let stats = scheme.replay_stats();
+                assert_eq!(stats.records, 2, "the promoted plan replays");
+                assert_eq!(stats.clean_submits, 6, "frame 2 and frames 4..=8");
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("auto_fusion_compile_failure_runs_unfused_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let _fault = goldy::test_support::FusionCompileFault::install();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let p = buffers(&device, &[input_data(), sentinel(), sentinel()])?;
+                let want = chain_reference(1.0, false);
+                let ctx = device.create_context()?;
+                let mut scheme = fusing(&ctx);
+                record_chain(&mut scheme, &k, &p)?;
+                for f in 1..=5 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.executed_node_count(), 2);
+                let stats = scheme.replay_stats();
+                assert_eq!(stats.fusion_compile_failures, 1);
+                assert_eq!(stats.fusion_promotions, 0);
+                assert_eq!(stats.records, 1);
+                let report = scheme.fusion_report();
+                assert!(
+                    matches!(&report.regions[0].status, FusionRegionStatus::Failed(e) if e.contains("injected")),
+                    "{:?}",
+                    report.regions[0].status
+                );
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("auto_fusion_follows_mutations_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let shift_k = shift::Kernel::prepare(&device)?;
+                let p = buffers(&device, &[input_data(), sentinel(), sentinel(), sentinel()])?;
+                let ctx = device.create_context()?;
+                let mut scheme = fusing(&ctx);
+                let bias_node = record_chain(&mut scheme, &k, &p)?;
+                let mut want = chain_reference(1.0, false);
+                want.push(sentinel());
+                for f in 1..=3 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                assert_eq!(scheme.executed_node_count(), 1);
+
+                // A constituent's scalar reaches the fused dispatch without dropping the plan.
+                scheme.set_node_param(bias_node, 1, 4.0f32.to_bits())?;
+                let mut want = chain_reference(4.0, false);
+                want.push(sentinel());
+                submit_and_check(&mut scheme, &p, &want, "after set_node_param")?;
+                assert_eq!(scheme.executed_node_count(), 1);
+
+                // A neighbour read of the fused output stays unfused; recording drops the
+                // plan, and the cached fused pipeline promotes again once it settles.
+                shift_k
+                    .invoke(&p[2], &p[3], N)
+                    .over_1d(N)
+                    .record(&mut scheme, "shift")?;
+                assert_eq!(scheme.executed_node_count(), 3);
+                let want = chain_reference(4.0, true);
+                submit_and_check(&mut scheme, &p, &want, "settling after shift")?;
+                submit_and_check(&mut scheme, &p, &want, "re-promoted")?;
+                assert_eq!(scheme.executed_node_count(), 2);
+                let stats = scheme.replay_stats();
+                assert_eq!(stats.fusion_fallbacks, 1);
+                assert_eq!(stats.fusion_promotions, 2);
+                let report = scheme.fusion_report();
+                assert!(
+                    matches!(
+                        &report.rejected[..],
+                        [r] if matches!(&r.reason, FusionRejection::NonLocalDependence { stage: 2, .. })
+                    ),
+                    "{:?}",
+                    report.rejected
+                );
+                for f in 1..=3 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("fused with shift, frame {f}"))?;
+                }
                 Ok(())
             }
         }),

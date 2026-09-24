@@ -14,6 +14,7 @@ mod fusion;
 mod prepare;
 
 pub use dispatch::{DispatchBuilder, RecordedDispatch};
+pub(crate) use fusion::{admit, prepare_fused, ArgShape, StageView};
 pub use fusion::{FusedKernel, FusionError, Invocation, InvocationBuilder};
 pub use goldy_shader_ir::{
     AccessKind, BoundTensorDim, BuiltinMask, ElementType, FusedDefinition, FusedStage, FusionRejection, KernelDef,
@@ -21,6 +22,7 @@ pub use goldy_shader_ir::{
     TensorDimSpec, TensorShapeSpec, FUSION_ABI_VERSION, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG,
     TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
+pub(crate) use prepare::access_kind_to_node;
 
 /// Structured shader IR of retained kernel definitions, and its lowering to
 /// `[goldy_compute]` Slang.

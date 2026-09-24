@@ -65,6 +65,7 @@ pub(crate) mod allocation_policy;
 #[cfg(test)]
 mod buffer_alloc_tests;
 pub mod exchange;
+pub(crate) mod fusion_plan;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
@@ -86,6 +87,7 @@ pub use error::GoldyError;
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
 pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
+pub use fusion_plan::{FusionRegion, FusionRegionStatus, FusionReport, RejectedFusion};
 pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
@@ -612,6 +614,33 @@ pub mod test_support {
     /// landed first.
     pub fn wait_for_specialization_compiles(scheme: &mut crate::Scheme) {
         scheme.wait_for_specialization_compiles();
+    }
+
+    /// Make every fused compile a scheme starts on this thread fail until dropped.
+    pub struct FusionCompileFault {
+        _private: (),
+    }
+
+    impl FusionCompileFault {
+        pub fn install() -> Self {
+            crate::validation_env::set_fusion_compile_fault(true);
+            Self { _private: () }
+        }
+    }
+
+    impl Drop for FusionCompileFault {
+        fn drop(&mut self) {
+            crate::validation_env::set_fusion_compile_fault(false);
+        }
+    }
+
+    /// Block until every in-flight fused compile owned by `scheme` has finished.
+    ///
+    /// The planner compiles fused pipelines on worker threads and promotes the plan on a
+    /// later submit; tests that assert a promotion happened by frame N need the compiles
+    /// to have landed first.
+    pub fn wait_for_fusion_compiles(scheme: &mut crate::Scheme) {
+        scheme.wait_for_fusion_compiles();
     }
 
     /// Thread-local pin for `GOLDY_VALIDATION=host_access`.
