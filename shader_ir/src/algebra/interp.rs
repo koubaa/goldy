@@ -2,7 +2,7 @@
 
 use super::affine::{Affine, IndexParam, Sym};
 use super::region::{ParcelId, Region, RegionError, Role, Storage};
-use super::term::{BinaryOp, ScalarParam, Term, UnaryOp};
+use super::term::{BinaryOp, ReduceOrder, ScalarParam, Term, UnaryOp};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -83,8 +83,8 @@ impl Region {
     ///
     /// Every read of an input sees its parcel as of entry. Every output is stored at
     /// exit, so an output sharing storage with an input does not affect reads of it.
-    /// Each reduction combines its terms one by one in ascending index order,
-    /// starting from its identity. Parcel elements no output covers are unchanged.
+    /// Each reduction combines its terms in the association its
+    /// [`ReduceOrder`] names. Parcel elements no output covers are unchanged.
     pub fn evaluate(&self, env: &mut Environment) -> Result<(), EvalError> {
         self.validate().map_err(EvalError::Invalid)?;
         let params = self
@@ -279,14 +279,52 @@ impl Eval<'_> {
                 op,
                 index,
                 extent,
+                order,
                 body,
             } => {
-                let mut acc = op.identity();
-                for k in 0..*extent {
-                    self.idx[index.0 as usize] = i64::from(k);
-                    acc = op.combine(acc, self.term(body)?);
+                let n = i64::from(*extent);
+                let at = |eval: &mut Self, k: i64| {
+                    eval.idx[index.0 as usize] = k;
+                    eval.term(body)
+                };
+                match *order {
+                    ReduceOrder::Sequential => {
+                        let mut acc = op.identity();
+                        for k in 0..n {
+                            acc = op.combine(acc, at(self, k)?);
+                        }
+                        acc
+                    }
+                    ReduceOrder::Lanes { lanes, accumulators } => {
+                        let (lanes, count) = (i64::from(lanes), accumulators as usize);
+                        let step = lanes * count as i64;
+                        let mut partials = Vec::with_capacity(lanes as usize);
+                        for lane in 0..lanes {
+                            let mut accs = vec![op.identity(); count];
+                            let mut j = lane;
+                            while j + (count as i64 - 1) * lanes < n {
+                                for (a, acc) in accs.iter_mut().enumerate() {
+                                    *acc = op.combine(*acc, at(self, j + a as i64 * lanes)?);
+                                }
+                                j += step;
+                            }
+                            for (a, acc) in accs.iter_mut().enumerate().take(count - 1) {
+                                if j + (a as i64) * lanes < n {
+                                    *acc = op.combine(*acc, at(self, j + a as i64 * lanes)?);
+                                }
+                            }
+                            partials.push(accs[1..].iter().fold(accs[0], |p, &acc| op.combine(p, acc)));
+                        }
+                        let mut s = partials.len() / 2;
+                        while s > 0 {
+                            for l in 0..s {
+                                partials[l] = op.combine(partials[l], partials[l + s]);
+                            }
+                            s /= 2;
+                        }
+                        partials[0]
+                    }
                 }
-                acc
             }
         })
     }

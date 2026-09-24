@@ -181,6 +181,12 @@ pub enum FusionRejection {
         bytes: u32,
         max: u32,
     },
+    /// Stage `stage`'s index-notation region does not compose with the stages before
+    /// it, or the composed region cannot be lowered to one kernel.
+    Semantic {
+        stage: usize,
+        reason: String,
+    },
 }
 
 impl fmt::Display for FusionRejection {
@@ -224,6 +230,7 @@ impl fmt::Display for FusionRejection {
             Self::WorkgroupMemory { bytes, max } => {
                 write!(f, "fused entry needs {bytes} workgroup-shared bytes, limit is {max}")
             }
+            Self::Semantic { stage, reason } => write!(f, "stage {stage} does not fuse semantically: {reason}"),
         }
     }
 }

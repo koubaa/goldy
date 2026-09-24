@@ -14,7 +14,7 @@ mod fusion;
 mod prepare;
 
 pub use dispatch::{DispatchBuilder, RecordedDispatch};
-pub(crate) use fusion::{admit, prepare_fused, ArgShape, StageView};
+pub(crate) use fusion::{admit, prepare_fused, prepare_synthesized, ArgShape, StageView, LIMITS};
 pub use fusion::{FusedKernel, FusionError, Invocation, InvocationBuilder};
 pub use goldy_shader_ir::{
     AccessKind, BoundTensorDim, BuiltinMask, ElementType, FusedDefinition, FusedStage, FusionRejection, KernelDef,

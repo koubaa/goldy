@@ -14,6 +14,13 @@ pub struct IndexVar(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndexParam(pub(crate) u32);
 
+impl IndexParam {
+    /// Position among the region's index parameters, in creation order.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A symbol an [`Affine`] expression may mention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Sym {
@@ -85,6 +92,15 @@ impl Affine {
                 Sym::Param(_) => None,
             };
             out = out + replacement.unwrap_or_else(|| Affine::sym(sym)) * coefficient;
+        }
+        out
+    }
+
+    /// Replaces every symbol with `rename(symbol)`.
+    pub fn rename(&self, rename: &dyn Fn(Sym) -> Sym) -> Affine {
+        let mut out = Affine::constant(self.constant);
+        for &(sym, coefficient) in &self.terms {
+            out.insert(rename(sym), coefficient);
         }
         out
     }

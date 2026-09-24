@@ -18,14 +18,23 @@
 //! A region whose fused dispatch forwards a scheme-local temporary ([`crate::Temporary`])
 //! that no node outside the region binds elides it: the temporary lives only in
 //! registers and the fused dispatch does not bind it.
+//!
+//! Nodes that record what they compute in index notation (`semantic_fusion.rs`) are
+//! matched first. A maximal run of adjacent ones whose regions compose and lower to one
+//! kernel runs as that synthesized kernel ([`FusionTier::Semantic`]); this reaches
+//! matrix products, reductions and relocations, whose grids differ from their
+//! consumers'. The remaining nodes are matched by composing kernel bodies.
 
 use crate::backend::ComputePipelineHandle;
-use crate::kernel::{access_kind_to_node, admit, prepare_fused, ArgShape, PreparedKernel, StageView};
+use crate::kernel::{
+    access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
+};
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
+use crate::semantic_fusion::{lift_kernel, synthesize, SemanticProgram, SemanticSite};
 use crate::shader::ShaderProvenance;
 use crate::task_graph::{
-    DispatchDim, GraphIR, GroupInfo, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId,
+    DispatchDim, GraphIR, GroupInfo, NodeAccess, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId,
 };
 use crate::temporary::{TemporaryUse, TEMPORARY_SLOT_PLACEHOLDER};
 use crate::types::ResourceAccess;
@@ -158,12 +167,24 @@ pub struct FusionRegion {
     pub labels: Vec<SchemeLabel>,
     /// Identity of the fused program.
     pub kernel: KernelId,
+    pub tier: FusionTier,
     /// Parcels whose values the fused dispatch forwards between constituents in registers.
     pub forwarded: usize,
     /// Forwarded scheme-local temporaries that exist only in registers: the fused
     /// dispatch never stores them and binds no storage for them.
     pub elided: usize,
     pub status: FusionRegionStatus,
+}
+
+/// How a [`FusionRegion`]'s fused program is derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionTier {
+    /// The constituents' kernel bodies, composed on one grid by
+    /// [`crate::kernel::FusedKernel`] admission.
+    Composed,
+    /// A kernel synthesized from what the constituents compute in index notation. It
+    /// may run on a grid none of them uses, and stores what they store, bit for bit.
+    Semantic,
 }
 
 /// Whether a [`FusionRegion`] runs fused.
@@ -210,8 +231,8 @@ pub(crate) struct Plan {
 pub(crate) struct FusedNode {
     pub(crate) exec: u32,
     pub(crate) nodes: Range<usize>,
-    /// Per constituent: the fused user slot each of its user slots binds.
-    scalar_slots: Vec<Vec<usize>>,
+    /// Per constituent: the fused user slot each of its user slots binds, if any.
+    scalar_slots: Vec<Vec<Option<usize>>>,
     pub(crate) kernel: Arc<PreparedKernel>,
 }
 
@@ -230,11 +251,15 @@ impl Plan {
     }
 
     /// Executed node and user slot that user slot `slot` of recorded `node` runs as.
+    ///
+    /// `None` when a fused dispatch does not read the slot.
     pub(crate) fn executed_param(&self, node: usize, slot: usize) -> Option<(usize, usize)> {
         match self.fused_of(node) {
             Some(f) => f.scalar_slots[node - f.nodes.start]
                 .get(slot)
-                .map(|&s| (f.exec as usize, s)),
+                .copied()
+                .flatten()
+                .map(|s| (f.exec as usize, s)),
             None => self.exec_of(node).map(|e| (e as usize, slot)),
         }
     }
@@ -254,9 +279,47 @@ enum Phase {
 
 struct Region {
     nodes: Range<usize>,
-    definition: FusedDefinition,
+    program: Program,
     id: KernelId,
     status: FusionRegionStatus,
+}
+
+/// The fused program of a [`Region`].
+#[derive(Clone)]
+enum Program {
+    Composed(FusedDefinition),
+    Semantic(Arc<SemanticProgram>),
+}
+
+impl Program {
+    fn name(&self) -> &str {
+        match self {
+            Program::Composed(definition) => &definition.name,
+            Program::Semantic(program) => &program.lowered.kernel.name,
+        }
+    }
+
+    fn tier(&self) -> FusionTier {
+        match self {
+            Program::Composed(_) => FusionTier::Composed,
+            Program::Semantic(_) => FusionTier::Semantic,
+        }
+    }
+
+    /// Forwarded values and elided temporaries.
+    fn locality(&self) -> (usize, usize) {
+        match self {
+            Program::Composed(definition) => (definition.forwarded.len(), definition.elided.len()),
+            Program::Semantic(program) => (program.forwarded, 0),
+        }
+    }
+
+    fn compile(&self, device: &Runtime) -> anyhow::Result<PreparedKernel> {
+        match self {
+            Program::Composed(definition) => prepare_fused(device, definition),
+            Program::Semantic(program) => prepare_synthesized(device, &program.def, program.scalar_origins()),
+        }
+    }
 }
 
 struct Rejection {
@@ -335,6 +398,18 @@ impl FusionPlanner {
         self.regions.iter().any(|r| r.nodes.contains(&node))
     }
 
+    /// Whether a planned or promoted region depends on the value user slot `slot` of
+    /// recorded `node` holds now, rather than binding the slot.
+    pub(crate) fn bakes(&self, node: usize, slot: usize) -> bool {
+        self.regions.iter().any(|r| {
+            r.nodes.contains(&node)
+                && match &r.program {
+                    Program::Composed(_) => false,
+                    Program::Semantic(p) => !p.scalars.contains(&(node - r.nodes.start, slot)),
+                }
+        })
+    }
+
     pub(crate) fn end_submit(&mut self) {
         if self.phase == Phase::Settling {
             self.phase = Phase::Unplanned;
@@ -356,10 +431,11 @@ impl FusionPlanner {
         device: &Runtime,
         ir: &GraphIR,
         sites: &HashMap<u32, KernelSite>,
+        semantic: &HashMap<u32, SemanticSite>,
         temporaries: &[TemporaryUse],
     ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
-            self.match_regions(ir, sites, temporaries);
+            self.match_regions(ir, sites, semantic, temporaries);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;
                 return None;
@@ -383,7 +459,13 @@ impl FusionPlanner {
 
         let mut fused = Vec::new();
         for (region, outcome) in self.regions.iter_mut().zip(outcomes) {
-            let built = outcome.and_then(|kernel| fused_node(ir, sites, region, &kernel).map(|node| (node, kernel)));
+            let built = outcome.and_then(|kernel| {
+                let node = match &region.program {
+                    Program::Composed(definition) => fused_node(ir, sites, region.nodes.clone(), definition, &kernel),
+                    Program::Semantic(program) => semantic_node(ir, region.nodes.clone(), program, &kernel),
+                };
+                node.map(|node| (node, kernel))
+            });
             match built {
                 Ok((node, kernel)) => {
                     region.status = FusionRegionStatus::Promoted;
@@ -398,7 +480,7 @@ impl FusionPlanner {
                         self.events.compile_failures += 1;
                     }
                     tracing::warn!(
-                        kernel = %region.definition.name,
+                        kernel = %region.program.name(),
                         id = %region.id,
                         %err,
                         "kernel fusion: region stays unfused"
@@ -415,11 +497,22 @@ impl FusionPlanner {
         Some(assemble(ir, fused, temporaries))
     }
 
-    /// Greedily grow maximal admissible runs of adjacent kernel sites in one group.
-    fn match_regions(&mut self, ir: &GraphIR, sites: &HashMap<u32, KernelSite>, temporaries: &[TemporaryUse]) {
+    /// Greedily grow maximal runs of adjacent sites in one group: semantic sites whose
+    /// regions synthesize one kernel, then admissible kernel sites among the rest.
+    fn match_regions(
+        &mut self,
+        ir: &GraphIR,
+        sites: &HashMap<u32, KernelSite>,
+        semantic: &HashMap<u32, SemanticSite>,
+        temporaries: &[TemporaryUse],
+    ) {
         self.regions.clear();
         self.rejected.clear();
+        let taken = self.match_semantic(ir, sites, semantic);
         let view = |i: usize| -> Option<StageView<'_>> {
+            if taken[i] {
+                return None;
+            }
             let site = sites.get(&(i as u32))?;
             let NodeKind::Dispatch {
                 dispatch: DispatchDim::Direct { x, y, z },
@@ -470,7 +563,7 @@ impl FusionPlanner {
                     self.regions.push(Region {
                         nodes: start..end,
                         id: definition.id(),
-                        definition,
+                        program: Program::Composed(definition),
                         status: FusionRegionStatus::Compiling,
                     });
                     start = end;
@@ -478,6 +571,73 @@ impl FusionPlanner {
                 None => start += 1,
             }
         }
+        self.regions.sort_by_key(|r| r.nodes.start);
+        self.rejected.sort_by_key(|r| r.nodes.start);
+    }
+
+    /// Plan the semantic regions; returns which nodes they take.
+    ///
+    /// A generated kernel joins a run when [`lift_kernel`] describes it. A run needs a
+    /// recorded site: a run of generated kernels alone is the composed tier's.
+    fn match_semantic(
+        &mut self,
+        ir: &GraphIR,
+        sites: &HashMap<u32, KernelSite>,
+        semantic: &HashMap<u32, SemanticSite>,
+    ) -> Vec<bool> {
+        let n = ir.nodes.len();
+        let lifted: HashMap<usize, SemanticSite> = sites
+            .iter()
+            .filter(|(i, _)| !semantic.contains_key(i))
+            .filter_map(|(&i, site)| Some((i as usize, lift_kernel(site, ir.nodes.get(i as usize)?)?)))
+            .collect();
+        let site = |i: usize| semantic.get(&(i as u32)).or_else(|| lifted.get(&i));
+        let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic.contains_key(&(i as u32)));
+        let mut taken = vec![false; n];
+        let mut start = 0;
+        while start < n {
+            let Some(first) = site(start) else {
+                start += 1;
+                continue;
+            };
+            let mut run = vec![first];
+            let mut best = None;
+            let mut end = start + 1;
+            while end < n && ir.nodes[end].group == ir.nodes[start].group {
+                let Some(next) = site(end) else { break };
+                run.push(next);
+                match synthesize(&run) {
+                    Ok(program) => {
+                        best = Some(program);
+                        end += 1;
+                    }
+                    Err(reason) => {
+                        if recorded(start..end + 1) && !self.rejected.iter().any(|r| r.nodes.end == end + 1) {
+                            tracing::debug!(%reason, first = start, next = end, "semantic fusion: run ends");
+                            self.rejected.push(Rejection {
+                                nodes: start..end + 1,
+                                reason,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+            match best.filter(|_| recorded(start..end)) {
+                Some(program) => {
+                    taken[start..end].fill(true);
+                    self.regions.push(Region {
+                        nodes: start..end,
+                        id: program.id(),
+                        program: Program::Semantic(Arc::new(program)),
+                        status: FusionRegionStatus::Compiling,
+                    });
+                    start = end;
+                }
+                None => start += 1,
+            }
+        }
+        taken
     }
 
     fn request_compiles(&mut self, device: &Runtime) {
@@ -489,25 +649,25 @@ impl FusionPlanner {
                     continue;
                 }
             }
+            let (forwarded, elided) = region.program.locality();
             tracing::debug!(
-                kernel = %region.definition.name,
+                kernel = %region.program.name(),
                 id = %region.id,
-                stages = region.definition.stages.len(),
-                forwarded = region.definition.forwarded.len(),
-                elided = region.definition.elided.len(),
+                tier = ?region.program.tier(),
+                stages = region.nodes.len(),
+                forwarded,
+                elided,
                 "kernel fusion: compiling"
             );
             let device = device.clone();
-            let definition = region.definition.clone();
+            let program = region.program.clone();
             let compiles = Arc::clone(&self.compiles);
             let id = region.id;
             let spawned = std::thread::Builder::new().name("goldy-fuse".into()).spawn(move || {
                 let outcome = if fault {
                     Err("injected fused compile failure".to_string())
                 } else {
-                    prepare_fused(&device, &definition)
-                        .map(Arc::new)
-                        .map_err(|e| format!("{e:#}"))
+                    program.compile(&device).map(Arc::new).map_err(|e| format!("{e:#}"))
                 };
                 let mut compiles = compiles.lock().unwrap();
                 compiles.running.remove(&id);
@@ -531,13 +691,17 @@ impl FusionPlanner {
             regions: self
                 .regions
                 .iter()
-                .map(|r| FusionRegion {
-                    nodes: nodes(&r.nodes),
-                    labels: labels(&r.nodes),
-                    kernel: r.id,
-                    forwarded: r.definition.forwarded.len(),
-                    elided: r.definition.elided.len(),
-                    status: r.status.clone(),
+                .map(|r| {
+                    let (forwarded, elided) = r.program.locality();
+                    FusionRegion {
+                        nodes: nodes(&r.nodes),
+                        labels: labels(&r.nodes),
+                        kernel: r.id,
+                        tier: r.program.tier(),
+                        forwarded,
+                        elided,
+                        status: r.status.clone(),
+                    }
                 })
                 .collect(),
             rejected: self
@@ -598,23 +762,23 @@ fn elide_local_temporaries(
 /// An executed fused dispatch before it has a position in the plan.
 struct DraftNode {
     node: TaskNode,
-    /// Per constituent: the fused user slot each of its user slots binds.
-    scalar_slots: Vec<Vec<usize>>,
+    /// Per constituent: the fused user slot each of its user slots binds, if any.
+    scalar_slots: Vec<Vec<Option<usize>>>,
     /// Temporaries `node` binds; assembly fills in the node index.
     temporaries: Vec<TemporaryUse>,
 }
 
-/// The executed node of `region`.
+/// The executed node of the composed region over `nodes`.
 fn fused_node(
     ir: &GraphIR,
     sites: &HashMap<u32, KernelSite>,
-    region: &Region,
+    nodes: Range<usize>,
+    definition: &FusedDefinition,
     kernel: &PreparedKernel,
 ) -> Result<DraftNode, String> {
-    let definition = &region.definition;
     let pipeline = kernel.pipeline();
-    let mut constituents = Vec::with_capacity(region.nodes.len());
-    for i in region.nodes.clone() {
+    let mut constituents = Vec::with_capacity(nodes.len());
+    for i in nodes.clone() {
         let site = sites.get(&(i as u32)).ok_or("constituent lost its kernel site")?;
         let NodeKind::Dispatch {
             resource_slots,
@@ -632,7 +796,7 @@ fn fused_node(
     let mut resource_slots = Vec::new();
     let mut user_slots = Vec::new();
     let mut temporaries = Vec::new();
-    let mut scalar_slots: Vec<Vec<usize>> = constituents.iter().map(|c| vec![0; c.2.len()]).collect();
+    let mut scalar_slots: Vec<Vec<Option<usize>>> = constituents.iter().map(|c| vec![None; c.2.len()]).collect();
     for (j, param) in definition.params.iter().enumerate() {
         if definition.elided.contains(&j) {
             continue;
@@ -683,20 +847,14 @@ fn fused_node(
             let SiteArg::Scalar { slot } = constituents[k].0.args[i] else {
                 return Err(format!("scalar `{}` binds a resource argument", param.name));
             };
-            scalar_slots[k][slot] = user_slots.len();
+            scalar_slots[k][slot] = Some(user_slots.len());
             user_slots.push(constituents[k].2[slot]);
         }
     }
 
-    let first = &ir.nodes[region.nodes.start];
-    let label = region
-        .nodes
-        .clone()
-        .map(|i| ir.nodes[i].label.as_str())
-        .collect::<Vec<_>>()
-        .join("+");
+    let first = &ir.nodes[nodes.start];
     let node = TaskNode {
-        label: label.into(),
+        label: joined_label(ir, nodes).into(),
         group: first.group,
         bindings,
         kind: NodeKind::Dispatch {
@@ -710,6 +868,93 @@ fn fused_node(
         node,
         scalar_slots,
         temporaries,
+    })
+}
+
+fn joined_label(ir: &GraphIR, nodes: Range<usize>) -> String {
+    nodes.map(|i| ir.nodes[i].label.as_str()).collect::<Vec<_>>().join("+")
+}
+
+/// The executed node of the semantic region over `nodes`.
+///
+/// It keeps every binding of the constituents on a parcel the program names, so
+/// dependences and parcel stamps stay what the constituents declared; record-constant
+/// operands the synthesized kernel does not read are dropped.
+fn semantic_node(
+    ir: &GraphIR,
+    nodes: Range<usize>,
+    program: &SemanticProgram,
+    kernel: &PreparedKernel,
+) -> Result<DraftNode, String> {
+    let pipeline = kernel.pipeline();
+    let mut bindings: Vec<ResourceBinding> = Vec::new();
+    for i in nodes.clone() {
+        for binding in &ir.nodes[i].bindings {
+            let parent = match binding.resource {
+                ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
+                _ => continue,
+            };
+            if !program.parcels.iter().any(|p| p.buffer == parent) {
+                continue;
+            }
+            match bindings.iter_mut().find(|b| b.resource == binding.resource) {
+                Some(b) if b.access != binding.access => b.access = NodeAccess::ReadWrite,
+                Some(_) => {}
+                None => bindings.push(binding.clone()),
+            }
+        }
+    }
+
+    let mut resource_slots = Vec::with_capacity(program.lowered.parcels.len());
+    for (at, &(parcel, written)) in program.lowered.parcels.iter().enumerate() {
+        let site = program.parcels[parcel.0 as usize];
+        let uav = pipeline.slot_access.get(at).copied().flatten().map_or(written, is_uav);
+        let slot = if uav { site.uav } else { site.srv };
+        resource_slots.push(slot.ok_or_else(|| {
+            let view = if uav { "writable" } else { "read-only" };
+            format!("a parcel of the synthesized kernel has no {view} view")
+        })?);
+    }
+
+    let mut scalar_slots: Vec<Vec<Option<usize>>> = nodes
+        .clone()
+        .map(|i| match &ir.nodes[i].kind {
+            NodeKind::Dispatch { user_slots, .. } => vec![None; user_slots.len()],
+            _ => Vec::new(),
+        })
+        .collect();
+    let mut user_slots = Vec::with_capacity(program.lowered.scalars.len());
+    for s in &program.lowered.scalars {
+        let (k, slot) = program.scalars[s.index()];
+        let NodeKind::Dispatch {
+            user_slots: recorded, ..
+        } = &ir.nodes[nodes.start + k].kind
+        else {
+            return Err("a scalar of the synthesized kernel binds no dispatch".into());
+        };
+        let value = *recorded
+            .get(slot)
+            .ok_or("a scalar of the synthesized kernel binds a missing slot")?;
+        scalar_slots[k][slot] = Some(user_slots.len());
+        user_slots.push(value);
+    }
+
+    let [x, y, z] = program.lowered.groups;
+    let node = TaskNode {
+        label: joined_label(ir, nodes.clone()).into(),
+        group: ir.nodes[nodes.start].group,
+        bindings,
+        kind: NodeKind::Dispatch {
+            pipeline: pipeline.handle,
+            resource_slots,
+            user_slots,
+            dispatch: DispatchDim::Direct { x, y, z },
+        },
+    };
+    Ok(DraftNode {
+        node,
+        scalar_slots,
+        temporaries: Vec::new(),
     })
 }
 

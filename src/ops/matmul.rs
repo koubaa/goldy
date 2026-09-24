@@ -338,6 +338,8 @@ pub(crate) struct BoundOperand {
     pub operand: MatMulOperand,
     pub resource: crate::task_graph::ResourceId,
     pub slot: u32,
+    /// The operand's buffer as a semantic parcel, when `slot` is its whole-buffer view.
+    pub parcel: Option<crate::semantic_fusion::SiteParcel>,
 }
 
 impl<'a> MatMulBuilder<'a> {
@@ -455,8 +457,17 @@ impl<'a> MatMulBuilder<'a> {
         } else {
             NodeAccess::ReadWrite
         };
+        let site = || {
+            let operands = [
+                (&a.operand, a.parcel?),
+                (&b.operand, b.parcel?),
+                (&c.operand, c.parcel?),
+            ];
+            crate::semantic_fusion::matmul(&self.desc, fallback, operands)
+        };
+        let site = if native { None } else { site() };
         self.scheme
-            .push_matmul_node(self.label, self.desc, a, b, c, c_access, native, fallback);
+            .push_matmul_node(self.label, self.desc, a, b, c, c_access, native, fallback, site);
     }
 }
 
@@ -492,6 +503,10 @@ fn bind_operand(
     if leading_dim == 0 {
         return Err("matmul: leading dimension must be greater than zero".into());
     }
+    let parcel = bindable
+        .buffer_parcel()
+        .and_then(|p| crate::semantic_fusion::SiteParcel::of(&p))
+        .filter(|p| p.buffer == buffer && (p.srv == Some(slot) || p.uav == Some(slot)));
     Ok(BoundOperand {
         operand: MatMulOperand {
             buffer,
@@ -500,6 +515,7 @@ fn bind_operand(
         },
         resource,
         slot,
+        parcel,
     })
 }
 

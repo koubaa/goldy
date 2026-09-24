@@ -228,6 +228,7 @@ fn hoist_select(term: Term, applied: &mut usize) -> Term {
             op,
             index,
             extent,
+            order,
             body,
         } => match *body {
             Term::Select {
@@ -240,11 +241,11 @@ fn hoist_select(term: Term, applied: &mut usize) -> Term {
                 lhs,
                 cmp,
                 rhs,
-                Term::reduce(op, index, extent, *then),
-                Term::reduce(op, index, extent, *otherwise),
+                Term::reduce_in(op, order, index, extent, *then),
+                Term::reduce_in(op, order, index, extent, *otherwise),
                 applied,
             ),
-            body => Term::reduce(op, index, extent, body),
+            body => Term::reduce_in(op, order, index, extent, body),
         },
         other => other,
     }

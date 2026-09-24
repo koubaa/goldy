@@ -757,6 +757,8 @@ pub(crate) struct SchemeDesc {
     present_transactions: Vec<PresentTransactionInfo>,
     /// Generated-kernel dispatches automatic fusion may fuse, keyed by node index.
     kernel_sites: HashMap<u32, crate::fusion_plan::KernelSite>,
+    /// What recorded nodes compute in index notation, keyed by node index.
+    semantic_sites: HashMap<u32, crate::semantic_fusion::SemanticSite>,
     /// Temporaries declared by [`Scheme::temporary_buffer`], indexed by id.
     temporaries: Vec<TemporaryDecl>,
     /// Every recorded binding of a temporary. Lowering patches these positions of the
@@ -768,6 +770,7 @@ impl SchemeDesc {
     fn new() -> Self {
         Self {
             kernel_sites: HashMap::new(),
+            semantic_sites: HashMap::new(),
             temporaries: Vec::new(),
             temporary_uses: Vec::new(),
             ir: GraphIR::default(),
@@ -1168,6 +1171,9 @@ impl Scheme {
         for (&node, site) in &child.desc.kernel_sites {
             self.desc.kernel_sites.insert(node + node_offset as u32, site.clone());
         }
+        for (&node, site) in &child.desc.semantic_sites {
+            self.desc.semantic_sites.insert(node + node_offset as u32, site.clone());
+        }
         let offset = node_offset as u32;
         match child.fusion.plan() {
             None => self
@@ -1269,6 +1275,7 @@ impl Scheme {
             &device,
             &self.desc.ir,
             &self.desc.kernel_sites,
+            &self.desc.semantic_sites,
             &self.desc.temporary_uses,
         ) {
             self.promote_fusion_plan(plan);
@@ -2086,6 +2093,16 @@ impl Scheme {
         self.record_errors.push(msg);
     }
 
+    /// Record what `node` computes, for semantic fusion.
+    #[cfg(feature = "tensor")]
+    pub(crate) fn record_semantic_site(&mut self, node: NodeId, site: Option<crate::semantic_fusion::SemanticSite>) {
+        if let Some(site) = site {
+            if node.scheme_id == self.scheme_id {
+                self.desc.semantic_sites.insert(node.index, site);
+            }
+        }
+    }
+
     pub(crate) fn backend_type(&self) -> crate::types::BackendType {
         self.ctx.runtime().backend_type()
     }
@@ -2105,8 +2122,12 @@ impl Scheme {
         c_access: NodeAccess,
         native: bool,
         fallback: crate::ops::matmul::MatMulFallback,
+        site: Option<crate::semantic_fusion::SemanticSite>,
     ) {
         self.mark_structure_dirty();
+        if let Some(site) = site {
+            self.desc.semantic_sites.insert(self.desc.ir.nodes.len() as u32, site);
+        }
         self.desc.ir.nodes.push(TaskNode {
             group: None,
             label,
@@ -2192,6 +2213,7 @@ impl Scheme {
             self.replan_fusion();
         }
         self.desc.kernel_sites.remove(&(node.index() as u32));
+        self.desc.semantic_sites.remove(&(node.index() as u32));
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
                 pipeline: slot,
@@ -2300,6 +2322,8 @@ impl Scheme {
             if self.fusion.involves(node.index()) {
                 self.replan_fusion();
             }
+            // A site's region spans the grid it was recorded with.
+            self.desc.semantic_sites.remove(&(node.index() as u32));
             let exec = self.executed_node(node.index());
             if let Some(plan) = self.fusion.plan_mut() {
                 if let NodeKind::Dispatch { dispatch, .. } = &mut plan.ir.nodes[exec].kind {
@@ -2338,19 +2362,24 @@ impl Scheme {
             _ => false,
         };
         if changed {
-            let (exec, slot) = self
-                .fusion
-                .plan()
-                .and_then(|plan| plan.executed_param(node.index(), param_index))
-                .unwrap_or((node.index(), param_index));
-            let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
-            if let NodeKind::Dispatch { user_slots, .. } = &mut ir.nodes[exec].kind {
-                user_slots[slot] = value;
+            if self.fusion.bakes(node.index(), param_index) {
+                self.replan_fusion();
             }
-            if let Some(universal) = self.specialization.on_param_changed(exec as u32, slot) {
+            // A fused dispatch may not bind the slot at all.
+            let executed = match self.fusion.plan() {
+                Some(plan) => plan.executed_param(node.index(), param_index),
+                None => Some((node.index(), param_index)),
+            };
+            if let Some((exec, slot)) = executed {
                 let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
-                if let NodeKind::Dispatch { pipeline, .. } = &mut ir.nodes[exec].kind {
-                    *pipeline = universal;
+                if let NodeKind::Dispatch { user_slots, .. } = &mut ir.nodes[exec].kind {
+                    user_slots[slot] = value;
+                }
+                if let Some(universal) = self.specialization.on_param_changed(exec as u32, slot) {
+                    let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
+                    if let NodeKind::Dispatch { pipeline, .. } = &mut ir.nodes[exec].kind {
+                        *pipeline = universal;
+                    }
                 }
             }
             self.mark_params_dirty();
