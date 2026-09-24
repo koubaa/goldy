@@ -9,6 +9,7 @@ use super::kernels::{
     OP_SCATTER_MIN, OP_SCATTER_SET, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
 };
 use super::layout::GoldyTensorLayout;
+use super::semantic;
 use super::shape::TensorShape;
 use super::view::{broadcast_shapes, Tensor, TensorView};
 use super::MAX_TENSOR_RANK;
@@ -157,7 +158,8 @@ impl<'a> TensorRecorder<'a> {
         let meta_buf = self.intern_meta(meta)?;
         let n = out.numel_u32().max(1);
         if out.dtype() == TensorDType::F32 {
-            self.kernels
+            let node = self
+                .kernels
                 .ops
                 .unary
                 .record(
@@ -168,7 +170,9 @@ impl<'a> TensorRecorder<'a> {
                     &*meta_buf,
                     value.as_f32()?,
                 )
-                .over_1d(n);
+                .over_1d(n)
+                .node();
+            self.scheme.record_semantic_site(node, semantic::fill(out));
         } else {
             self.kernels
                 .ops
@@ -187,11 +191,14 @@ impl<'a> TensorRecorder<'a> {
         let src = src.broadcast_to(dst.shape())?;
         let meta = encode_meta(OP_COPY, 0, 0, 0, Some(src), None, Some(dst))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .copy
             .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf, 0)
-            .over_1d(dst.numel_u32().max(1));
+            .over_1d(dst.numel_u32().max(1))
+            .node();
+        self.scheme.record_semantic_site(node, semantic::copy(src, dst));
         Ok(())
     }
 
@@ -407,7 +414,8 @@ impl<'a> TensorRecorder<'a> {
         };
         let meta = encode_meta(op, axis as u32, 0, 0, Some(src), Some(index), Some(dst))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .scatter
             .record(
@@ -418,7 +426,12 @@ impl<'a> TensorRecorder<'a> {
                 dst.buffer(),
                 &*meta_buf,
             )
-            .groups([1, 1, 1]);
+            .groups([1, 1, 1])
+            .node();
+        if mode == ScatterMode::UniqueWrite {
+            self.scheme
+                .record_semantic_site(node, semantic::scatter_slice(src, index, dst, axis));
+        }
         Ok(())
     }
 
@@ -435,11 +448,14 @@ impl<'a> TensorRecorder<'a> {
         dst.dtype().require_f32("unary")?;
         let meta = encode_meta(op, 0, 0, 0, Some(src), None, Some(dst))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .unary
             .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf, 0.0)
-            .over_1d(dst.numel_u32().max(1));
+            .over_1d(dst.numel_u32().max(1))
+            .node();
+        self.scheme.record_semantic_site(node, semantic::unary(op, src, dst));
         Ok(())
     }
 
@@ -468,7 +484,8 @@ impl<'a> TensorRecorder<'a> {
         let b = b.broadcast_to(out.shape())?;
         let meta = encode_meta(op, 0, 0, 0, Some(a), Some(b), Some(out))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .binary
             .record(
@@ -480,7 +497,9 @@ impl<'a> TensorRecorder<'a> {
                 &*meta_buf,
                 0.0,
             )
-            .over_1d(out.numel_u32().max(1));
+            .over_1d(out.numel_u32().max(1))
+            .node();
+        self.scheme.record_semantic_site(node, semantic::binary(op, a, b, out));
         Ok(())
     }
 
@@ -489,7 +508,8 @@ impl<'a> TensorRecorder<'a> {
         let out = Tensor::zeros(&self.kernels.runtime, a.shape(), TensorDType::F32)?;
         let meta = encode_meta(op, 0, scalar.to_bits(), 0, Some(a), None, Some(out.view()))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .binary
             .record(
@@ -501,7 +521,10 @@ impl<'a> TensorRecorder<'a> {
                 &*meta_buf,
                 scalar,
             )
-            .over_1d(out.view().numel_u32().max(1));
+            .over_1d(out.view().numel_u32().max(1))
+            .node();
+        self.scheme
+            .record_semantic_site(node, semantic::binary(op, a, a, out.view()));
         Ok(out)
     }
 
@@ -529,11 +552,15 @@ impl<'a> TensorRecorder<'a> {
         let kernel_view = TensorView::new(out.buffer(), kernel_layout)?;
         let meta = encode_meta(op, axis as u32, 0, reduce_len, Some(src), None, Some(kernel_view))?;
         let meta_buf = self.intern_meta(meta)?;
-        self.kernels
+        let node = self
+            .kernels
             .ops
             .reduce
             .record(self.scheme, label, src.buffer(), out.buffer(), &*meta_buf)
-            .over_1d(kernel_view.numel_u32().max(1));
+            .over_1d(kernel_view.numel_u32().max(1))
+            .node();
+        self.scheme
+            .record_semantic_site(node, semantic::reduce(op, src, axis, kernel_view));
         Ok(out)
     }
 }

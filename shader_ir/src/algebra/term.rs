@@ -12,6 +12,13 @@ pub struct ValueId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScalarParam(pub(crate) u32);
 
+impl ScalarParam {
+    /// Position among the region's scalar parameters, in creation order.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
@@ -39,6 +46,26 @@ pub enum ReduceOp {
     Sum,
     Max,
     Min,
+}
+
+/// The association in which a reduction combines its terms.
+///
+/// Part of the term, because floating-point combination is not associative: two
+/// reductions with the same terms in different orders are different terms. A schedule
+/// must realize the order a reduction names; changing it is
+/// [`Exactness::ReductionOrder`](super::Exactness::ReductionOrder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ReduceOrder {
+    /// One accumulator, from the identity, in ascending index order.
+    #[default]
+    Sequential,
+    /// `lanes` partial reductions, then a pairwise tree over them.
+    ///
+    /// Lane `l` owns indices `l, l + lanes, l + 2·lanes, …`, dealt round-robin over
+    /// `accumulators` accumulators that each start from the identity; its partial is
+    /// the left fold of its accumulators. The tree then combines partial `l` with
+    /// partial `l + s` for `s = lanes/2, lanes/4, …, 1`. `lanes` is a power of two.
+    Lanes { lanes: u32, accumulators: u32 },
 }
 
 impl ReduceOp {
@@ -110,11 +137,12 @@ pub enum Term {
         then: Box<Term>,
         otherwise: Box<Term>,
     },
-    /// `op` over `body` for `index` in `0..extent`, in ascending order.
+    /// `op` over `body` for `index` in `0..extent`, combined in `order`.
     Reduce {
         op: ReduceOp,
         index: IndexVar,
         extent: u32,
+        order: ReduceOrder,
         body: Box<Term>,
     },
 }
@@ -170,11 +198,17 @@ impl Term {
         }
     }
 
+    /// A [`ReduceOrder::Sequential`] reduction.
     pub fn reduce(op: ReduceOp, index: IndexVar, extent: u32, body: Term) -> Term {
+        Term::reduce_in(op, ReduceOrder::Sequential, index, extent, body)
+    }
+
+    pub fn reduce_in(op: ReduceOp, order: ReduceOrder, index: IndexVar, extent: u32, body: Term) -> Term {
         Term::Reduce {
             op,
             index,
             extent,
+            order,
             body: Box::new(body),
         }
     }
@@ -384,11 +418,13 @@ impl Term {
                 op,
                 index,
                 extent,
+                order,
                 body,
             } => Term::Reduce {
                 op,
                 index,
                 extent,
+                order,
                 body: Box::new(f(*body)),
             },
         }
@@ -399,6 +435,46 @@ impl Term {
         match self.map_children(&mut |c| c.map_reads(&mut *f)) {
             Term::Read { value, index } => f(value, index),
             other => other,
+        }
+    }
+
+    /// Renames every symbol, scalar and read value; for moving a term between regions.
+    pub(crate) fn rename(
+        &self,
+        sym: &dyn Fn(Sym) -> Sym,
+        scalar: &dyn Fn(ScalarParam) -> ScalarParam,
+        value: &dyn Fn(ValueId) -> ValueId,
+    ) -> Term {
+        let go = |t: &Term| t.rename(sym, scalar, value);
+        match self {
+            Term::Lit(_) => self.clone(),
+            Term::Scalar(s) => Term::Scalar(scalar(*s)),
+            Term::IndexValue(a) => Term::IndexValue(a.rename(sym)),
+            Term::Read { value: v, index } => Term::Read {
+                value: value(*v),
+                index: index.iter().map(|a| a.rename(sym)).collect(),
+            },
+            Term::Unary { op, arg } => Term::unary(*op, go(arg)),
+            Term::Binary { op, lhs, rhs } => Term::binary(*op, go(lhs), go(rhs)),
+            Term::Select {
+                lhs,
+                cmp,
+                rhs,
+                then,
+                otherwise,
+            } => Term::select(lhs.rename(sym), *cmp, rhs.rename(sym), go(then), go(otherwise)),
+            Term::Reduce {
+                op,
+                index,
+                extent,
+                order,
+                body,
+            } => {
+                let Sym::Index(index) = sym(Sym::Index(*index)) else {
+                    unreachable!("an index variable renames to an index variable")
+                };
+                Term::reduce_in(*op, *order, index, *extent, go(body))
+            }
         }
     }
 
@@ -439,9 +515,11 @@ impl Term {
                 op,
                 index,
                 extent,
+                order,
                 body,
-            } => Term::reduce(
+            } => Term::reduce_in(
                 *op,
+                *order,
                 binders.get(index).copied().unwrap_or(*index),
                 *extent,
                 body.instantiate(free, binders),
@@ -499,16 +577,18 @@ fn alpha_eq(a: &Term, b: &Term, pairs: &mut Vec<(IndexVar, IndexVar)>) -> bool {
                 op: p,
                 index: x,
                 extent: m,
+                order: s,
                 body: xb,
             },
             Term::Reduce {
                 op: q,
                 index: y,
                 extent: n,
+                order: t,
                 body: yb,
             },
         ) => {
-            if p != q || m != n {
+            if p != q || m != n || s != t {
                 return false;
             }
             pairs.push((*x, *y));

@@ -51,6 +51,13 @@ fn matmul_f32(
 /// Rows reduced by one [`gemv_f32`] workgroup: 128 threads, 32 lanes per row.
 pub const GEMV_ROWS_PER_GROUP: u32 = 4;
 
+/// The association in which [`gemv_f32`] sums a row: 32 lanes with two strided
+/// accumulators each, then a tree over the lanes.
+pub(crate) const GEMV_ORDER: goldy_shader_ir::algebra::ReduceOrder = goldy_shader_ir::algebra::ReduceOrder::Lanes {
+    lanes: 32,
+    accumulators: 2,
+};
+
 /// Row-major `y[i] = sum_j A[i, j] * x[j]` with explicit leading dimension and strides.
 ///
 /// Each row is reduced by 32 lanes reading consecutive columns, so loads coalesce and

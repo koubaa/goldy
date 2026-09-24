@@ -19,7 +19,7 @@ use goldy_shader_ir::{
     PORTABLE_WORKGROUP_BYTES,
 };
 
-const LIMITS: FusionLimits = FusionLimits {
+pub(crate) const LIMITS: FusionLimits = FusionLimits {
     resources: MAX_BINDLESS_SLOTS,
     scalars: MAX_USER_SLOTS,
     workgroup_bytes: PORTABLE_WORKGROUP_BYTES,
@@ -355,6 +355,20 @@ pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> a
         forwarded = definition.forwarded.len(),
         "kernel fusion prepared"
     );
+    Ok(prepared)
+}
+
+/// Compile a kernel synthesized from an index-notation region.
+///
+/// `scalars` names each scalar parameter's origin, as for a composed kernel.
+pub(crate) fn prepare_synthesized(
+    device: &Runtime,
+    def: &KernelDef,
+    scalars: Vec<String>,
+) -> anyhow::Result<PreparedKernel> {
+    let identity = KernelIdentity { id: def.id(), scalars };
+    let prepared = prepare_kernel_as(device, def.clone(), Some(identity))?;
+    tracing::debug!(kernel = %def.entry, id = %def.id(), params = def.params.len(), "semantic fusion prepared");
     Ok(prepared)
 }
 

@@ -5,7 +5,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 /// Deterministic values in `[-1, 1)`.
-fn data(seed: u32, n: u32) -> Vec<f32> {
+pub(super) fn data(seed: u32, n: u32) -> Vec<f32> {
     let mut state = seed.wrapping_mul(0x9E37_79B9) | 1;
     (0..n)
         .map(|_| {
@@ -17,13 +17,13 @@ fn data(seed: u32, n: u32) -> Vec<f32> {
         .collect()
 }
 
-fn run(region: &Region, env: &Environment) -> Environment {
+pub(super) fn run(region: &Region, env: &Environment) -> Environment {
     let mut env = env.clone();
     region.evaluate(&mut env).unwrap();
     env
 }
 
-fn bits(env: &Environment) -> Vec<(ParcelId, Vec<u32>)> {
+pub(super) fn bits(env: &Environment) -> Vec<(ParcelId, Vec<u32>)> {
     env.parcels
         .iter()
         .map(|(&p, d)| (p, d.iter().map(|x| x.to_bits()).collect()))
@@ -36,7 +36,7 @@ fn assert_exact(before: &Region, after: &Region, env: &Environment) {
     assert_eq!(bits(&run(before, env)), bits(&run(after, env)));
 }
 
-fn body(region: &Region, id: ValueId) -> &Term {
+pub(super) fn body(region: &Region, id: ValueId) -> &Term {
     &region.value(id).unwrap().definition.as_ref().unwrap().body
 }
 

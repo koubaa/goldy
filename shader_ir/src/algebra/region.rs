@@ -1,7 +1,7 @@
 //! Semantic regions: tensor values, their definitions and their storage.
 
 use super::affine::{Affine, IndexParam, IndexVar, Sym};
-use super::term::{BinaryOp, CmpOp, ReduceOp, ScalarParam, Term, UnaryOp, ValueId};
+use super::term::{BinaryOp, CmpOp, ReduceOp, ReduceOrder, ScalarParam, Term, UnaryOp, ValueId};
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
@@ -123,6 +123,8 @@ pub enum RegionError {
     },
     /// An index parameter's declared range is empty.
     EmptyParamRange { param: String },
+    /// A lane order needs a power-of-two lane count and at least one accumulator.
+    ReduceOrder { value: String },
 }
 
 impl fmt::Display for RegionError {
@@ -153,6 +155,7 @@ impl fmt::Display for RegionError {
                 bounds.0, bounds.1
             ),
             RegionError::EmptyParamRange { param } => write!(f, "index parameter `{param}` has an empty range"),
+            RegionError::ReduceOrder { value } => write!(f, "`{value}` names a malformed lane order"),
         }
     }
 }
@@ -216,7 +219,7 @@ impl Region {
         })
     }
 
-    fn push(&mut self, value: Value) -> ValueId {
+    pub(crate) fn push(&mut self, value: Value) -> ValueId {
         self.values.push(Some(value));
         ValueId(self.values.len() as u32 - 1)
     }
@@ -232,6 +235,13 @@ impl Region {
             .iter()
             .enumerate()
             .filter_map(|(at, v)| v.as_ref().map(|v| (ValueId(at as u32), v)))
+    }
+
+    /// Rebind every storage map to the parcel `parcel` maps its parcel to.
+    pub fn map_parcels(&mut self, parcel: impl Fn(ParcelId) -> ParcelId) {
+        for storage in self.values.iter_mut().flatten().filter_map(|v| v.storage.as_mut()) {
+            storage.parcel = parcel(storage.parcel);
+        }
     }
 
     /// Number of reads of `id` in live definitions.
@@ -413,8 +423,19 @@ impl Check<'_> {
                 self.guarded(lhs, *cmp, rhs, false, otherwise)
             }
             Term::Reduce {
-                index, extent, body, ..
+                index,
+                extent,
+                order,
+                body,
+                ..
             } => {
+                if let ReduceOrder::Lanes { lanes, accumulators } = *order {
+                    if !lanes.is_power_of_two() || accumulators == 0 {
+                        return Err(RegionError::ReduceOrder {
+                            value: self.name.to_string(),
+                        });
+                    }
+                }
                 self.bind(*index)?;
                 if *extent > 0 {
                     self.ranges.insert(Sym::Index(*index), (0, i64::from(*extent) - 1));
@@ -660,6 +681,7 @@ fn write_term(region: &Region, term: &Term, min: u8, f: &mut fmt::Formatter<'_>)
             op,
             index,
             extent,
+            order,
             body,
         } => {
             let name = match op {
@@ -667,7 +689,11 @@ fn write_term(region: &Region, term: &Term, min: u8, f: &mut fmt::Formatter<'_>)
                 ReduceOp::Max => "max",
                 ReduceOp::Min => "min",
             };
-            write!(f, "{name}{{{}<{extent}}}(", region.index_name(*index))?;
+            write!(f, "{name}{{{}<{extent}", region.index_name(*index))?;
+            if let ReduceOrder::Lanes { lanes, accumulators } = order {
+                write!(f, " by {lanes}x{accumulators}")?;
+            }
+            f.write_str("}(")?;
             write_term(region, body, 0, f)?;
             f.write_str(")")?;
         }

@@ -74,6 +74,7 @@ pub(crate) mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
 pub mod scheme_label;
+pub(crate) mod semantic_fusion;
 pub mod signal;
 pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
@@ -88,7 +89,7 @@ pub use error::GoldyError;
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
 pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
-pub use fusion_plan::{FusionRegion, FusionRegionStatus, FusionReport, RejectedFusion};
+pub use fusion_plan::{FusionRegion, FusionRegionStatus, FusionReport, FusionTier, RejectedFusion};
 pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};

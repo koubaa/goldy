@@ -18,20 +18,32 @@
 //! preserves. [`Region::evaluate`] is the reference semantics that exactness is
 //! measured against.
 //!
+//! Regions compose: [`Region::then`] appends a region that runs afterwards, turning
+//! reads of storage the first one writes into reads of its values.
+//!
 //! The notation is device-independent. Choosing what to materialize and how to map
-//! indices onto a grid is a schedule, which is separate.
+//! indices onto a grid is a [`Schedule`], which is separate; [`lower`] realizes a region
+//! under one as a single kernel.
 
 mod affine;
+mod compose;
 mod interp;
 mod region;
 mod rewrite;
+mod schedule;
 mod term;
 
+#[cfg(test)]
+mod compose_tests;
 #[cfg(test)]
 mod tests;
 
 pub use affine::{Affine, IndexParam, IndexVar, Sym};
+pub use compose::{Appended, ComposeError};
 pub use interp::{Environment, EvalError};
 pub use region::{Definition, ParcelId, Region, RegionError, Role, Storage, Value};
 pub use rewrite::{Exactness, Law, RewriteError};
-pub use term::{BinaryOp, CmpOp, Invariant, ReduceOp, ScalarParam, Term, UnaryOp, ValueId};
+pub use schedule::{
+    lower, lower_with, IndexSource, LowerError, Lowered, Schedule, LANE_WORKGROUP_THREADS, WORKGROUP_THREADS,
+};
+pub use term::{BinaryOp, CmpOp, Invariant, ReduceOp, ReduceOrder, ScalarParam, Term, UnaryOp, ValueId};
