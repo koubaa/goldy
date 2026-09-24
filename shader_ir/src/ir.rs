@@ -59,6 +59,28 @@ pub enum BuiltinFn {
     Float4,
     Uint2,
     WorkgroupBarrier,
+    /// The calling thread's lane in its subgroup, as `uint`.
+    SubgroupLane,
+    /// `(value, lane)`: `value` as subgroup lane `lane` holds it. Convergent: every
+    /// lane of the subgroup must execute the call.
+    SubgroupRead,
+}
+
+/// Rows, columns and summed extent of every [`Stmt::Matrix`] tile.
+pub const MATRIX_TILE: u32 = 16;
+
+/// Subgroup-scope matrix-unit operations on [`MATRIX_TILE`]-square tiles.
+///
+/// Operand tiles are row-major `half` workgroup arrays and accumulators hold `float`.
+/// Every lane of the subgroup must execute each operation (convergent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatrixOp {
+    /// Declare the local accumulator `name`, zeroed.
+    Accumulator { name: String },
+    /// `acc += a · b`.
+    MulAdd { acc: String, a: String, b: String },
+    /// Store `acc` row-major into the `float` workgroup array `dest`.
+    Store { acc: String, dest: String },
 }
 
 /// Tree-reduce operator for [`Stmt::WorkgroupReduce`].
@@ -179,6 +201,7 @@ pub enum Stmt {
         count: Expr,
         scratch: String,
     },
+    Matrix(MatrixOp),
     Expr(Expr),
 }
 

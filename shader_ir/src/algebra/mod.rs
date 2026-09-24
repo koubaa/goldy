@@ -29,12 +29,15 @@
 //!
 //! The notation is device-independent. Choosing what to materialize and how to map
 //! indices onto a grid is a [`Schedule`], which is separate; [`lower`] realizes a region
-//! under one as a single kernel.
+//! under one as a single kernel. What a device offers, a [`Target`], and the rounding
+//! a caller admits, a [`ContractionPrecision`], choose among schedules; neither
+//! changes the notation.
 
 mod affine;
 mod compose;
 mod graph;
 mod interp;
+mod matrix;
 mod op;
 mod region;
 mod rewrite;
@@ -56,6 +59,7 @@ pub use op::{Contraction, Expanded, Factor, Map, Op, OpError, OpKind, Operand, P
 pub use region::{Definition, ParcelId, Region, RegionError, Role, Storage, Value};
 pub use rewrite::{Exactness, Law, RewriteError};
 pub use schedule::{
-    lower, lower_with, IndexSource, LowerError, Lowered, Schedule, LANE_WORKGROUP_THREADS, WORKGROUP_THREADS,
+    lower, lower_graph, lower_on, lower_with, ContractionPrecision, Exchange, IndexSource, LowerError, Lowered,
+    Schedule, Target, LANE_WORKGROUP_THREADS, WORKGROUP_THREADS,
 };
 pub use term::{BinaryOp, CmpOp, Invariant, ReduceOp, ReduceOrder, ScalarParam, Term, UnaryOp, ValueId};

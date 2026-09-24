@@ -463,9 +463,12 @@ impl<'a> MatMulBuilder<'a> {
                 (&b.operand, b.parcel?),
                 (&c.operand, c.parcel?),
             ];
-            crate::semantic_fusion::matmul(&self.desc, fallback, operands)
+            match native {
+                true => crate::semantic_fusion::library_matmul(&self.desc, fallback, operands),
+                false => crate::semantic_fusion::matmul(&self.desc, fallback, operands),
+            }
         };
-        let site = if native { None } else { site() };
+        let site = site();
         self.scheme
             .push_matmul_node(self.label, self.desc, a, b, c, c_access, native, fallback, site);
     }

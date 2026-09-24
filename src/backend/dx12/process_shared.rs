@@ -122,6 +122,7 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
                         ray_tracing_pipelines: gpu.ray_tracing_pipelines,
                         mesh_shaders: gpu.mesh_shaders,
                         amplification_shaders: gpu.amplification_shaders,
+                        subgroup_width: gpu.subgroup_width,
                     });
                 }
                 adapter_index += 1;
@@ -152,6 +153,7 @@ fn init_process_shared() -> Result<Dx12ProcessShared> {
                             ray_tracing_pipelines: gpu.ray_tracing_pipelines,
                             mesh_shaders: gpu.mesh_shaders,
                             amplification_shaders: gpu.amplification_shaders,
+                            subgroup_width: gpu.subgroup_width,
                         });
                     }
                     Err(e) => tracing::warn!("WARP GetDesc1 failed: {:?}", e),

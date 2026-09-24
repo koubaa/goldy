@@ -559,6 +559,8 @@ pub(crate) struct DxgiAdapterInfo {
     pub mesh_shaders: bool,
     /// Amplification shaders ship with mesh-shader tier 1.
     pub amplification_shaders: bool,
+    /// See [`crate::runtime::RuntimeCapabilities::subgroup_width`].
+    pub subgroup_width: Option<u32>,
 }
 
 /// A slot in the compute command allocator pool.

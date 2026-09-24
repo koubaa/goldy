@@ -285,10 +285,163 @@ fn sibling_contractions_share_their_input() {
         }]
     );
 
-    // Both lane-ordered sums run in one kernel.
+    // Both lane-ordered sums run in one strided loop that loads `x` once per step, and
+    // in one tree.
     let lowered = lower(graph.region(), &[]).unwrap();
-    assert!(matches!(lowered.schedule, Schedule::Lanes { lanes: 32, .. }));
+    assert!(matches!(
+        lowered.schedule,
+        Schedule::Lanes {
+            lanes: 32,
+            exchange: Exchange::Workgroup,
+            ..
+        }
+    ));
     assert_eq!(lowered.workgroup_bytes, 2 * LANE_WORKGROUP_THREADS * 4);
+    let slang = source(&lowered);
+    assert_eq!(slang.matches("while (").count(), 2, "{slang}");
+    // Two accumulator steps in the loop and one in the tail.
+    assert_eq!(slang.matches("p2[").count(), 3, "{slang}");
+    assert_eq!(slang.matches("p0[").count(), 3, "{slang}");
+
+    // A subgroup that holds whole lane groups exchanges without workgroup memory.
+    let subgroup = Target {
+        subgroup: Some(32),
+        matrix: false,
+    };
+    let shuffled = lower_on(graph.region(), &[], &subgroup).unwrap();
+    assert!(matches!(
+        shuffled.schedule,
+        Schedule::Lanes {
+            exchange: Exchange::Subgroup,
+            ..
+        }
+    ));
+    assert_eq!(shuffled.workgroup_bytes, 0);
+    let slang = source(&shuffled);
+    assert!(
+        slang.contains("WaveReadLaneAt(") && !slang.contains("groupshared"),
+        "{slang}"
+    );
+    // A subgroup narrower than a lane group cannot.
+    let narrow = Target {
+        subgroup: Some(16),
+        matrix: false,
+    };
+    assert!(matches!(
+        lower_on(graph.region(), &[], &narrow).unwrap().schedule,
+        Schedule::Lanes {
+            exchange: Exchange::Workgroup,
+            ..
+        }
+    ));
+}
+
+fn source(lowered: &Lowered) -> String {
+    crate::emit_canonical_compute_source(&lowered.kernel)
+        .source
+        .canonical_slang
+}
+
+#[test]
+fn sequential_siblings_share_a_loop() {
+    let (m, k) = (6, 50);
+    let sequential = |names, parcels| {
+        op(OpKind::Contraction(contraction(
+            names,
+            parcels,
+            &[m, k],
+            [&[0, 1], &[1], &[0]],
+            ReduceOrder::Sequential,
+        )))
+    };
+    let mut graph = Graph::new();
+    graph.push(sequential(["W1", "x", "gate"], [0, 2, 3])).unwrap();
+    graph.push(sequential(["W3", "x", "up"], [1, 2, 4])).unwrap();
+    graph
+        .push(map(
+            &[("gate", 3), ("up", 4)],
+            ("out", 5),
+            m,
+            Term::arg(0) * Term::arg(1),
+        ))
+        .unwrap();
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert_eq!(
+        lowered.schedule,
+        Schedule::Threads {
+            workgroup: WORKGROUP_THREADS
+        }
+    );
+    let slang = source(&lowered);
+    assert_eq!(slang.matches("while (").count(), 1, "{slang}");
+    assert_eq!(slang.matches("p2[").count(), 1, "{slang}");
+}
+
+/// `C[i, j] = sum{s}(A[i, s] * B[s, j])`, then `D = max(C, 0)`.
+fn gemm_relu(m: u32, n: u32, k: u32, order: ReduceOrder) -> Graph {
+    let mut graph = Graph::new();
+    graph
+        .push(op(OpKind::Contraction(contraction(
+            ["A", "B", "C"],
+            [0, 1, 2],
+            &[m, n, k],
+            [&[0, 2], &[2, 1], &[0, 1]],
+            order,
+        ))))
+        .unwrap();
+    graph
+        .push(op(OpKind::Map(Map {
+            shape: vec![m, n],
+            inputs: vec![operand("C", 2, &[m, n])],
+            outputs: vec![(operand("D", 3, &[m, n]), Term::arg(0).max(Term::lit(0.0)))],
+        })))
+        .unwrap();
+    graph
+}
+
+#[test]
+fn matrix_units_take_contractions_only_when_rounding_is_admitted() {
+    let (m, n, k) = (20, 24, 40);
+    let graph = gemm_relu(m, n, k, ReduceOrder::Sequential);
+    let device = Target {
+        subgroup: Some(32),
+        matrix: true,
+    };
+    let lowered = lower_graph(&graph, &[], &device, ContractionPrecision::F16Factors).unwrap();
+    assert_eq!(lowered.schedule, Schedule::Matrix { subgroup: 32 });
+    assert_eq!(lowered.groups, [4, 1, 1]);
+    assert_eq!(lowered.kernel.workgroup_size, [32, 1, 1]);
+    let slang = source(&lowered);
+    assert_eq!(slang.matches("linalg.coopMatMulAdd").count(), 1, "{slang}");
+    assert_eq!(slang.matches("groupshared half").count(), 2, "{slang}");
+    // The epilogue reads the tile, and both results are stored.
+    assert!(slang.contains("max("), "{slang}");
+    assert_eq!(slang.matches("p2[").count(), 1, "{slang}");
+    assert_eq!(slang.matches("p3[").count(), 1, "{slang}");
+
+    // Exact contractions, or a device without matrix units, keep the exact schedule.
+    let exact = lower_graph(&graph, &[], &device, ContractionPrecision::Exact).unwrap();
+    assert_eq!(
+        exact.schedule,
+        Schedule::Threads {
+            workgroup: WORKGROUP_THREADS
+        }
+    );
+    let portable = lower_graph(&graph, &[], &Target::default(), ContractionPrecision::F16Factors).unwrap();
+    assert_eq!(portable.schedule, exact.schedule);
+    assert_eq!(source(&portable), source(&exact));
+    // So does a contraction that is not two-dimensional.
+    let mut gemv_graph = Graph::new();
+    gemv_graph.push(gemv(["W", "x", "y"], [0, 1, 2], m, k)).unwrap();
+    assert!(matches!(
+        lower_graph(&gemv_graph, &[], &device, ContractionPrecision::F16Factors)
+            .unwrap()
+            .schedule,
+        Schedule::Lanes {
+            exchange: Exchange::Subgroup,
+            ..
+        }
+    ));
 }
 
 #[test]

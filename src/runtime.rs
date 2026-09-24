@@ -418,6 +418,20 @@ pub struct RuntimeCapabilities {
     ///
     /// When `true`, [`crate::MeshPipelineDesc::amplification`] may be set.
     pub amplification_shaders: bool,
+
+    /// Threads per subgroup (warp, wave) of a compute workgroup, when every subgroup
+    /// has exactly this many and holds consecutive local invocations of a
+    /// one-dimensional workgroup. `None` when the width can vary or is unknown.
+    ///
+    /// Automatic fusion exchanges partial sums through subgroup reads when it is set.
+    pub subgroup_width: Option<u32>,
+
+    /// Whether a subgroup multiplies 16×16 f16 matrices into f32 accumulators on
+    /// matrix units (CUDA tensor cores from compute capability 8.0).
+    ///
+    /// Automatic fusion uses them only for schemes that admit
+    /// [`crate::ContractionPrecision::F16Factors`].
+    pub matrix_multiply: bool,
 }
 
 impl Default for RuntimeCapabilities {
@@ -445,6 +459,8 @@ impl Default for RuntimeCapabilities {
             ray_tracing_pipelines: false,
             mesh_shaders: false,
             amplification_shaders: false,
+            subgroup_width: None,
+            matrix_multiply: false,
         }
     }
 }

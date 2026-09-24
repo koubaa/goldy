@@ -153,6 +153,8 @@ unsafe impl DeviceRepr for CudaBufferArg {}
 
 pub(crate) struct CudaBackend {
     adapter_info: Vec<AdapterInfo>,
+    /// Compute capability (major, minor) of each adapter, by ordinal.
+    compute_capability: Vec<(i32, i32)>,
     devices: HashMap<DeviceHandle, CudaDevice>,
     contexts: HashMap<ContextHandle, Arc<CudaSubmitContext>>,
     buffers: HashMap<BufferHandle, CudaBuffer>,
@@ -678,6 +680,7 @@ impl CudaBackend {
             anyhow::bail!("CUDA: no devices found");
         }
         let mut adapter_info = Vec::with_capacity(count as usize);
+        let mut compute_capability = Vec::with_capacity(count as usize);
         for ordinal in 0..count {
             let ctx = CudaContext::new(ordinal as usize).with_context(|| format!("CUDA: open device {ordinal}"))?;
             let name = ctx.name().unwrap_or_else(|_| format!("CUDA device {ordinal}"));
@@ -688,6 +691,7 @@ impl CudaBackend {
                 .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
                 .unwrap_or(0);
             tracing::info!("  [{ordinal}] {name} (DiscreteGpu) - compute capability {major}.{minor}");
+            compute_capability.push((major, minor));
             adapter_info.push(AdapterInfo {
                 id: ordinal as u32,
                 name,
@@ -706,6 +710,7 @@ impl CudaBackend {
         let slang_compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         Ok(Self {
             adapter_info,
+            compute_capability,
             devices: HashMap::new(),
             contexts: HashMap::new(),
             buffers: HashMap::new(),
@@ -3773,7 +3778,12 @@ impl GpuBackend for CudaBackend {
         self.adapter_info.clone()
     }
 
-    fn adapter_capabilities(&self, _adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
+    fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
+        let (major, _) = self
+            .compute_capability
+            .get(adapter_id as usize)
+            .copied()
+            .unwrap_or((0, 0));
         crate::runtime::RuntimeCapabilities {
             // Surfaces expose shared Rgba8Unorm scratch (DirectSpatial<float4> packs);
             // swapchain is matching R8G8B8A8 for a single CopyResource present.
@@ -3787,6 +3797,9 @@ impl GpuBackend for CudaBackend {
             host_sidecar_on_submit_worker: true,
             split_compute_partitions_on_barrier_cost: false,
             fuse_upload_with_compute_partitions: true,
+            subgroup_width: Some(32),
+            // `mma.sync` m16n8k16 with f16 operands, as Slang emits for 16×16 tiles.
+            matrix_multiply: major >= 8,
             ..crate::runtime::RuntimeCapabilities::default()
         }
     }

@@ -2282,6 +2282,28 @@ impl Scheme {
             .unwrap_or_else(crate::validation_env::fusion_enabled)
     }
 
+    /// The rounding automatic fusion may add to matrix products and other contractions.
+    ///
+    /// [`ContractionPrecision::Exact`] (the default) keeps fused results bit-identical to
+    /// the recorded dispatches. [`ContractionPrecision::F16Factors`] lets a semantic
+    /// region run its two-dimensional contractions on matrix units where the device
+    /// has them ([`crate::RuntimeCapabilities::matrix_multiply`]): each factor rounded to
+    /// f16, the products summed in f32 in the hardware's order. A change replans.
+    ///
+    /// [`ContractionPrecision::Exact`]: crate::ContractionPrecision::Exact
+    /// [`ContractionPrecision::F16Factors`]: crate::ContractionPrecision::F16Factors
+    pub fn set_contraction_precision(&mut self, precision: crate::ContractionPrecision) {
+        if self.fusion.precision() != precision {
+            self.fusion.set_precision(precision);
+            self.replan_fusion();
+        }
+    }
+
+    /// See [`Self::set_contraction_precision`].
+    pub fn contraction_precision(&self) -> crate::ContractionPrecision {
+        self.fusion.precision()
+    }
+
     /// Which recorded dispatches automatic fusion runs, or tried to run, as one dispatch.
     ///
     /// Empty unless [`Self::automatic_fusion`] is on and the scheme's structure has
