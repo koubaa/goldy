@@ -108,6 +108,10 @@ fn gpu_layout_is_stable_kernel_abi() {
     assert_eq!(gpu.numel, 6);
     assert_eq!(gpu.shape, [2, 3, 1, 1]);
     assert_eq!(gpu.stride, [3, 1, 0, 0]);
+    assert_eq!(gpu.flags, GoldyTensorLayout::FLAG_CONTIGUOUS);
+
+    let transposed = TensorLayout::strided(TensorDType::F32, shape(&[3, 2]), 0, &[1, 3]).unwrap();
+    assert_eq!(transposed.gpu_coords().unwrap().flags, 0);
 }
 
 #[test]

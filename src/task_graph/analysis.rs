@@ -84,14 +84,20 @@ fn emit_matmul_node(
         Some(r) => r.resolve_slots(&matmul.resource_slots, &node.bindings),
         None => matmul.resource_slots.clone(),
     };
-    let user = match crate::ops::matmul::fallback_user_slots(&matmul.desc, &matmul.a, &matmul.b, &matmul.c) {
-        Ok(words) => words.to_vec(),
+    let user = match crate::ops::matmul::fallback_user_slots(
+        &matmul.desc,
+        matmul.fallback,
+        &matmul.a,
+        &matmul.b,
+        &matmul.c,
+    ) {
+        Ok(words) => words,
         Err(e) => {
             tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
             return;
         }
     };
-    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc);
+    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc, matmul.fallback);
     commands.push(GpuCommand::SetPipeline(pipeline));
     push_compute_resource_bind(commands, staging, &slots, &user);
     commands.push(GpuCommand::Dispatch {

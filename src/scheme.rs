@@ -1856,8 +1856,8 @@ impl Scheme {
         }
     }
 
-    /// Record a semantic matrix multiply. The backend chooses cuBLAS, MPS, or the
-    /// Goldy stdlib kernel on first submit (`GOLDY_MATMUL=fallback` forces stdlib).
+    /// Record a semantic matrix multiply. The backend chooses cuBLAS, MPS, or a
+    /// Goldy stdlib kernel on first submit (see `docs/src/compute/matmul.md`).
     pub fn matmul<'a>(
         &'a mut self,
         label: impl Into<crate::SchemeLabel>,
@@ -1888,6 +1888,7 @@ impl Scheme {
         c: crate::ops::matmul::BoundOperand,
         c_access: NodeAccess,
         native: bool,
+        fallback: crate::ops::matmul::MatMulFallback,
     ) {
         self.mark_structure_dirty();
         self.desc.ir.nodes.push(TaskNode {
@@ -1914,6 +1915,7 @@ impl Scheme {
                 c: c.operand,
                 resource_slots: vec![a.slot, b.slot, c.slot],
                 native,
+                fallback,
                 fallback_pipeline: None,
             }),
         });
@@ -2218,22 +2220,26 @@ impl Scheme {
     }
 
     fn realize_matmul_nodes(&mut self) -> Result<(), GoldyError> {
-        let needs_fallback = self.desc.ir.nodes.iter().any(|n| {
-            matches!(
-                &n.kind,
-                NodeKind::MatMul(node) if !node.native && node.fallback_pipeline.is_none()
-            )
-        });
-        if !needs_fallback {
-            return Ok(());
-        }
-        let pipeline = self.ctx.runtime().stdlib_matmul_f32()?;
-        let handle = pipeline.handle;
-        self.intern_compute_pipeline(&pipeline);
-        for node in &mut self.desc.ir.nodes {
-            if let NodeKind::MatMul(matmul) = &mut node.kind {
-                if !matmul.native && matmul.fallback_pipeline.is_none() {
-                    matmul.fallback_pipeline = Some(handle);
+        use crate::ops::matmul::MatMulFallback;
+        for kind in [MatMulFallback::Gemm, MatMulFallback::Gemv] {
+            let pending = |n: &TaskNode| {
+                matches!(
+                    &n.kind,
+                    NodeKind::MatMul(node)
+                        if !node.native && node.fallback == kind && node.fallback_pipeline.is_none()
+                )
+            };
+            if !self.desc.ir.nodes.iter().any(pending) {
+                continue;
+            }
+            let pipeline = self.ctx.runtime().stdlib_matmul_f32(kind)?;
+            let handle = pipeline.handle;
+            self.intern_compute_pipeline(&pipeline);
+            for node in &mut self.desc.ir.nodes {
+                if pending(node) {
+                    if let NodeKind::MatMul(matmul) = &mut node.kind {
+                        matmul.fallback_pipeline = Some(handle);
+                    }
                 }
             }
         }

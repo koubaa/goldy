@@ -155,7 +155,8 @@ fn run_f32(
     if n == 1 && !desc.transpose_b {
         let trans = if desc.transpose_a { n_op } else { t_op };
         let (cm, cn) = if desc.transpose_a { (m, k) } else { (k, m) };
-        unsafe { cublas::sgemv(handle, trans, cm, cn, &alpha, ap, lda, bp, 1, &beta, cp, 1) }.context("cublasSgemv")?;
+        unsafe { cublas::sgemv(handle, trans, cm, cn, &alpha, ap, lda, bp, ldb, &beta, cp, ldc) }
+            .context("cublasSgemv")?;
         return Ok(());
     }
 

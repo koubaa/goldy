@@ -308,7 +308,7 @@ impl Adapter {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
             }),
         })
     }
@@ -497,8 +497,8 @@ pub(crate) struct DeviceInner {
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
-    /// Lazily compiled stdlib MatMul kernel (fallback path).
-    pub(crate) stdlib_matmul: Mutex<Option<Arc<crate::compute::ComputePipeline>>>,
+    /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
+    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
 }
 
 impl Clone for Runtime {
@@ -651,7 +651,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
             }),
         }
     }
@@ -821,16 +821,20 @@ impl Runtime {
         self.inner.backend.lock().unwrap().backend_type()
     }
 
-    pub(crate) fn stdlib_matmul_f32(&self) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
-        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap().clone() {
+    pub(crate) fn stdlib_matmul_f32(
+        &self,
+        kind: crate::ops::matmul::MatMulFallback,
+    ) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
+        let index = kind as usize;
+        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
             return Ok(pipeline);
         }
-        let pipeline = crate::ops::matmul::prepare_stdlib(self).map_err(GoldyError::Backend)?;
-        let mut slot = self.inner.stdlib_matmul.lock().unwrap();
-        if let Some(existing) = slot.as_ref() {
+        let pipeline = crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?;
+        let mut slots = self.inner.stdlib_matmul.lock().unwrap();
+        if let Some(existing) = slots[index].as_ref() {
             return Ok(Arc::clone(existing));
         }
-        *slot = Some(Arc::clone(&pipeline));
+        slots[index] = Some(Arc::clone(&pipeline));
         Ok(pipeline)
     }
 
@@ -1212,7 +1216,7 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
             }),
         })
     }
