@@ -249,6 +249,37 @@ status, and each run that stopped short with its `FusionRejection`.
 `fusion_compile_failures` count the transitions. A region whose compile fails
 stays unfused.
 
+### Scheme-local temporaries
+
+Fusion never drops a store to a buffer, because the caller may read that buffer
+or bind it elsewhere. An intermediate that only carries data between a
+scheme's own dispatches can be declared as a temporary instead:
+
+```rust
+let t = scheme.temporary_buffer::<f32>(n as usize)?;
+scale.invoke(&x, &t, n, 2.0).over_1d(n).record(&mut scheme, "scale")?;
+bias.invoke(&t, &y, n, 1.0).over_1d(n).record(&mut scheme, "bias")?;
+```
+
+A `Temporary` binds wherever a buffer argument does, including
+`SchemeNodeBuilder::with_temporary`. Its contents are undefined when each
+submission starts and cannot be observed after it ends, so the first access in
+a submission must write every element that is later read. In exchange:
+
+- the scheme allocates nothing up front. Storage comes from the context's
+  transient pool at the first submit and goes back when the structure no longer
+  needs it or the scheme drops;
+- temporaries of the same size and element type whose lifetimes do not overlap
+  share one buffer;
+- when automatic fusion forwards a temporary and every dispatch that binds it
+  is inside one fused region, the temporary lives only in registers. The fused
+  dispatch never stores it and binds no storage for it. `FusionRegion::elided`
+  counts these.
+
+A temporary belongs to the scheme that declared it. It cannot be read back,
+bound on another scheme, bound by a yielding script, or bound in a child passed
+to `include`. Explicit `FusedKernel`s forward temporaries but still store them.
+
 Raw hand-written `[goldy_compute]` shaders continue to work. Simple sources can
 also be parsed into the same `KernelDef` shape via
 `goldy::slang::try_kernel_def_from_source`, and wrappers can be emitted from ABI

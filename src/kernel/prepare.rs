@@ -96,6 +96,12 @@ impl<'a> SchemeNodeStart<'a> {
         self
     }
 
+    pub fn bind_temporary(mut self, temporary: &crate::Temporary, access: NodeAccess) -> Self {
+        self.note_resource_access(access);
+        self.builder = self.builder.with_temporary(temporary, access);
+        self
+    }
+
     #[cfg(feature = "graphics")]
     pub fn bind_present(mut self, lease: &crate::PresentLease, access: NodeAccess) -> Self {
         self.note_resource_access(access);

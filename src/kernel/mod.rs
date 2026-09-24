@@ -89,6 +89,20 @@ impl KernelBindable for crate::PresentLease {
     }
 }
 
+impl KernelBindable for crate::Temporary {
+    fn __goldy_bind_kernel<'a>(
+        &self,
+        start: SchemeNodeStart<'a>,
+        access: crate::task_graph::NodeAccess,
+    ) -> SchemeNodeStart<'a> {
+        start.bind_temporary(self, access)
+    }
+
+    fn __goldy_kernel_identity(&self) -> KernelArgIdentity {
+        KernelArgIdentity(Some(self.resource_id()))
+    }
+}
+
 impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseTexture> {
     fn __goldy_bind_kernel<'a>(
         &self,
