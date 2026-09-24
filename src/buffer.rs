@@ -526,8 +526,9 @@ impl Allocation {
 impl Drop for Allocation {
     fn drop(&mut self) {
         tracing::trace!(size = self.size, access = ?self.access, "Destroying buffer");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_buffer(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_buffer(self.handle);
+        }
         if let Some(deed) = self.deed.as_ref() {
             deed.notify_freed(self.allocated_size, self.size, ParcelType::Buffer);
         }
@@ -669,8 +670,9 @@ impl BufferSource for BufferView {
 
 impl Drop for BufferView {
     fn drop(&mut self) {
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_buffer(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_buffer(self.handle);
+        }
     }
 }
 

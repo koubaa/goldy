@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CUDA strided GEMV** — native `n = 1` MatMul passes `ldb` / `ldc` as the cuBLAS
   `incx` / `incy`. It previously assumed unit strides for `x` and `y`.
 
+- **Odd-length deposits** — deposit staging rounds its backing up to whole words. A
+  deposit whose length was not a multiple of 4 tripped DX12's structured-stride
+  assertion.
+
+- **Teardown after a backend panic** — buffer, pipeline, shader, surface, host-sink,
+  context, and runtime teardown skip backend cleanup when the backend lock is
+  poisoned. Previously they panicked again while unwinding, which aborted the
+  process and hid the original error.
+
 ## [0.3.0] - 2026-09-19
 
 ### Changed

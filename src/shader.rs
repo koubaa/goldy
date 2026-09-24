@@ -539,8 +539,9 @@ impl ShaderModule {
 impl Drop for ShaderModule {
     fn drop(&mut self) {
         tracing::trace!("Destroying shader module");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_shader(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_shader(self.handle);
+        }
     }
 }
 

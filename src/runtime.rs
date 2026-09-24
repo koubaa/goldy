@@ -1290,10 +1290,10 @@ impl Drop for DeviceInner {
         // Wait for all GPU work on this device to complete before tearing down resources.
         // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
         // Skip if already lost: the hardware cannot make progress and destroy_device orders teardown.
-        let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
-        if !already_lost {
-            let mut backend = self.backend.lock().unwrap();
-            let _ = backend.device_wait_idle(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            if !backend.is_device_lost(self.handle) {
+                let _ = backend.device_wait_idle(self.handle);
+            }
         }
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
@@ -1301,8 +1301,9 @@ impl Drop for DeviceInner {
         // which runs before this (contexts hold a `Runtime` clone, so they outlive nothing
         // but are dropped first by users tearing down renderers before devices).
         if self.owns_backend_device {
-            let mut backend = self.backend.lock().unwrap();
-            backend.destroy_device(self.handle);
+            if let Ok(mut backend) = self.backend.lock() {
+                backend.destroy_device(self.handle);
+            }
         }
     }
 }
@@ -1328,6 +1329,30 @@ mod tests {
             device.is_valid(),
             "dropping a with_vram_allocator alias must not destroy the backend device"
         );
+    }
+
+    /// A panic while the backend lock is held must not turn later teardown into a
+    /// second panic, which aborts the process when it happens during unwinding.
+    #[test]
+    fn teardown_tolerates_poisoned_backend_lock() {
+        use std::sync::Arc;
+
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let buffer = device
+            .acquire_buffer_with_data(&[0u32; 4], crate::BufferKind::Scattered)
+            .unwrap();
+        let backend = Arc::clone(&device.inner.backend);
+        let _ = std::thread::spawn(move || {
+            let _guard = backend.lock().unwrap();
+            panic!("poison the backend lock");
+        })
+        .join();
+        assert!(device.inner.backend.is_poisoned());
+
+        drop(buffer);
+        drop(ctx);
+        drop(device);
     }
 
     #[test]

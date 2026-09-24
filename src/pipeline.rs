@@ -243,8 +243,9 @@ impl<'a> RenderPipelineBuilder<'a> {
 impl Drop for RenderPipeline {
     fn drop(&mut self) {
         tracing::trace!("Destroying render pipeline");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_pipeline(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_pipeline(self.handle);
+        }
     }
 }
 
