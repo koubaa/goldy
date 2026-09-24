@@ -1,13 +1,14 @@
-//! Semantic fusion: recorded operations described in index notation, and runs of them
+//! Semantic fusion: recorded operations described as tensor algebra, and runs of them
 //! synthesized as one kernel.
 //!
 //! An operation whose meaning Goldy knows records a [`SemanticSite`] beside its node: a
-//! [`Region`] over the parcels it binds, in which tensor views are storage maps. Automatic
-//! fusion (`fusion_plan.rs`) composes adjacent sites with [`Region::then`], which forwards
-//! what one site stores to the later sites that read it, and lowers the composition to
-//! one kernel with [`algebra::lower`]. Each lifted reduction names the association its
-//! recorded kernel uses and lowering reproduces it, so the synthesized kernel stores what
-//! the recorded sequence stores, bit for bit.
+//! named [`Op`] over the parcels it binds, in which tensor views are storage maps. A
+//! matrix product is a [`Contraction`] whose axes carry their roles, so its structure
+//! survives composition. Automatic fusion (`fusion_plan.rs`) composes adjacent sites in
+//! a [`Graph`], which forwards what one site stores to the later sites that read it, and
+//! lowers the composed region to one kernel with [`algebra::lower`]. Each lifted
+//! reduction names the association its recorded kernel uses and lowering reproduces it,
+//! so the synthesized kernel stores what the recorded sequence stores, bit for bit.
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -23,7 +24,8 @@ use crate::parcel::Parcel;
 use crate::task_graph::{DispatchDim, NodeKind, ResourceId, TaskNode};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
-    self, BinaryOp, IndexSource, IndexVar, Lowered, ParcelId, ReduceOp, Region, Storage, Term, UnaryOp, ValueId,
+    self, BinaryOp, Contraction, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand, Params, ParcelId, ReduceOrder,
+    Storage, Term, UnaryOp,
 };
 use goldy_shader_ir::{
     BinOp, BuiltinFn, ElementType, Expr, FusionRejection, KernelDef, KernelId, ParamCategory, ScalarType, Stmt,
@@ -53,11 +55,11 @@ impl SiteParcel {
     }
 }
 
-/// What a recorded node computes, in index notation.
+/// What a recorded node computes, as a named tensor operation.
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticSite {
-    /// `ParcelId(i)` is `parcels[i]`.
-    pub(crate) region: Region,
+    /// The `ParcelId(i)` of its operands is `parcels[i]`.
+    pub(crate) op: Op,
     pub(crate) parcels: Vec<SiteParcel>,
     /// Where each index parameter's value is read, by parameter.
     pub(crate) sources: Vec<IndexSource>,
@@ -68,7 +70,7 @@ pub(crate) struct SemanticSite {
 /// A [`SemanticSite`] under construction.
 #[derive(Default)]
 pub(crate) struct SiteBuilder {
-    pub(crate) region: Region,
+    params: Params,
     parcels: Vec<SiteParcel>,
     sources: Vec<IndexSource>,
     scalars: Vec<usize>,
@@ -89,7 +91,7 @@ impl SiteBuilder {
     /// A scalar parameter bound by user slot `slot`.
     pub(crate) fn scalar(&mut self, name: &str, slot: usize) -> algebra::ScalarParam {
         self.scalars.push(slot);
-        self.region.scalar(name)
+        self.params.scalar(name)
     }
 
     /// An index parameter in `range`, read from `source`.
@@ -101,14 +103,15 @@ impl SiteBuilder {
         source: IndexSource,
     ) -> algebra::IndexParam {
         self.sources.push(source);
-        self.region.index_param(name, range)
+        self.params.index_param(name, range)
     }
 
-    /// The site, if its region is well formed.
-    pub(crate) fn finish(self) -> Option<SemanticSite> {
-        self.region.validate().ok()?;
+    /// The site computing `kind`, if it is well formed.
+    pub(crate) fn finish(self, kind: OpKind) -> Option<SemanticSite> {
+        let op = Op::new(self.params, kind);
+        op.expand().ok()?;
         Some(SemanticSite {
-            region: self.region,
+            op,
             parcels: self.parcels,
             sources: self.sources,
             scalars: self.scalars,
@@ -128,48 +131,39 @@ pub(crate) fn matmul(
     let (m, n, k) = (desc.m, desc.n, desc.k);
     let mut s = SiteBuilder::default();
     let (pa, pb, pc) = (s.parcel(pa), s.parcel(pb), s.parcel(pc));
-    let offset = |o: &MatMulOperand| i64::try_from(o.offset_elements).ok();
-    let i = s.region.index("i");
-    let p = s.region.index("p");
-    match fallback {
+    let operand = |name: &str, shape: &[u32], parcel, o: &MatMulOperand, strides: &[i64]| {
+        let offset = i64::try_from(o.offset_elements).ok()?;
+        Some(Operand::new(name, shape, Storage::strided(parcel, offset, strides)))
+    };
+    let contraction = match fallback {
+        // y[i] = sum{s}(A[i, s] * x[s]), labels i and s.
         MatMulFallback::Gemv => {
             let ld = |o: &MatMulOperand| i64::from(o.leading_dim);
-            let w = s
-                .region
-                .input("A", &[m, k], Storage::strided(pa, offset(a)?, &[ld(a), 1]));
-            let x = s.region.input("x", &[k], Storage::strided(pb, offset(b)?, &[ld(b)]));
-            let body = Term::reduce_in(
-                ReduceOp::Sum,
-                GEMV_ORDER,
-                p,
-                k,
-                Term::read(w, [i, p]) * Term::read(x, [p]),
-            );
-            s.region
-                .output("y", &[m], &[i], body, Storage::strided(pc, offset(c)?, &[ld(c)]));
+            Contraction {
+                extents: vec![m, k],
+                lhs: operand("A", &[m, k], pa, a, &[ld(a), 1])?,
+                rhs: operand("x", &[k], pb, b, &[ld(b)])?,
+                out: operand("y", &[m], pc, c, &[ld(c)])?,
+                labels: [vec![0, 1], vec![1], vec![0]],
+                order: GEMV_ORDER,
+            }
         }
+        // C[i, j] = sum{s}(A[i, s] * B[s, j]), labels i, j and s.
         MatMulFallback::Gemm => {
-            let j = s.region.index("j");
-            let (m, n, k) = (i64::from(m), i64::from(n), i64::from(k));
-            let a_strides = if desc.transpose_a { [1, m] } else { [k, 1] };
-            let b_strides = if desc.transpose_b { [1, k] } else { [n, 1] };
-            let av = s
-                .region
-                .input("A", &[desc.m, desc.k], Storage::strided(pa, offset(a)?, &a_strides));
-            let bv = s
-                .region
-                .input("B", &[desc.k, desc.n], Storage::strided(pb, offset(b)?, &b_strides));
-            let body = Term::sum(p, desc.k, Term::read(av, [i, p]) * Term::read(bv, [p, j]));
-            s.region.output(
-                "C",
-                &[desc.m, desc.n],
-                &[i, j],
-                body,
-                Storage::strided(pc, offset(c)?, &[n, 1]),
-            );
+            let (m64, n64, k64) = (i64::from(m), i64::from(n), i64::from(k));
+            let a_strides = if desc.transpose_a { [1, m64] } else { [k64, 1] };
+            let b_strides = if desc.transpose_b { [1, k64] } else { [n64, 1] };
+            Contraction {
+                extents: vec![m, n, k],
+                lhs: operand("A", &[m, k], pa, a, &a_strides)?,
+                rhs: operand("B", &[k, n], pb, b, &b_strides)?,
+                out: operand("C", &[m, n], pc, c, &[n64, 1])?,
+                labels: [vec![0, 2], vec![2, 1], vec![0, 1]],
+                order: ReduceOrder::Sequential,
+            }
         }
-    }
-    s.finish()
+    };
+    s.finish(OpKind::Contraction(contraction))
 }
 
 /// A generated kernel whose body is a guarded pointwise store at the thread's own index,
@@ -244,15 +238,12 @@ pub(crate) fn lift_kernel(site: &KernelSite, node: &TaskNode) -> Option<Semantic
         return None;
     }
 
-    let i = s.region.index("i");
     let mut lift = Lift {
         site: s,
         formals,
         own,
-        i,
-        extent,
         locals: HashMap::new(),
-        inputs: HashMap::new(),
+        inputs: Vec::new(),
         stores: Vec::new(),
         scalars: HashMap::new(),
     };
@@ -260,17 +251,26 @@ pub(crate) fn lift_kernel(site: &KernelSite, node: &TaskNode) -> Option<Semantic
         lift.stmt(stmt)?;
     }
     let Lift {
-        site: mut s, stores, ..
+        site: s,
+        inputs,
+        stores,
+        ..
     } = lift;
     if stores.is_empty() {
         return None;
     }
-    for (parcel, term) in stores {
-        let name = format!("p{}", parcel.0);
-        s.region
-            .output(&name, &[extent], &[i], term, Storage::strided(parcel, 0, &[1]));
-    }
-    s.finish()
+    let operand = |prefix: &str, parcel: ParcelId| {
+        Operand::new(
+            &format!("{prefix}{}", parcel.0),
+            &[extent],
+            Storage::strided(parcel, 0, &[1]),
+        )
+    };
+    s.finish(OpKind::Map(Map {
+        shape: vec![extent],
+        inputs: inputs.into_iter().map(|p| operand("x", p)).collect(),
+        outputs: stores.into_iter().map(|(p, term)| (operand("p", p), term)).collect(),
+    }))
 }
 
 /// `(i, n, body)` of `let i = global_id().x;` followed by `if i < n { body }` or by
@@ -333,11 +333,10 @@ struct Lift<'a> {
     site: SiteBuilder,
     formals: HashMap<&'a str, Formal>,
     own: &'a str,
-    i: IndexVar,
-    extent: u32,
     locals: HashMap<&'a str, Term>,
-    inputs: HashMap<ParcelId, ValueId>,
-    /// Each stored parcel's latest value, in first-store order.
+    /// The parcels read before any store to them, by argument position.
+    inputs: Vec<ParcelId>,
+    /// Each stored parcel's latest value over the arguments, in first-store order.
     stores: Vec<(ParcelId, Term)>,
     scalars: HashMap<usize, algebra::ScalarParam>,
 }
@@ -405,13 +404,14 @@ impl<'a> Lift<'a> {
                 if let Some((_, stored)) = self.stores.iter().find(|(p, _)| *p == parcel) {
                     return Some(stored.clone());
                 }
-                let extent = self.extent;
-                let site = &mut self.site;
-                let value = *self.inputs.entry(parcel).or_insert_with(|| {
-                    site.region
-                        .input(&format!("x{}", parcel.0), &[extent], Storage::strided(parcel, 0, &[1]))
-                });
-                Term::read(value, [self.i])
+                let arg = match self.inputs.iter().position(|p| *p == parcel) {
+                    Some(arg) => arg,
+                    None => {
+                        self.inputs.push(parcel);
+                        self.inputs.len() - 1
+                    }
+                };
+                Term::arg(arg)
             }
             Expr::Binary { op, left, right } => {
                 let op = match op {
@@ -457,13 +457,23 @@ pub(crate) struct SemanticProgram {
     pub(crate) parcels: Vec<SiteParcel>,
     /// Per scalar parameter of the composed region: the constituent and user slot it binds.
     pub(crate) scalars: Vec<(usize, usize)>,
-    /// Inputs that read a value an earlier constituent defines rather than storage.
-    pub(crate) forwarded: usize,
+    /// The constituents' operations, composed; operands are named `p{parcel}`.
+    pub(crate) graph: Graph,
 }
 
 impl SemanticProgram {
     pub(crate) fn id(&self) -> KernelId {
         self.def.id()
+    }
+
+    /// Inputs that read a value an earlier constituent defines rather than storage.
+    pub(crate) fn forwarded(&self) -> usize {
+        self.graph.edges().len()
+    }
+
+    /// The composition's contractions with their prologues and epilogues, one per line.
+    pub(crate) fn structure(&self) -> String {
+        self.graph.structure().to_string()
     }
 
     /// Each synthesized scalar parameter's origin, `constituent:slot`.
@@ -482,10 +492,9 @@ impl SemanticProgram {
 /// Compose `sites`, in execution order, and lower the composition to one kernel.
 pub(crate) fn synthesize(sites: &[&SemanticSite]) -> Result<SemanticProgram, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
-    let mut region: Option<Region> = None;
+    let mut graph = Graph::default();
     let mut sources = Vec::new();
     let mut scalars = Vec::new();
-    let mut forwarded = 0;
     for (k, site) in sites.iter().enumerate() {
         let map: Vec<ParcelId> = site
             .parcels
@@ -503,26 +512,23 @@ pub(crate) fn synthesize(sites: &[&SemanticSite]) -> Result<SemanticProgram, Fus
                 }
             })
             .collect();
-        let mut next = site.region.clone();
-        next.map_parcels(|p| map[p.0 as usize]);
+        let mut op = site.op.clone();
+        op.map_parcels(|p| map[p.0 as usize]);
+        op.rename_operands(|o| format!("p{}", o.storage.parcel.0));
         sources.extend(site.sources.iter().map(|s| IndexSource {
             parcel: map[s.parcel.0 as usize],
             ..*s
         }));
         scalars.extend(site.scalars.iter().map(|&slot| (k, slot)));
-        match &mut region {
-            None => region = Some(next),
-            Some(region) => {
-                let appended = region.then(&next).map_err(|e| FusionRejection::Semantic {
-                    stage: k,
-                    reason: e.to_string(),
-                })?;
-                forwarded += appended.forwarded;
-            }
-        }
+        graph.push(op).map_err(|e| FusionRejection::Semantic {
+            stage: k,
+            reason: e.to_string(),
+        })?;
     }
-    let region = region.ok_or(FusionRejection::Empty)?;
-    let lowered = algebra::lower(&region, &sources).map_err(|e| FusionRejection::Semantic {
+    if graph.ops().is_empty() {
+        return Err(FusionRejection::Empty);
+    }
+    let lowered = algebra::lower(graph.region(), &sources).map_err(|e| FusionRejection::Semantic {
         stage: sites.len() - 1,
         reason: e.to_string(),
     })?;
@@ -550,6 +556,6 @@ pub(crate) fn synthesize(sites: &[&SemanticSite]) -> Result<SemanticProgram, Fus
         lowered,
         parcels,
         scalars,
-        forwarded,
+        graph,
     })
 }

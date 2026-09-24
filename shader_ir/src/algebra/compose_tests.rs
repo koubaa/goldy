@@ -100,7 +100,7 @@ fn composition_forwards_an_epilogue() {
     // The residual reads `y` and updates `x` in place.
     let second = add(m, [3, 2, 3]);
     let appended = fused.then(&second).unwrap();
-    assert_eq!((appended.forwarded, appended.covered.len()), (1, 0));
+    assert_eq!((appended.forwards.len(), appended.covered.len()), (1, 0));
     let env = Environment::new()
         .with_parcel(ParcelId(0), data(1, m * 40))
         .with_parcel(ParcelId(1), data(2, 40))
@@ -158,7 +158,7 @@ fn composition_relocates_into_a_selected_row() {
         Storage::strided(ParcelId(3), p * i64::from(d), &[i64::from(d), 1]),
     );
     let appended = fused.then(&second).unwrap();
-    assert_eq!(appended.forwarded, 1);
+    assert_eq!(appended.forwards.len(), 1);
     let p = appended.index_params[0];
     let env = Environment::new()
         .with_parcel(ParcelId(0), data(1, d * 7))
@@ -231,7 +231,7 @@ fn composition_rejects_partial_overlap() {
     ));
     // A read inside the written window forwards.
     let inside = copy(2, window(1, 1), window(0, 2));
-    assert_eq!(first.clone().then(&inside).unwrap().forwarded, 1);
+    assert_eq!(first.clone().then(&inside).unwrap().forwards.len(), 1);
     // Writes elements 2..6 of what `first` wrote as 0..4.
     let shifted_write = copy(4, window(0, 0), window(2, 1));
     assert!(matches!(

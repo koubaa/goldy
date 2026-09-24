@@ -1,8 +1,8 @@
-//! Index-notation meaning of the tensor recorder's kernels (see `semantic_fusion.rs`).
+//! Tensor-algebra meaning of the tensor recorder's kernels (see `semantic_fusion.rs`).
 //!
-//! Each function states what one recorded dispatch of `kernels.rs` stores, reading its
-//! operands through their views. It returns `None` for the cases it does not describe;
-//! those dispatches stay opaque to semantic fusion.
+//! Each function states what one recorded dispatch of `kernels.rs` stores, as a typed
+//! operation over its operands' views. It returns `None` for the cases it does not
+//! describe; those dispatches stay opaque to semantic fusion.
 
 use super::dtype::TensorDType;
 use super::kernels::{
@@ -11,7 +11,9 @@ use super::kernels::{
 };
 use super::view::TensorView;
 use crate::semantic_fusion::{SemanticSite, SiteBuilder, SiteParcel};
-use goldy_shader_ir::algebra::{Affine, BinaryOp, IndexSource, IndexVar, ReduceOp, Storage, Term, UnaryOp};
+use goldy_shader_ir::algebra::{
+    BinaryOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Term, UnaryOp,
+};
 use goldy_shader_ir::ElementType;
 
 /// The accumulator `tensor_reduce_f32` starts a max reduction from; a min starts from its negation.
@@ -28,36 +30,36 @@ fn dims(view: TensorView<'_>) -> Option<Vec<u32>> {
     (view.dtype() == TensorDType::F32 && !dims.contains(&0)).then_some(dims)
 }
 
-fn indices(s: &mut SiteBuilder, rank: usize) -> Vec<IndexVar> {
-    (0..rank).map(|a| s.region.index(&format!("i{a}"))).collect()
+fn operand(s: &mut SiteBuilder, name: &str, view: TensorView<'_>) -> Option<Operand> {
+    let shape = dims(view)?;
+    Some(Operand::new(name, &shape, storage(s, view)?))
 }
 
-/// `out[i] = body(inputs[i]..)` over `out`'s shape; `inputs` already have that shape.
+/// `out = body(inputs..)` element-wise over `out`'s shape; `inputs` already have that
+/// shape, and argument `n` of the body is `inputs[n]`.
 ///
 /// With `scalar`, the body also gets the f32 in user slot 0.
 fn elementwise(
     inputs: &[TensorView<'_>],
     out: TensorView<'_>,
     scalar: bool,
-    body: impl FnOnce(Vec<Term>, Option<Term>) -> Option<Term>,
+    body: impl FnOnce(Option<Term>) -> Option<Term>,
 ) -> Option<SemanticSite> {
     let shape = dims(out)?;
     let mut s = SiteBuilder::default();
-    let at = indices(&mut s, shape.len());
-    let mut reads = Vec::with_capacity(inputs.len());
-    for (n, &view) in inputs.iter().enumerate() {
-        if dims(view)? != shape {
-            return None;
-        }
-        let storage = storage(&mut s, view)?;
-        let value = s.region.input(&format!("x{n}"), &shape, storage);
-        reads.push(Term::read(value, at.iter().copied()));
-    }
+    let inputs = inputs
+        .iter()
+        .enumerate()
+        .map(|(n, &view)| operand(&mut s, &format!("x{n}"), view))
+        .collect::<Option<Vec<_>>>()?;
     let scalar = scalar.then(|| Term::scalar(s.scalar("scalar", 0)));
-    let body = body(reads, scalar)?;
-    let storage = storage(&mut s, out)?;
-    s.region.output("out", &shape, &at, body, storage);
-    s.finish()
+    let body = body(scalar)?;
+    let out = operand(&mut s, "out", out)?;
+    s.finish(OpKind::Map(Map {
+        shape,
+        inputs,
+        outputs: vec![(out, body)],
+    }))
 }
 
 /// `tensor_unary_f32` with `op` from `src` into `dst`.
@@ -71,17 +73,17 @@ pub(crate) fn unary(op: u32, src: TensorView<'_>, dst: TensorView<'_>) -> Option
         OP_RECIP => UnaryOp::Recip,
         _ => return None,
     };
-    elementwise(&[src], dst, false, |x, _| Some(Term::unary(op, x.into_iter().next()?)))
+    elementwise(&[src], dst, false, |_| Some(Term::unary(op, Term::arg(0))))
 }
 
 /// `tensor_unary_f32` filling `out` with its scalar.
 pub(crate) fn fill(out: TensorView<'_>) -> Option<SemanticSite> {
-    elementwise(&[], out, true, |_, scalar| scalar)
+    elementwise(&[], out, true, |scalar| scalar)
 }
 
 /// An f32 `tensor_copy_u32` from `src` into `dst`.
 pub(crate) fn copy(src: TensorView<'_>, dst: TensorView<'_>) -> Option<SemanticSite> {
-    elementwise(&[src], dst, false, |x, _| x.into_iter().next())
+    elementwise(&[src], dst, false, |_| Some(Term::arg(0)))
 }
 
 /// `tensor_binary_f32` with `op`. Scalar ops read only `a`.
@@ -102,47 +104,35 @@ pub(crate) fn binary(op: u32, a: TensorView<'_>, b: TensorView<'_>, out: TensorV
         _ => return None,
     };
     let inputs: &[TensorView<'_>] = if scalar { &[a] } else { &[a, b] };
-    elementwise(inputs, out, scalar, |x, s| {
-        let mut x = x.into_iter();
-        let lhs = x.next()?;
-        let rhs = if scalar { s? } else { x.next()? };
-        Some(Term::binary(op, lhs, rhs))
+    elementwise(inputs, out, scalar, |s| {
+        let rhs = if scalar { s? } else { Term::arg(1) };
+        Some(Term::binary(op, Term::arg(0), rhs))
     })
 }
 
 /// `tensor_reduce_f32` with `op` over `axis` of `src` into `out`, which keeps that axis
 /// with extent one.
 pub(crate) fn reduce(op: u32, src: TensorView<'_>, axis: usize, out: TensorView<'_>) -> Option<SemanticSite> {
-    let shape = dims(src)?;
-    let len = *shape.get(axis)?;
-    let mut kept = shape.clone();
-    kept[axis] = 1;
-    if dims(out)? != kept {
-        return None;
-    }
-    let mut s = SiteBuilder::default();
-    let at = indices(&mut s, shape.len());
-    let k = s.region.index("k");
-    let storage_src = storage(&mut s, src)?;
-    let x = s.region.input("x", &shape, storage_src);
-    let term = || {
-        let index = at
-            .iter()
-            .enumerate()
-            .map(|(a, &i)| Affine::from(if a == axis { k } else { i }));
-        Term::read(x, index)
-    };
+    let len = *dims(src)?.get(axis)?;
     // The kernel folds from its own starting accumulator, which bounds the reduction.
-    let body = match op {
-        OP_SUM => Term::sum(k, len, term()),
-        OP_MEAN => Term::binary(BinaryOp::Div, Term::sum(k, len, term()), Term::lit(len as f32)),
-        OP_RMAX => Term::lit(REDUCE_MAX_START).max(Term::reduce(ReduceOp::Max, k, len, term())),
-        OP_RMIN => Term::lit(-REDUCE_MAX_START).min(Term::reduce(ReduceOp::Min, k, len, term())),
+    let (op, finish) = match op {
+        OP_SUM => (ReduceOp::Sum, Term::arg(0)),
+        OP_MEAN => (ReduceOp::Sum, Term::arg(0) / Term::lit(len as f32)),
+        OP_RMAX => (ReduceOp::Max, Term::lit(REDUCE_MAX_START).max(Term::arg(0))),
+        OP_RMIN => (ReduceOp::Min, Term::lit(-REDUCE_MAX_START).min(Term::arg(0))),
         _ => return None,
     };
-    let storage_out = storage(&mut s, out)?;
-    s.region.output("out", &kept, &at, body, storage_out);
-    s.finish()
+    let mut s = SiteBuilder::default();
+    let input = operand(&mut s, "x", src)?;
+    let out = operand(&mut s, "out", out)?;
+    s.finish(OpKind::Reduction(Reduction {
+        op,
+        order: ReduceOrder::Sequential,
+        axis,
+        input,
+        out,
+        finish,
+    }))
 }
 
 /// A unique-write `tensor_scatter_f32` of one slice along `axis`: `src` has extent one
@@ -176,12 +166,12 @@ pub(crate) fn scatter_slice(
         element_type: ElementType::I32,
     };
     let position = s.index_param("position", 0..i64::from(target[axis]), source);
-    let at = indices(&mut s, shape.len());
-    let storage_src = storage(&mut s, src)?;
-    let x = s.region.input("x", &shape, storage_src);
+    let input = operand(&mut s, "x", src)?;
     let mut to = storage(&mut s, dst)?;
     to.offset = to.offset + position * to.strides[axis];
-    s.region
-        .output("out", &shape, &at, Term::read(x, at.iter().copied()), to);
-    s.finish()
+    s.finish(OpKind::Map(Map {
+        shape: shape.clone(),
+        inputs: vec![input],
+        outputs: vec![(Operand::new("out", &shape, to), Term::arg(0))],
+    }))
 }

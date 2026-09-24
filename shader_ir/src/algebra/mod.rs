@@ -21,13 +21,21 @@
 //! Regions compose: [`Region::then`] appends a region that runs afterwards, turning
 //! reads of storage the first one writes into reads of its values.
 //!
+//! Recorded operations arrive as named tensor algebra: an [`Op`] is a [`Map`], a
+//! [`Reduction`] or a [`Contraction`] in Einstein notation, and [`Op::expand`] is its
+//! meaning as a region. A [`Graph`] composes operations in order and keeps them beside
+//! the composed region; its [`Structure`] shows the composition around its
+//! contractions, with prologues and epilogues substituted and shared factors found.
+//!
 //! The notation is device-independent. Choosing what to materialize and how to map
 //! indices onto a grid is a [`Schedule`], which is separate; [`lower`] realizes a region
 //! under one as a single kernel.
 
 mod affine;
 mod compose;
+mod graph;
 mod interp;
+mod op;
 mod region;
 mod rewrite;
 mod schedule;
@@ -36,11 +44,15 @@ mod term;
 #[cfg(test)]
 mod compose_tests;
 #[cfg(test)]
+mod op_tests;
+#[cfg(test)]
 mod tests;
 
 pub use affine::{Affine, IndexParam, IndexVar, Sym};
 pub use compose::{Appended, ComposeError};
+pub use graph::{Contracted, Edge, Graph, GraphError, SharedFactor, Structure};
 pub use interp::{Environment, EvalError};
+pub use op::{Contraction, Expanded, Factor, Map, Op, OpError, OpKind, Operand, Params, Reduction};
 pub use region::{Definition, ParcelId, Region, RegionError, Role, Storage, Value};
 pub use rewrite::{Exactness, Law, RewriteError};
 pub use schedule::{
