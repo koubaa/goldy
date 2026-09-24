@@ -202,7 +202,7 @@ impl<'a> SchemeNodeStart<'a> {
     }
 }
 
-fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
+pub(super) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
     match access {
         goldy_shader_ir::AccessKind::Read => NodeAccess::Read,
         goldy_shader_ir::AccessKind::Write => NodeAccess::Write,

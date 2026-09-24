@@ -95,6 +95,8 @@ impl BodyEnv {
 pub struct LoweredBody {
     /// Module-scope `groupshared` declarations, one per line.
     pub workgroup_decls: String,
+    /// Module-scope functions the statements call, emitted after `workgroup_decls`.
+    pub functions: String,
     /// Statements, indented for their position in the entry.
     pub stmts: String,
 }
@@ -109,7 +111,11 @@ pub fn lower_body(body: &[Stmt], level: usize, env: &BodyEnv) -> LoweredBody {
         }
         emit_stmt(&mut stmts, stmt, level, &env.builtins, &env.tensor_slots);
     }
-    LoweredBody { workgroup_decls, stmts }
+    LoweredBody {
+        workgroup_decls,
+        functions: String::new(),
+        stmts,
+    }
 }
 
 /// Everything a virtual compute entry declares except its body.
@@ -172,6 +178,7 @@ pub fn assemble_virtual_entry(sig: &VirtualEntrySignature, body: &LoweredBody) -
     if !shared.is_empty() {
         shared.push('\n');
     }
+    let functions = &body.functions;
     let [wx, wy, wz] = sig.workgroup_size;
     let sig_text = sig_parts.join(", ");
     let stmts = &body.stmts;
@@ -180,6 +187,7 @@ pub fn assemble_virtual_entry(sig: &VirtualEntrySignature, body: &LoweredBody) -
          import goldy_exp;\n\n\
          {layout}\
          {shared}\
+         {functions}\
          [goldy_compute]\n\
          [numthreads({wx}, {wy}, {wz})]\n\
          void {entry}({sig_text}) {{\n{stmts}}}\n"

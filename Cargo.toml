@@ -303,6 +303,10 @@ name = "rust_compute_kernels"
 harness = false
 
 [[test]]
+name = "kernel_fusion"
+harness = false
+
+[[test]]
 name = "cross_submit_gpu"
 harness = false
 

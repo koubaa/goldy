@@ -165,8 +165,45 @@ statements into Slang against an entry's builtins and tensor slots, and
 `[goldy_compute]` entry. The standalone source is the one-body case.
 `ShaderKernel::namespaced` renames locals and workgroup arrays, and
 `rename_symbols` maps formal parameters, so several definitions can share one
-entry. This is the groundwork for kernel fusion; it does not change the Slang
-generated for standalone kernels.
+entry. Composition does not change the Slang generated for standalone kernels.
+
+### Fusing invocations
+
+`invoke(args..)` on a prepared (non-tensor) kernel returns a builder. Its grid
+methods (`over_1d`, `over_2d`, `over_3d` or `groups`) produce an `Invocation`,
+which holds a dispatch as a value. `Invocation::record` records it alone.
+`FusedKernel::prepare` composes a sequence of invocations into one compute
+pipeline, and `FusedKernel::record` records that sequence as one dispatch node:
+
+```rust
+let stages = [
+    scale.invoke(&x, &t, n, 2.0).over_1d(n),
+    bias.invoke(&t, &y, n, 1.0).over_1d(n),
+];
+let fused = goldy::FusedKernel::prepare(&device, &stages)?;
+fused.record(&mut scheme, "scale+bias", &stages)?;
+```
+
+Each constituent becomes a helper function that the fused entry calls in order,
+so `return` and locals stay per stage. Every constituent still loads and stores
+its parcels, so `t` above ends in the same state as after the unfused pair.
+Arguments that are the same parcel share one binding. This keeps a parcel that
+one stage writes and a later stage reads coherent within the dispatch.
+
+Composition is conservative. `prepare` returns `FusionError::Rejected` with a
+`FusionRejection` reason when any of these hold:
+
+- a stage has no retained definition;
+- a stage binds tensors;
+- stages differ in workgroup size or grid;
+- two different arguments overlap in memory and one of them is written;
+- a parcel written by one stage is read or written by another at anything other
+  than the stage's own thread index;
+- the fused entry exceeds the portable binding or workgroup-memory limits.
+
+Record the invocations unfused in that case. The fused pipeline depends on which
+arguments are the same parcel, not on the parcels themselves, so one
+`FusedKernel` can record any invocation sequence with the same shape.
 
 Raw hand-written `[goldy_compute]` shaders continue to work. Simple sources can
 also be parsed into the same `KernelDef` shape via

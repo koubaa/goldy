@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   physical entry-point generation, and `ShaderKernel::rename_symbols` / `namespaced`
   give composed locals and workgroup arrays collision-free names. Groundwork for kernel fusion.
 
+- **Explicit kernel fusion** — generated kernels gain `invoke(args..)`, which returns an
+  `Invocation` (a dispatch as a value) once a grid is given. `FusedKernel::prepare` composes a
+  sequence of invocations into one compute pipeline, and `FusedKernel::record` records it
+  as one dispatch node. Every intermediate parcel is still stored and reloaded, and fused
+  results match the unfused sequence byte for byte. Composition is conservative: stages
+  must share workgroup size and grid, and a parcel shared between stages with a write must
+  be accessed at the thread's own index. Otherwise `FusionError::Rejected` names the reason
+  (`FusionRejection`). Tensor-bound kernels are not yet fusable. `goldy::kernel::ir::compose`
+  exposes the device-free composition.
+
 ### Removed
 
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
