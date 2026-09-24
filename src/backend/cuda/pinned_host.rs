@@ -16,6 +16,8 @@ pub(crate) struct CudaPinnedHost {
     ptr: *mut u8,
     len: usize,
     flags: u32,
+    /// Device address of `ptr` when the range is mapped (upload staging).
+    device_ptr: Option<u64>,
 }
 
 // SAFETY: the allocation is process-local CUDA host memory. CPU_WRITABLE staging is
@@ -26,9 +28,16 @@ unsafe impl Send for CudaPinnedHost {}
 unsafe impl Sync for CudaPinnedHost {}
 
 impl CudaPinnedHost {
-    /// Write-combined pinned host memory for CPU→GPU uploads.
+    /// Write-combined, device-mapped pinned host memory for CPU→GPU uploads.
+    ///
+    /// The mapping lets graph captures read small uploads with a kernel instead of an
+    /// HtoD memcpy node (see [`super::runtime_module::HostCopyKernel`]).
     pub(super) fn alloc(ctx: &Arc<CudaContext>, len: usize) -> Result<Self> {
-        Self::alloc_with_flags(ctx, len, sys::CU_MEMHOSTALLOC_WRITECOMBINED as u32)
+        Self::alloc_with_flags(
+            ctx,
+            len,
+            (sys::CU_MEMHOSTALLOC_WRITECOMBINED | sys::CU_MEMHOSTALLOC_DEVICEMAP) as u32,
+        )
     }
 
     /// Cacheable pinned host memory for GPU→CPU readback.
@@ -46,16 +55,30 @@ impl CudaPinnedHost {
         let ptr = ptr as *mut u8;
         // SAFETY: freshly allocated `len` bytes.
         unsafe { std::ptr::write_bytes(ptr, 0, len) };
+        let device_ptr = if flags & sys::CU_MEMHOSTALLOC_DEVICEMAP as u32 != 0 {
+            let mut dptr: sys::CUdeviceptr = 0;
+            // SAFETY: `ptr` is a live DEVICEMAP host allocation in the bound context.
+            let status = unsafe { sys::cuMemHostGetDevicePointer_v2(&mut dptr, ptr.cast(), 0) };
+            (status == sys::CUresult::CUDA_SUCCESS).then_some(dptr)
+        } else {
+            None
+        };
         Ok(Self {
             ctx: Arc::clone(ctx),
             ptr,
             len,
             flags,
+            device_ptr,
         })
     }
 
     pub(super) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Device address of byte 0, if the range is mapped into the device address space.
+    pub(super) fn device_ptr(&self) -> Option<u64> {
+        self.device_ptr
     }
 
     pub(super) fn as_slice(&self) -> &[u8] {

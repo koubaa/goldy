@@ -216,6 +216,8 @@ struct CudaDevice {
     limits: CudaDeviceLimits,
     /// NVRTC-compiled updater for device-updatable indirect dispatch.
     indirect_updater: Arc<runtime_module::IndirectUpdater>,
+    /// NVRTC-compiled kernel for graph-captured small uploads.
+    host_copy: Arc<runtime_module::HostCopyKernel>,
     /// DX12 presentation companion (cuda+graphics+dx12 on Windows only).
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     dx12: Option<Arc<dx12_companion::Dx12Companion>>,
@@ -2099,6 +2101,10 @@ impl CudaBackend {
             // Late-physicalize from this submit's usage before building CudaOps.
             self.ensure_requirements_for_commands(commands)?;
         }
+        let host_copy = {
+            let device = self.context(ctx)?.device;
+            Arc::clone(&self.device(device)?.host_copy)
+        };
         let mut ops = Vec::new();
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
@@ -2239,13 +2245,16 @@ impl CudaBackend {
                         let memory = Arc::clone(dst_buf.memory_arc()?);
                         let abs_offset = dst_buf.offset + *dst_offset;
                         let device_ptr = pending_submit::bake_device_ptr(stream, &memory, abs_offset);
+                        let len = *size as usize;
                         ops.push(CudaOp::WriteFromHost {
                             memory,
                             abs_offset,
                             device_ptr,
                             host,
                             host_offset: start,
-                            len: *size as usize,
+                            len,
+                            capture_kernel: (len <= runtime_module::COPY_FROM_HOST_MAX_BYTES)
+                                .then(|| Arc::clone(&host_copy)),
                         });
                     } else {
                         let src_memory = Arc::clone(src_buf.memory_arc()?);
@@ -3798,6 +3807,10 @@ impl GpuBackend for CudaBackend {
             runtime_module::load_indirect_updater(&ctx, (major, minor))
                 .with_context(|| format!("CUDA: load indirect updater for adapter {adapter_id}"))?,
         );
+        let host_copy = Arc::new(
+            runtime_module::load_host_copy(&ctx, (major, minor))
+                .with_context(|| format!("CUDA: load host-copy kernel for adapter {adapter_id}"))?,
+        );
         // Dedicated non-blocking stream — never the legacy default stream. Default-stream
         // allocs implicitly wait on every other stream, including a THREAD_LOCAL graph
         // capture on the submit worker, which yields CUDA_ERROR_STREAM_CAPTURE_ISOLATION
@@ -3824,6 +3837,7 @@ impl GpuBackend for CudaBackend {
             graph_stats: Arc::clone(&self.graph_stats),
             limits,
             indirect_updater,
+            host_copy,
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             dx12: None,
         };

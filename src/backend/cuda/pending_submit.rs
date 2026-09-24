@@ -192,6 +192,8 @@ pub(super) enum CudaOp {
         host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
         host_offset: usize,
         len: usize,
+        /// Captures as a kernel node reading mapped `host` instead of an HtoD memcpy node.
+        capture_kernel: Option<Arc<super::runtime_module::HostCopyKernel>>,
     },
     Copy {
         src: Arc<Mutex<CudaSlice<u8>>>,
@@ -634,9 +636,17 @@ pub(super) fn collect_pins(
             CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
                 buffers.push(Arc::clone(memory));
             }
-            CudaOp::WriteFromHost { memory, host, .. } => {
+            CudaOp::WriteFromHost {
+                memory,
+                host,
+                capture_kernel,
+                ..
+            } => {
                 buffers.push(Arc::clone(memory));
                 hosts.push(Arc::clone(host));
+                if let Some(kernel) = capture_kernel {
+                    modules.push(Arc::clone(&kernel.module));
+                }
             }
             CudaOp::CopyToReadbackHost { src, host, .. } => {
                 buffers.push(Arc::clone(src));
@@ -806,6 +816,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 host,
                 host_offset,
                 len,
+                capture_kernel,
             } => {
                 let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.lock");
                 let host = host.lock().unwrap();
@@ -816,7 +827,10 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 let src = &host.as_slice()[*host_offset..host_end];
                 {
                     let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.htod");
-                    if capturing {
+                    let mapped_src = host.device_ptr().map(|base| base + *host_offset as u64);
+                    if let (true, Some(kernel), Some(src_ptr)) = (capturing, capture_kernel, mapped_src) {
+                        capture_copy_from_host(stream, kernel, src_ptr, *device_ptr, *len)?;
+                    } else if capturing {
                         capture_memcpy_htod(stream, *device_ptr, src).context("CUDA: WriteFromHost HtoD failed")?;
                     } else {
                         let mut guard = memory.lock().unwrap();
@@ -1576,6 +1590,35 @@ fn capture_memset_zeros(stream: &Arc<CudaStream>, device_ptr: u64, size: u64) ->
     }
     unsafe { cudarc::driver::result::memset_d8_async(device_ptr, 0, size as usize, stream.cu_stream()) }
         .context("CUDA: capture memset failed")
+}
+
+fn capture_copy_from_host(
+    stream: &Arc<CudaStream>,
+    kernel: &super::runtime_module::HostCopyKernel,
+    src_ptr: u64,
+    dst_ptr: u64,
+    len: usize,
+) -> Result<()> {
+    // Baked pointers as POD words, as in `launch_indirect_for_capture`.
+    let src_arg = U64Word(src_ptr);
+    let dst_arg = U64Word(dst_ptr);
+    let len_arg = U32Word(u32::try_from(len).context("CUDA: host-copy length exceeds u32")?);
+    // SAFETY: argument order and types match goldy_copy_from_host; `src_ptr` is a
+    // mapped pinned range kept alive by the retained graph's host pins.
+    unsafe {
+        stream
+            .launch_builder(&kernel.function)
+            .arg(&src_arg)
+            .arg(&dst_arg)
+            .arg(&len_arg)
+            .launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (super::runtime_module::COPY_FROM_HOST_THREADS, 1, 1),
+                shared_mem_bytes: 0,
+            })
+            .context("CUDA: host-copy launch failed during graph capture")?;
+    }
+    Ok(())
 }
 
 fn capture_memcpy_htod(stream: &Arc<CudaStream>, device_ptr: u64, src: &[u8]) -> Result<()> {
