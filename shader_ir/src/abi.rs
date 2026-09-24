@@ -427,7 +427,7 @@ pub struct KernelSource {
 }
 
 /// Full prepare-time kernel descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KernelDef {
     pub source: KernelSource,
     pub entry: String,
@@ -436,6 +436,9 @@ pub struct KernelDef {
     pub builtins: BuiltinMask,
     pub source_map: SourceMap,
     pub abi_version: u32,
+    /// Structured definition `source` was lowered from. `None` for hand-authored
+    /// Slang, which stays opaque to composition.
+    pub definition: Option<crate::ShaderKernel>,
 }
 
 impl KernelDef {
@@ -457,6 +460,7 @@ impl KernelDef {
             builtins,
             source_map,
             abi_version: KERNEL_ABI_VERSION,
+            definition: None,
         }
     }
 

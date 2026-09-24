@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GOLDY_MATMUL=library` forces cuBLAS / MPS and `GOLDY_MATMUL=fallback` forces the
   stdlib kernels. Realization happens on first submit and is retained.
 
+- **Retained kernel definitions** — `#[goldy::compute]` kernels keep their structured
+  `ShaderKernel` beside the canonical Slang: `KernelDef::definition` after `prepare`, and
+  `<kernel>::definition()` without a device. `goldy::kernel::ir` splits lowering into
+  `lower_body` and `assemble_virtual_entry` so definitions can be composed before
+  physical entry-point generation, and `ShaderKernel::rename_symbols` / `namespaced`
+  give composed locals and workgroup arrays collision-free names. Groundwork for kernel fusion.
+
 ### Removed
 
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
@@ -52,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Contiguous tensor indexing** — `GoldyTensorLayout` gains a `flags` word. Packed
   views set `FLAG_CONTIGUOUS`, and `goldy_tensor_offset` returns `offset + i`
   without per-axis div/mod.
+
+- **Breaking:** `KernelDef` gains a `definition` field and no longer implements `Eq`
+  (`PartialEq` remains). Hand-authored and parsed Slang set it to `None`.
 
 ### Fixed
 

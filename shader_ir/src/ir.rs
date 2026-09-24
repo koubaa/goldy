@@ -182,7 +182,10 @@ pub enum Stmt {
     Expr(Expr),
 }
 
-/// A lowered compute kernel body plus signature metadata used for emission.
+/// Structured definition of a virtual compute entry.
+///
+/// Retained beside the canonical source so the entry can be lowered on its own or
+/// composed with other definitions before physical entry-point generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderKernel {
     pub name: String,
@@ -191,4 +194,7 @@ pub struct ShaderKernel {
     pub builtins: crate::BuiltinMask,
     pub body: Vec<Stmt>,
     pub source_map: crate::SourceMap,
+    /// Slang declarations of `#[goldy::gpu]` types named by `params`, emitted ahead
+    /// of the import. Resolved at prepare time, so empty in proc-macro output.
+    pub type_decls: Vec<String>,
 }

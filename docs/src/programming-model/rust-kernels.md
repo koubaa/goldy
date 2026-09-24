@@ -6,7 +6,7 @@ Slang at compile time, then prepare and record through the normal Scheme path.
 This is the initial design for issue #78. It is **not** arbitrary Rust, a second
 runtime compiler, or CUDA `<<<>>>` syntax. Slang remains the runtime backend
 compiler; the proc-macro is an AOT frontend that produces structured
-`KernelDef` metadata and typed `record` helpers.
+`KernelDef` metadata, a retained structured definition, and typed `record` helpers.
 
 To **step the same kernel on the CPU** without a handwritten Rust twin, see
 [CPU host-callable shaders](../debugging/cpu-host-callable.md) (issue #292).
@@ -140,7 +140,7 @@ Rust kernel
     ▼
 goldy_derive::compute
     ├── syn AST validation (GPU dialect)
-    ├── goldy_shader_ir
+    ├── goldy_shader_ir ShaderKernel (retained as definition())
     ├── canonical [goldy_compute] Slang
     └── KernelDef / KernelParam ABI
     │
@@ -151,6 +151,22 @@ Kernel::prepare(device)
     ▼
 typed record() → SchemeNodeBuilder bindings in declaration order
 ```
+
+### Retained definitions
+
+Each generated module exposes `definition()`, the structured `ShaderKernel` the
+canonical source was lowered from, and a prepared kernel keeps it in
+`KernelDef::definition`. Hand-authored Slang has no definition and is opaque to
+composition.
+
+`goldy::kernel::ir` lowers a definition in two steps: `lower_body` turns its
+statements into Slang against an entry's builtins and tensor slots, and
+`assemble_virtual_entry` wraps one or more lowered bodies in a single
+`[goldy_compute]` entry. The standalone source is the one-body case.
+`ShaderKernel::namespaced` renames locals and workgroup arrays, and
+`rename_symbols` maps formal parameters, so several definitions can share one
+entry. This is the groundwork for kernel fusion; it does not change the Slang
+generated for standalone kernels.
 
 Raw hand-written `[goldy_compute]` shaders continue to work. Simple sources can
 also be parsed into the same `KernelDef` shape via

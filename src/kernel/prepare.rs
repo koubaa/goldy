@@ -223,6 +223,16 @@ pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel
         );
     }
 
+    if let Some(definition) = &def.definition {
+        debug_assert_eq!(
+            goldy_shader_ir::emit_canonical_compute_source(definition)
+                .source
+                .canonical_slang,
+            def.source.canonical_slang,
+            "kernel `{}`: retained definition does not lower to its canonical source",
+            definition.name
+        );
+    }
     dump_kernel_artifacts(&def, None)?;
 
     let shader = ShaderModule::from_slang(device, &def.source.canonical_slang)

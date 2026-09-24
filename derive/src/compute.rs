@@ -1,5 +1,6 @@
 //! `#[goldy_derive::compute]` — compile-time Rust GPU dialect → Slang + KernelAbi.
 
+use crate::ir_tokens;
 use goldy_shader_ir::{
     emit_canonical_compute_source, BinOp, BuiltinFn, BuiltinMask, ElementType, Expr, KernelParam, ParamCategory,
     ScalarType, ShaderKernel, SourceMap, Stmt, TensorDimSpec, TensorShapeSpec, UnaryOp, WorkgroupReduceOp,
@@ -307,6 +308,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             rust_file: "<goldy-compute>".into(),
             rust_line: 0,
         },
+        type_decls: Vec::new(),
     };
 
     let def = emit_canonical_compute_source(&kernel);
@@ -317,74 +319,12 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     let rust_file = &def.source_map.rust_file;
     let rust_line = def.source_map.rust_line;
 
-    let param_tokens: Vec<_> = def
-        .params
-        .iter()
-        .map(|p| {
-            let name = &p.name;
-            let slang_type = &p.slang_type;
-            let category = match p.category {
-                ParamCategory::BufferRead => quote! { ::goldy::kernel::ParamCategory::BufferRead },
-                ParamCategory::BufferReadWrite => {
-                    quote! { ::goldy::kernel::ParamCategory::BufferReadWrite }
-                }
-                ParamCategory::BufferWrite => quote! { ::goldy::kernel::ParamCategory::BufferWrite },
-                ParamCategory::Uniform => quote! { ::goldy::kernel::ParamCategory::Uniform },
-                ParamCategory::StorageImage => quote! { ::goldy::kernel::ParamCategory::StorageImage },
-                ParamCategory::Scalar => quote! { ::goldy::kernel::ParamCategory::Scalar },
-            };
-            let access = match p.access {
-                Some(goldy_shader_ir::AccessKind::Read) => {
-                    quote! { Some(::goldy::kernel::AccessKind::Read) }
-                }
-                Some(goldy_shader_ir::AccessKind::Write) => {
-                    quote! { Some(::goldy::kernel::AccessKind::Write) }
-                }
-                Some(goldy_shader_ir::AccessKind::ReadWrite) => {
-                    quote! { Some(::goldy::kernel::AccessKind::ReadWrite) }
-                }
-                None => quote! { None },
-            };
-            let scalar = match p.scalar {
-                Some(ScalarType::U32) => quote! { Some(::goldy::kernel::ScalarType::U32) },
-                Some(ScalarType::I32) => quote! { Some(::goldy::kernel::ScalarType::I32) },
-                Some(ScalarType::F32) => quote! { Some(::goldy::kernel::ScalarType::F32) },
-                Some(ScalarType::Bool) => quote! { Some(::goldy::kernel::ScalarType::Bool) },
-                None => quote! { None },
-            };
-            let stride = match p.stride_bytes {
-                Some(s) => quote! { Some(#s) },
-                None => quote! { None },
-            };
-            let is_tensor = p.is_tensor;
-            let shape_spec = quote_shape_spec(&p.shape_spec);
-            quote! {
-                ::goldy::kernel::KernelParam {
-                    name: #name.to_string(),
-                    category: #category,
-                    access: #access,
-                    scalar: #scalar,
-                    slang_type: #slang_type.to_string(),
-                    stride_bytes: #stride,
-                    is_tensor: #is_tensor,
-                    shape_spec: #shape_spec,
-                }
-            }
-        })
-        .collect();
-
-    let builtins_tokens = {
-        let g = builtins.global_id;
-        let l = builtins.local_id;
-        let w = builtins.workgroup_id;
-        quote! {
-            ::goldy::kernel::BuiltinMask {
-                global_id: #g,
-                local_id: #l,
-                workgroup_id: #w,
-            }
-        }
-    };
+    let param_tokens: Vec<_> = def.params.iter().map(ir_tokens::param).collect();
+    let builtins_tokens = ir_tokens::builtins(builtins);
+    let definition_tokens = ir_tokens::kernel(
+        &kernel,
+        quote! { ::std::vec![#(#gpu_type_idents::GPU_TYPE.to_slang_source()?),*] },
+    );
 
     let record_method = if has_tensors {
         quote! {
@@ -433,7 +373,16 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             use super::*;
 
             /// Canonical `[goldy_compute]` Slang produced by `#[goldy::compute]`.
+            ///
+            /// Excludes the declarations of `#[goldy::gpu]` parameter types, which
+            /// `prepare` places ahead of it.
             pub const CANONICAL_SOURCE: &str = #slang;
+
+            /// Structured definition this kernel was lowered from, including the
+            /// declarations of its `#[goldy::gpu]` parameter types.
+            pub fn definition() -> ::core::result::Result<::goldy::kernel::ShaderKernel, ::goldy::GoldyError> {
+                Ok(#definition_tokens)
+            }
 
             #[doc = #docs]
             pub struct #kernel_struct {
@@ -443,11 +392,12 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             impl #kernel_struct {
                 /// Compile (or hit the shader cache) and create a device-scoped pipeline.
                 pub fn prepare(device: &::goldy::Runtime) -> ::core::result::Result<Self, ::goldy::GoldyError> {
+                    let definition = definition()?;
                     let mut canonical_slang = ::std::string::String::new();
-                    #(
-                        canonical_slang.push_str(&#gpu_type_idents::GPU_TYPE.to_slang_source()?);
+                    for decl in &definition.type_decls {
+                        canonical_slang.push_str(decl);
                         canonical_slang.push('\n');
-                    )*
+                    }
                     canonical_slang.push_str(CANONICAL_SOURCE);
                     let def = ::goldy::kernel::KernelDef {
                         source: ::goldy::kernel::KernelSource {
@@ -462,6 +412,7 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                             rust_line: #rust_line,
                         },
                         abi_version: #abi_version,
+                        definition: Some(definition),
                     };
                     let prepared = ::goldy::kernel::prepare_kernel(device, def).map_err(::goldy::GoldyError::Backend)?;
                     Ok(Self { prepared })
@@ -567,26 +518,6 @@ fn parse_tensor_dim(input: ParseStream) -> Result<TensorDimSpec, Error> {
         return Ok(TensorDimSpec::Symbol(id.to_string()));
     }
     Err(input.error("tensor dim must be `_`, an integer literal, or an identifier"))
-}
-
-fn quote_shape_spec(spec: &Option<TensorShapeSpec>) -> TokenStream {
-    match spec {
-        None => quote! { None },
-        Some(spec) => {
-            let dims = spec.dims.iter().map(|d| match d {
-                TensorDimSpec::Any => quote! { ::goldy::kernel::TensorDimSpec::Any },
-                TensorDimSpec::Exact(n) => quote! { ::goldy::kernel::TensorDimSpec::Exact(#n) },
-                TensorDimSpec::Symbol(name) => {
-                    quote! { ::goldy::kernel::TensorDimSpec::Symbol(#name.to_string()) }
-                }
-            });
-            quote! {
-                Some(::goldy::kernel::TensorShapeSpec {
-                    dims: vec![#(#dims),*],
-                })
-            }
-        }
-    }
 }
 
 enum ClassifiedParam {
@@ -1804,6 +1735,27 @@ mod tests {
         assert!(text.contains("TensorShapeSpec"), "{text}");
         assert!(text.contains("TensorDimSpec :: Symbol"), "{text}");
         assert!(text.contains("check_tensor_view"), "{text}");
+    }
+
+    #[test]
+    fn generated_module_retains_definition() {
+        let tokens = expand(
+            quote! { workgroup_size = [64, 1, 1] },
+            quote! {
+                fn scale(input: &[f32], output: gpu::Scattered<f32>, factor: f32) {
+                    let i = gpu::global_id().x;
+                    output[i] = input[i] * factor + 1e40;
+                }
+            },
+        )
+        .unwrap();
+        let text = tokens.to_string();
+        assert!(text.contains("pub fn definition ()"), "{text}");
+        assert!(text.contains("definition : Some (definition)"), "{text}");
+        assert!(text.contains("ir :: Stmt :: Let"), "{text}");
+        assert!(text.contains("ir :: BinOp :: Mul"), "{text}");
+        let inf_bits = f32::INFINITY.to_bits();
+        assert!(text.contains(&format!("f32 :: from_bits ({inf_bits}u32)")), "{text}");
     }
 
     #[test]

@@ -150,6 +150,32 @@ fn main() {
             assert!(softmax_slice::CANONICAL_SOURCE.contains("exp(scores[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
             Ok(())
         }),
+        libtest_mimic::Trial::test("rust_kernel_retained_definition_lowers_to_canonical_source", || {
+            use goldy::kernel::ir::emit_canonical_compute_source;
+            let lowered = |definition: goldy::kernel::ShaderKernel| {
+                assert!(definition.type_decls.is_empty(), "{}", definition.name);
+                emit_canonical_compute_source(&definition).source.canonical_slang
+            };
+            assert_eq!(lowered(saxpy::definition()?), saxpy::CANONICAL_SOURCE);
+            assert_eq!(lowered(double_u32::definition()?), double_u32::CANONICAL_SOURCE);
+            assert_eq!(lowered(fill_red::definition()?), fill_red::CANONICAL_SOURCE);
+            assert_eq!(
+                lowered(workgroup_sum_manual::definition()?),
+                workgroup_sum_manual::CANONICAL_SOURCE
+            );
+            assert_eq!(lowered(reduce_sum::definition()?), reduce_sum::CANONICAL_SOURCE);
+            assert_eq!(lowered(reduce_max::definition()?), reduce_max::CANONICAL_SOURCE);
+            assert_eq!(lowered(softmax_slice::definition()?), softmax_slice::CANONICAL_SOURCE);
+
+            let plasma = read_plasma_uniforms::definition()?;
+            assert_eq!(plasma.name, "read_plasma_uniforms");
+            assert_eq!(plasma.type_decls, vec![PlasmaUniforms::GPU_TYPE.to_slang_source()?]);
+            assert_eq!(
+                emit_canonical_compute_source(&plasma).source.canonical_slang,
+                format!("{}\n{}", plasma.type_decls[0], read_plasma_uniforms::CANONICAL_SOURCE)
+            );
+            Ok(())
+        }),
         libtest_mimic::Trial::test("rust_kernel_workgroup_sum_gpu", {
             let device = Arc::clone(&device);
             move || {
@@ -276,6 +302,7 @@ fn main() {
                 let y = pool.acquire_buffer_with_data(&y_data, BufferKind::Scattered)?;
 
                 let kernel = saxpy::Kernel::prepare(&device)?;
+                assert_eq!(kernel.def().definition, Some(saxpy::definition()?));
                 let mut scheme = Scheme::new(&ctx);
                 kernel
                     .record(&mut scheme, "saxpy", &x, &y, a)
@@ -299,6 +326,7 @@ fn main() {
         libtest_mimic::Trial::test("kernel_abi_roundtrip_from_canonical", || {
             let def = goldy::slang::try_kernel_def_from_source(saxpy::CANONICAL_SOURCE)
                 .expect("parse saxpy canonical source");
+            assert!(def.definition.is_none(), "parsed Slang stays opaque");
             assert_eq!(def.entry, "cs_main");
             assert_eq!(def.workgroup_size, [64, 1, 1]);
             assert_eq!(def.params.len(), 3);
