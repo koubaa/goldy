@@ -198,6 +198,75 @@ fn deposit_feeds_retained_worker_across_frames() {
     );
 }
 
+/// In-scheme deposits of odd length at an unaligned offset and above the small-upload
+/// threshold feed the worker's own dispatch on every retained replay.
+#[test]
+fn in_scheme_unaligned_and_large_deposits_replay_fresh_bytes() {
+    let (device, _cb) = make_device();
+    let ctx = submission_context(&device);
+
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+
+    const WORDS: usize = 2048;
+    const SMALL_AT: usize = 3;
+    const SMALL_LEN: usize = 5;
+    const LARGE_AT: usize = 16;
+    const LARGE_LEN: usize = 6000;
+    let pool = &device;
+    let input = pool
+        .acquire_buffer_with_data(&[0u32; WORDS], BufferKind::Scattered)
+        .expect("input parcel");
+    let output = pool
+        .acquire_buffer_with_data(&[0u32; WORDS], BufferKind::Scattered)
+        .expect("output parcel");
+
+    let mut worker = Scheme::new(&ctx);
+    let memory = MemoryExchange::new(&ctx);
+    let small = memory
+        .bind_deposit(
+            &mut worker,
+            DepositTarget::buffer_at(input.whole(), SMALL_AT as u64, SMALL_LEN as u64),
+        )
+        .expect("declare small deposit");
+    let large = memory
+        .bind_deposit(
+            &mut worker,
+            DepositTarget::buffer_at(input.whole(), LARGE_AT as u64, LARGE_LEN as u64),
+        )
+        .expect("declare large deposit");
+    worker
+        .node("copy", &pipeline)
+        .with_parcel(&input, NodeAccess::Read)
+        .with_parcel(&output, NodeAccess::Write)
+        .dispatch((WORDS / 8) as u32, 1, 1);
+
+    let mut expected = vec![0u8; WORDS * 4];
+    const FRAMES: u8 = 4;
+    for frame in 1..=FRAMES {
+        let small_bytes: Vec<u8> = (0..SMALL_LEN as u8).map(|i| frame.wrapping_mul(31).wrapping_add(i)).collect();
+        let large_bytes: Vec<u8> = (0..LARGE_LEN)
+            .map(|i| frame.wrapping_mul(7).wrapping_add(i as u8))
+            .collect();
+        small.write(0, &small_bytes).expect("stage small deposit");
+        large.write(0, &large_bytes).expect("stage large deposit");
+        expected[SMALL_AT..SMALL_AT + SMALL_LEN].copy_from_slice(&small_bytes);
+        expected[LARGE_AT..LARGE_AT + LARGE_LEN].copy_from_slice(&large_bytes);
+
+        let mut submission = worker.submit().expect("submit worker");
+        let got = (&mut submission >> &*output).take::<u8>().expect("host take");
+        assert_eq!(&*got, &expected[..], "frame {frame} must observe both staged payloads");
+    }
+
+    assert_eq!(worker.replay_stats().records, 1, "worker records once");
+    #[cfg(not(feature = "metal"))]
+    assert_eq!(
+        worker.replay_stats().resubmit_hits,
+        u64::from(FRAMES) - 1,
+        "submissions after the first are retention hits",
+    );
+}
+
 /// Copy-only scheme: pre-initialized input, no upload — retention hit on submission 1.
 #[test]
 fn clean_scheme_resubmits_without_rerecord() {
