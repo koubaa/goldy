@@ -69,6 +69,18 @@ pub(crate) struct ShaderProvenance {
     /// Present when the author's source is a yielding script; `source` is then the
     /// lowered *prologue* translation unit.
     pub(crate) yielding: Option<Arc<YieldScript>>,
+    /// Content identity shared by every module compiled from the same kernel program.
+    kernel: Option<Arc<KernelIdentity>>,
+}
+
+/// Stable identity of a kernel program, beyond the module that compiled it.
+///
+/// Modules carrying one id bind alike, so their specialized variants are interchangeable.
+#[derive(Debug)]
+pub(crate) struct KernelIdentity {
+    pub(crate) id: goldy_shader_ir::KernelId,
+    /// Logical name of each scalar wire slot, for diagnostics.
+    pub(crate) scalars: Vec<String>,
 }
 
 /// The yielding-script structure of a [`ShaderModule`] whose source used
@@ -102,7 +114,12 @@ impl ShaderProvenance {
             layout_checks,
             compute_entry: OnceLock::new(),
             yielding,
+            kernel: None,
         }
+    }
+
+    pub(crate) fn kernel(&self) -> Option<&Arc<KernelIdentity>> {
+        self.kernel.as_ref()
     }
 
     /// Yielding-script structure, when this module's source is a yielding script.
@@ -495,6 +512,14 @@ impl ShaderModule {
     /// Retained compile inputs, shared with every pipeline built from this module.
     pub(crate) fn provenance(&self) -> &Arc<ShaderProvenance> {
         &self.provenance
+    }
+
+    /// Declare the kernel program this module compiles, before any pipeline is built from it.
+    pub(crate) fn with_kernel_identity(mut self, identity: KernelIdentity) -> Self {
+        Arc::get_mut(&mut self.provenance)
+            .expect("a module's provenance is shared only once pipelines are built")
+            .kernel = Some(Arc::new(identity));
+        self
     }
 
     pub(crate) fn source(&self) -> &str {

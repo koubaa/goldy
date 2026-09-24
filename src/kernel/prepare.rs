@@ -4,7 +4,7 @@ use crate::compute::ComputePipeline;
 use crate::kernel::{DispatchBuilder, KernelDef};
 use crate::runtime::Runtime;
 use crate::scheme::{Scheme, SchemeBindable};
-use crate::shader::ShaderModule;
+use crate::shader::{KernelIdentity, ShaderModule};
 use crate::task_graph::NodeAccess;
 use anyhow::{Context, Result};
 #[cfg(feature = "tensor")]
@@ -215,6 +215,15 @@ pub(super) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAc
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
 pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
+    prepare_kernel_as(device, def, None)
+}
+
+/// [`prepare_kernel`] for a program whose variants are shared by every module of `identity`.
+pub(super) fn prepare_kernel_as(
+    device: &Runtime,
+    def: KernelDef,
+    identity: Option<KernelIdentity>,
+) -> Result<PreparedKernel> {
     if def.abi_version != goldy_shader_ir::KERNEL_ABI_VERSION {
         anyhow::bail!(
             "kernel ABI version mismatch: shader has {}, runtime expects {}",
@@ -235,8 +244,11 @@ pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel
     }
     dump_kernel_artifacts(&def, None)?;
 
-    let shader = ShaderModule::from_slang(device, &def.source.canonical_slang)
+    let mut shader = ShaderModule::from_slang(device, &def.source.canonical_slang)
         .with_context(|| format!("compiling rust kernel `{}`", def.entry))?;
+    if let Some(identity) = identity {
+        shader = shader.with_kernel_identity(identity);
+    }
     let pipeline = ComputePipeline::new_with_label(device, &shader, Some(&format!("rust_kernel_{}", def.entry)))?;
 
     Ok(PreparedKernel {

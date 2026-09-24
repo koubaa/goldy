@@ -193,7 +193,7 @@ earn promotion, and a param that is stable is both free to retain and profitable
 
 | Cache | Keyed by | Holds | Evicting it costs |
 |---|---|---|---|
-| Variant PSO cache | `(shader identity, baked slots and values)` | Compiled pipeline | A recompile |
+| Variant PSO cache | `(program identity, baked slots and values)` | Compiled pipeline | A recompile |
 | Per-site prediction | Dispatch-site identity | Which slots are baked | A re-record |
 
 Keeping them separate means a site can be demoted without throwing away the compiled
@@ -415,8 +415,16 @@ compile inputs — source, search paths, defines, optimization level, layout che
 shared `ShaderProvenance` with a process-unique id, and every `ComputePipeline` built from
 the module carries an `Arc` to it. The runtime can therefore compile a variant of the
 program a site is running after the caller has dropped the module
-(`ShaderModule::from_provenance`), and variants are keyed by provenance id plus baked
+(`ShaderModule::from_provenance`), and variants are keyed by program identity plus baked
 words.
+
+The program identity is usually the provenance id, so each module has its own variants. A
+fused kernel (`FusedKernel`) also records a stable `KernelId` on its provenance. The id
+is derived from its constituent kernels, argument map and workgroup size, and the cache
+keys its variants by that id instead. Two fused kernels with one id compile the same
+program and bind alike, so they share variants. The provenance also names each fused
+scalar slot after the constituent scalar it binds, and the trace events below use those
+names.
 
 Ownership matters more than it looks: on Vulkan, `destroy_compute_pipeline` waits for
 device idle, so dropping a variant is not a background operation. The scheme holds the
@@ -431,7 +439,9 @@ usually still holds it after that.
 `specialization_demotions`; `Scheme::node_is_specialized(NodeId)` answers for one site.
 Demotions are visible in the stats immediately after the `set_node_param` that caused
 them. Each transition also emits a `tracing` event under the `goldy` target (`debug` for
-warm / promote / demote, `warn` for a failed compile or a pinned site).
+warm / promote / demote, `warn` for a failed compile or a pinned site). Events carry the
+site's `kernel` id (`-` without one) and its baked slots as `name=word`. Unnamed slots
+appear as `slot0=0x7`; fused slots are named by origin, as in `1:damp.enabled=0x1`.
 
 ### Backend differences
 

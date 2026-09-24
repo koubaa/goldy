@@ -60,6 +60,25 @@ impl Default for SpecializationPolicy {
 /// `(slot, wire word)` pairs in ascending slot order — the identity of one variant.
 pub(crate) type BakedSlots = Vec<(u32, u32)>;
 
+/// The program a variant specializes.
+///
+/// A module that declares a [`crate::shader::KernelIdentity`] shares variants with every
+/// other module of that kernel program; any other module has variants of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VariantKey {
+    Module(u64),
+    Kernel(goldy_shader_ir::KernelId),
+}
+
+impl VariantKey {
+    fn of(provenance: &ShaderProvenance) -> Self {
+        match provenance.kernel() {
+            Some(kernel) => Self::Kernel(kernel.id),
+            None => Self::Module(provenance.id()),
+        }
+    }
+}
+
 /// Counters the predictor bumps; the scheme folds them into [`crate::scheme::ReplayStats`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SpecializationEvents {
@@ -79,31 +98,23 @@ struct VariantCache {
 }
 
 struct VariantEntry {
-    provenance_id: u64,
+    key: VariantKey,
     baked: BakedSlots,
     pipeline: Arc<ComputePipeline>,
 }
 
 impl VariantCache {
-    fn get(&mut self, provenance_id: u64, baked: &[(u32, u32)]) -> Option<Arc<ComputePipeline>> {
-        let pos = self
-            .entries
-            .iter()
-            .position(|e| e.provenance_id == provenance_id && e.baked == baked)?;
+    fn get(&mut self, key: VariantKey, baked: &[(u32, u32)]) -> Option<Arc<ComputePipeline>> {
+        let pos = self.entries.iter().position(|e| e.key == key && e.baked == baked)?;
         let entry = self.entries.remove(pos).expect("position came from iter");
         let pipeline = Arc::clone(&entry.pipeline);
         self.entries.push_back(entry);
         Some(pipeline)
     }
 
-    fn insert(&mut self, provenance_id: u64, baked: BakedSlots, pipeline: Arc<ComputePipeline>) {
-        self.entries
-            .retain(|e| !(e.provenance_id == provenance_id && e.baked == baked));
-        self.entries.push_back(VariantEntry {
-            provenance_id,
-            baked,
-            pipeline,
-        });
+    fn insert(&mut self, key: VariantKey, baked: BakedSlots, pipeline: Arc<ComputePipeline>) {
+        self.entries.retain(|e| !(e.key == key && e.baked == baked));
+        self.entries.push_back(VariantEntry { key, baked, pipeline });
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
         }
@@ -198,6 +209,30 @@ impl SitePredictor {
 
     fn is_promoted(&self) -> bool {
         self.promoted.is_some()
+    }
+
+    fn variant_key(&self) -> VariantKey {
+        VariantKey::of(&self.provenance)
+    }
+
+    /// Kernel identity for diagnostics; `-` for a module without one.
+    fn kernel(&self) -> String {
+        self.provenance
+            .kernel()
+            .map_or_else(|| "-".into(), |k| k.id.to_string())
+    }
+
+    /// `baked` as `name=word` pairs, naming slots by their kernel's scalar origins.
+    fn describe(&self, baked: &[(u32, u32)]) -> String {
+        let names = self.provenance.kernel().map(|k| k.scalars.as_slice()).unwrap_or(&[]);
+        baked
+            .iter()
+            .map(|&(slot, word)| match names.get(slot as usize) {
+                Some(name) => format!("{name}={word:#x}"),
+                None => format!("slot{slot}={word:#x}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Slots that have held their value long enough to be baked, with those values.
@@ -393,8 +428,9 @@ impl SchemePredictor {
             tracing::debug!(
                 node,
                 label = %site.label,
+                kernel = %site.kernel(),
                 slot,
-                baked = ?demoted.baked,
+                baked = %site.describe(&demoted.baked),
                 "specialization: demoted (baked param changed)"
             );
             rebind = Some(site.universal);
@@ -588,7 +624,7 @@ impl SchemePredictor {
             let job = site.job.take().expect("checked");
             match outcome {
                 Ok(()) => {
-                    let pipeline = variants.lock().unwrap().get(site.provenance.id(), &job.baked);
+                    let pipeline = variants.lock().unwrap().get(site.variant_key(), &job.baked);
                     match pipeline {
                         Some(pipeline) => {
                             site.ready = Some(Candidate {
@@ -607,7 +643,8 @@ impl SchemePredictor {
                     tracing::warn!(
                         node,
                         label = %site.label,
-                        baked = ?job.baked,
+                        kernel = %site.kernel(),
+                        baked = %site.describe(&job.baked),
                         failures = site.failures,
                         %err,
                         "specialization: variant compile failed"
@@ -637,7 +674,13 @@ impl SchemePredictor {
             }
             let handle = next.pipeline.handle;
             events.promotions += 1;
-            tracing::debug!(node, label = %site.label, baked = ?next.baked, "specialization: promoted");
+            tracing::debug!(
+                node,
+                label = %site.label,
+                kernel = %site.kernel(),
+                baked = %site.describe(&next.baked),
+                "specialization: promoted"
+            );
             site.promoted = Some(next);
             return NodeChange::Bind(handle);
         }
@@ -647,7 +690,7 @@ impl SchemePredictor {
             let target = site.bake_target(slots);
             let already = site.promoted.as_ref().map(|c| c.baked.as_slice()).unwrap_or(&[]);
             if !target.is_empty() && target != already {
-                let cached = variants.lock().unwrap().get(site.provenance.id(), &target);
+                let cached = variants.lock().unwrap().get(site.variant_key(), &target);
                 match cached {
                     Some(pipeline) => {
                         site.ready = Some(Candidate {
@@ -657,7 +700,13 @@ impl SchemePredictor {
                     }
                     None => {
                         events.warms += 1;
-                        tracing::debug!(node, label = %site.label, baked = ?target, "specialization: warming");
+                        tracing::debug!(
+                            node,
+                            label = %site.label,
+                            kernel = %site.kernel(),
+                            baked = %site.describe(&target),
+                            "specialization: warming"
+                        );
                         site.job = Some(spawn_compile(device, site, target, variants));
                     }
                 }
@@ -689,6 +738,7 @@ fn spawn_compile(
 
     let device = device.clone();
     let provenance = Arc::clone(&site.provenance);
+    let key = site.variant_key();
     let entry = site.entry.clone();
     let label = site.label.clone();
     let variants = Arc::clone(variants);
@@ -702,10 +752,7 @@ fn spawn_compile(
             let result = compile_variant(&device, &provenance, &entry, &label, &worker_baked, &worker_cancel);
             let filed = match result {
                 Ok(Some(pipeline)) => {
-                    variants
-                        .lock()
-                        .unwrap()
-                        .insert(provenance.id(), worker_baked, Arc::new(pipeline));
+                    variants.lock().unwrap().insert(key, worker_baked, Arc::new(pipeline));
                     Ok(())
                 }
                 // Cancelled before it did any work: nothing to report, nothing to cache.
@@ -773,15 +820,18 @@ mod tests {
             entries: VecDeque::new(),
             capacity: 2,
         };
-        cache.insert(1, vec![(0, 1)], mk());
-        cache.insert(1, vec![(0, 2)], mk());
-        assert!(cache.get(1, &[(0, 1)]).is_some(), "touch makes (0,1) most recent");
-        cache.insert(1, vec![(0, 3)], mk());
+        let (one, two) = (VariantKey::Module(1), VariantKey::Module(2));
+        cache.insert(one, vec![(0, 1)], mk());
+        cache.insert(one, vec![(0, 2)], mk());
+        assert!(cache.get(one, &[(0, 1)]).is_some(), "touch makes (0,1) most recent");
+        cache.insert(one, vec![(0, 3)], mk());
         assert_eq!(cache.len(), 2);
-        assert!(cache.get(1, &[(0, 2)]).is_none(), "least recently used was evicted");
-        assert!(cache.get(1, &[(0, 1)]).is_some());
-        assert!(cache.get(1, &[(0, 3)]).is_some());
-        assert!(cache.get(2, &[(0, 3)]).is_none(), "keyed by provenance too");
+        assert!(cache.get(one, &[(0, 2)]).is_none(), "least recently used was evicted");
+        assert!(cache.get(one, &[(0, 1)]).is_some());
+        assert!(cache.get(one, &[(0, 3)]).is_some());
+        assert!(cache.get(two, &[(0, 3)]).is_none(), "keyed by program too");
+        let kernel = VariantKey::Kernel(goldy_shader_ir::KernelId(1));
+        assert!(cache.get(kernel, &[(0, 3)]).is_none(), "a kernel id is not a module id");
     }
 
     #[test]

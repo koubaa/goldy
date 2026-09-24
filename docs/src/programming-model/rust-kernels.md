@@ -205,6 +205,23 @@ Record the invocations unfused in that case. The fused pipeline depends on which
 arguments are the same parcel, not on the parcels themselves, so one
 `FusedKernel` can record any invocation sequence with the same shape.
 
+A fused dispatch is an ordinary
+[specialization](../design/shader-specialization.md) site. Scalars that stay
+stable are baked into the fused program. If a baked scalar changes, the node
+goes back to the universal fused pipeline; it is never split back into its
+constituents. The fused entry takes every constituent's scalars in order, and
+`FusedKernel::scalar_slot` finds the fused slot of one constituent scalar:
+
+```rust
+let node = fused.record(&mut scheme, "scale+bias", &stages)?.node();
+let bias = fused.scalar_slot(1, "bias").unwrap();
+scheme.set_node_param(node, bias, 3.0f32.to_bits())?;
+```
+
+`FusedKernel::id` is a stable identity derived from the constituent kernels,
+the argument map and the workgroup size. Two `FusedKernel`s with the same id
+compile the same program, so they share specialized variants.
+
 Raw hand-written `[goldy_compute]` shaders continue to work. Simple sources can
 also be parsed into the same `KernelDef` shape via
 `goldy::slang::try_kernel_def_from_source`, and wrappers can be emitted from ABI

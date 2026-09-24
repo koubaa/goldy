@@ -8820,4 +8820,124 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert_eq!(f.scheme.specialization().cached_variants(), 2);
         assert!(f.scheme.specialization().cached_variants() <= SpecializationPolicy::default().max_cached_variants);
     }
+
+    mod fused {
+        use super::*;
+        use crate::kernel::{FusedKernel, Invocation};
+
+        #[goldy::compute(workgroup_size = [64, 1, 1])]
+        fn scale(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, factor: f32) {
+            let i = goldy::gpu::global_id().x;
+            if i < count {
+                output[i] = input[i] * factor;
+            }
+        }
+
+        #[goldy::compute(workgroup_size = [64, 1, 1])]
+        fn bias(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, bias: f32) {
+            let i = goldy::gpu::global_id().x;
+            if i < count {
+                output[i] = input[i] + bias;
+            }
+        }
+
+        struct Kernels {
+            scale: scale::Kernel,
+            bias: bias::Kernel,
+        }
+
+        impl Kernels {
+            fn prepare(device: &Runtime) -> Self {
+                Self {
+                    scale: scale::Kernel::prepare(device).unwrap(),
+                    bias: bias::Kernel::prepare(device).unwrap(),
+                }
+            }
+
+            fn chain<'a>(&'a self, p: &'a [crate::Buffer]) -> Vec<Invocation<'a>> {
+                vec![
+                    self.scale.invoke(&p[0], &p[1], 64, 2.0).over_1d(64),
+                    self.bias.invoke(&p[1], &p[2], 64, 1.0).over_1d(64),
+                ]
+            }
+        }
+
+        fn parcels(device: &Runtime) -> Vec<crate::Buffer> {
+            (0..3)
+                .map(|_| {
+                    device
+                        .acquire_buffer(
+                            256,
+                            crate::types::BufferKind::Scattered,
+                            None,
+                            crate::types::BufferFlags::empty(),
+                            None,
+                        )
+                        .unwrap()
+                })
+                .collect()
+        }
+
+        #[test]
+        fn a_fused_dispatch_specializes_as_one_site_and_demotes_to_its_universal() {
+            let _cb = crate::test_support::CbReuseOverride::force_enabled();
+            let _spec = SpecializationOverride::force_enabled();
+            let device = mock_runtime();
+            let k = Kernels::prepare(&device);
+            let p = parcels(&device);
+            let fused = FusedKernel::prepare(&device, &k.chain(&p)).unwrap();
+            let ctx = device.create_context().unwrap();
+            let mut scheme = Scheme::new(&ctx);
+            let node = fused.record(&mut scheme, "scale+bias", &k.chain(&p)).unwrap().node();
+            scheme.submit().unwrap();
+
+            frames(&mut scheme, PROMOTE + 1);
+            assert!(scheme.node_is_specialized(node));
+            assert_eq!(variant_compiles(&device), 1, "one variant for the whole fused dispatch");
+            assert_ne!(bound_pipeline(&scheme, node), fused.pipeline().handle);
+
+            let bias = fused.scalar_slot(1, "bias").expect("stage 1 binds `bias`");
+            scheme.set_node_param(node, bias, 3.0f32.to_bits()).unwrap();
+            assert!(!scheme.node_is_specialized(node), "demoted inside set_node_param");
+            assert_eq!(
+                bound_pipeline(&scheme, node),
+                fused.pipeline().handle,
+                "demotes to the universal fused pipeline, not to the constituents"
+            );
+            assert_eq!(scheme.ir_node_count(), 1);
+            assert_eq!(scheme.replay_stats().specialization_demotions, 1);
+        }
+
+        #[test]
+        fn fused_kernels_with_one_identity_share_variants() {
+            let _cb = crate::test_support::CbReuseOverride::force_enabled();
+            let _spec = SpecializationOverride::force_enabled();
+            let device = mock_runtime();
+            let k = Kernels::prepare(&device);
+            let (p, q) = (parcels(&device), parcels(&device));
+            let a = FusedKernel::prepare(&device, &k.chain(&p)).unwrap();
+            let b = FusedKernel::prepare(&device, &k.chain(&q)).unwrap();
+            assert_eq!(
+                a.id(),
+                b.id(),
+                "same constituents and parcel sharing, different parcels"
+            );
+            assert_ne!(a.pipeline().handle, b.pipeline().handle);
+
+            let ctx = device.create_context().unwrap();
+            let mut scheme = Scheme::new(&ctx);
+            let node_a = a.record(&mut scheme, "a", &k.chain(&p)).unwrap().node();
+            scheme.submit().unwrap();
+            frames(&mut scheme, PROMOTE + 1);
+            assert!(scheme.node_is_specialized(node_a));
+            assert_eq!(variant_compiles(&device), 1);
+
+            let node_b = b.record(&mut scheme, "b", &k.chain(&q)).unwrap().node();
+            scheme.submit().unwrap();
+            frames(&mut scheme, PROMOTE + 1);
+            assert!(scheme.node_is_specialized(node_b));
+            assert_eq!(variant_compiles(&device), 1, "b promoted from a's variant");
+            assert_eq!(bound_pipeline(&scheme, node_a), bound_pipeline(&scheme, node_b));
+        }
+    }
 }
