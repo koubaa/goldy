@@ -85,6 +85,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
     let mut params = Vec::new();
     let mut record_args = Vec::new();
     let mut bind_stmts = Vec::new();
+    let mut invoke_args = Vec::new();
+    let mut invoke_stmts = Vec::new();
     let mut validate_stmts = Vec::new();
     let mut gpu_type_idents: Vec<syn::Ident> = Vec::new();
     let mut type_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -117,6 +119,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 params.push(KernelParam::buffer_read(&pname, elem));
                 type_env.insert(pname.clone(), format!("BufRO<{}>", elem.slang_name()));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -133,6 +137,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 params.push(KernelParam::buffer_read_named(&pname, &type_name));
                 type_env.insert(pname.clone(), format!("BufRO<{type_name}>"));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -145,6 +151,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 params.push(KernelParam::buffer_read_write(&pname, elem));
                 type_env.insert(pname.clone(), format!("Scattered<{}>", elem.slang_name()));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -157,6 +165,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 params.push(KernelParam::buffer_write(&pname, elem));
                 type_env.insert(pname.clone(), format!("Scattered<{}>", elem.slang_name()));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -245,6 +255,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 });
                 type_env.insert(pname, type_name);
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -260,18 +272,26 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     ScalarType::U32 => {
                         bind_stmts.push(quote! { start = start.bind_u32(#pident); });
                         record_args.push(quote! { #pident: u32 });
+                        invoke_args.push(quote! { #pident: u32 });
+                        invoke_stmts.push(quote! { args = args.bind_u32(#pident); });
                     }
                     ScalarType::I32 => {
                         bind_stmts.push(quote! { start = start.bind_i32(#pident); });
                         record_args.push(quote! { #pident: i32 });
+                        invoke_args.push(quote! { #pident: i32 });
+                        invoke_stmts.push(quote! { args = args.bind_i32(#pident); });
                     }
                     ScalarType::F32 => {
                         bind_stmts.push(quote! { start = start.bind_f32(#pident); });
                         record_args.push(quote! { #pident: f32 });
+                        invoke_args.push(quote! { #pident: f32 });
+                        invoke_stmts.push(quote! { args = args.bind_f32(#pident); });
                     }
                     ScalarType::Bool => {
                         bind_stmts.push(quote! { start = start.bind_bool(#pident); });
                         record_args.push(quote! { #pident: bool });
+                        invoke_args.push(quote! { #pident: bool });
+                        invoke_stmts.push(quote! { args = args.bind_bool(#pident); });
                     }
                 }
             }
@@ -279,6 +299,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 params.push(KernelParam::storage_image(&pname, &elem));
                 type_env.insert(pname.clone(), format!("DirectSpatial<{elem}>"));
                 record_args.push(quote! { #pident: &impl ::goldy::kernel::KernelBindable });
+                invoke_args.push(quote! { #pident: &'a impl ::goldy::kernel::KernelBindable });
+                invoke_stmts.push(quote! { args = args.resource(#pident); });
                 bind_stmts.push(quote! {
                     start = ::goldy::kernel::KernelBindable::__goldy_bind_kernel(
                         #pident,
@@ -354,6 +376,15 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                 let mut start = self.prepared.begin_record(scheme, label);
                 #(#bind_stmts)*
                 start.finish()
+            }
+
+            /// Bind arguments in declaration order as a dispatch value; give it a grid
+            /// to record it, or compose it with others through `goldy::FusedKernel`.
+            pub fn invoke<'a>(&'a self, #(#invoke_args),*) -> ::goldy::kernel::InvocationBuilder<'a> {
+                #[allow(unused_mut)]
+                let mut args = self.prepared.invoke();
+                #(#invoke_stmts)*
+                args
             }
         }
     };

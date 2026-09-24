@@ -3313,6 +3313,13 @@ pub(crate) trait SchemeBindable {
     fn buffer_parcel(&self) -> Option<Parcel> {
         None
     }
+
+    /// The [`ResourceId`] [`Self::resolve`] reports, known without a scheme.
+    ///
+    /// `None` when identity is only minted at record time or the bindable holds no data.
+    fn resource_identity(&self) -> Option<ResourceId> {
+        None
+    }
 }
 
 impl SchemeBindable for Parcel {
@@ -3325,6 +3332,10 @@ impl SchemeBindable for Parcel {
 
     fn buffer_parcel(&self) -> Option<Parcel> {
         self.buffer_handle().is_some().then(|| self.clone())
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.resource_id())
     }
 }
 
@@ -3339,6 +3350,10 @@ impl SchemeBindable for crate::Buffer {
 
     fn buffer_parcel(&self) -> Option<Parcel> {
         Some(self.whole().clone())
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.whole().resource_id())
     }
 }
 
@@ -3360,6 +3375,10 @@ impl SchemeBindable for Lease<LeaseTexture> {
             parcel.resource_index(access),
         )
     }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.parcel().resource_id())
+    }
 }
 
 impl SchemeBindable for Lease<LeaseBuffer> {
@@ -3379,6 +3398,10 @@ impl SchemeBindable for Lease<LeaseBuffer> {
 
     fn buffer_parcel(&self) -> Option<Parcel> {
         Some(self.inner.parcel().clone())
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.inner.parcel().resource_id())
     }
 }
 
@@ -3424,6 +3447,10 @@ impl SchemeBindable for crate::Texture {
         });
         let parcel = self.whole();
         (Some((parcel.resource_id(), Some(parcel.stamp_handle()))), slot)
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.whole().resource_id())
     }
 }
 

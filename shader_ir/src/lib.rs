@@ -11,6 +11,7 @@
 
 mod abi;
 mod emit;
+mod fuse;
 mod ir;
 mod symbols;
 
@@ -18,6 +19,9 @@ pub use abi::*;
 pub use emit::{
     assemble_virtual_entry, emit_canonical_compute_source, emit_user_helper_body, lower_body, tensor_slot_map, BodyEnv,
     LoweredBody, VirtualEntrySignature, VIRTUAL_ENTRY_NAME,
+};
+pub use fuse::{
+    compose, FusedDefinition, FusedStage, FusionLimits, FusionRejection, FusionStage, PORTABLE_WORKGROUP_BYTES,
 };
 pub use ir::*;
 pub use symbols::SymbolKind;

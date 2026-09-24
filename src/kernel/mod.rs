@@ -7,24 +7,27 @@
 //!
 //! Generated kernels also retain their [`ShaderKernel`] definition
 //! ([`KernelDef::definition`]), which [`ir`] can lower on its own or compose.
+//! [`FusedKernel`] lowers compatible [`Invocation`]s of such kernels to one dispatch.
 
 mod dispatch;
+mod fusion;
 mod prepare;
 
 pub use dispatch::{DispatchBuilder, RecordedDispatch};
+pub use fusion::{FusedKernel, FusionError, Invocation, InvocationBuilder};
 pub use goldy_shader_ir::{
-    AccessKind, BoundTensorDim, BuiltinMask, ElementType, KernelDef, KernelParam, KernelSource, ParamCategory,
-    ScalarType, ShaderKernel, SourceMap, TensorDimSpec, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG,
-    TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
+    AccessKind, BoundTensorDim, BuiltinMask, ElementType, FusedDefinition, FusedStage, FusionRejection, KernelDef,
+    KernelParam, KernelSource, ParamCategory, ScalarType, ShaderKernel, SourceMap, TensorDimSpec, TensorShapeSpec,
+    KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
 
 /// Structured shader IR of retained kernel definitions, and its lowering to
 /// `[goldy_compute]` Slang.
 pub mod ir {
     pub use goldy_shader_ir::{
-        assemble_virtual_entry, emit_canonical_compute_source, lower_body, tensor_slot_map, BinOp, BodyEnv, BuiltinFn,
-        Expr, LoweredBody, ShaderKernel, Stmt, SymbolKind, UnaryOp, VirtualEntrySignature, WorkgroupReduceOp,
-        VIRTUAL_ENTRY_NAME,
+        assemble_virtual_entry, compose, emit_canonical_compute_source, lower_body, tensor_slot_map, BinOp, BodyEnv,
+        BuiltinFn, Expr, FusionLimits, FusionStage, LoweredBody, ShaderKernel, Stmt, SymbolKind, UnaryOp,
+        VirtualEntrySignature, WorkgroupReduceOp, PORTABLE_WORKGROUP_BYTES, VIRTUAL_ENTRY_NAME,
     };
 }
 pub use prepare::{dump_kernel_artifacts, prepare_kernel, PreparedKernel, SchemeNodeStart, TensorShapeEnv};
@@ -39,7 +42,18 @@ pub trait KernelBindable {
         start: SchemeNodeStart<'a>,
         access: crate::task_graph::NodeAccess,
     ) -> SchemeNodeStart<'a>;
+
+    /// Parcel identity fusion uses to deduplicate and alias-check actual arguments.
+    #[doc(hidden)]
+    fn __goldy_kernel_identity(&self) -> KernelArgIdentity {
+        KernelArgIdentity(None)
+    }
 }
+
+/// Opaque parcel identity of a [`KernelBindable`]; `None` when unknown before recording.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelArgIdentity(pub(crate) Option<crate::task_graph::ResourceId>);
 
 macro_rules! impl_kernel_bindable {
     ($($t:ty),+ $(,)?) => {$(
@@ -50,6 +64,10 @@ macro_rules! impl_kernel_bindable {
                 access: crate::task_graph::NodeAccess,
             ) -> SchemeNodeStart<'a> {
                 start.bind_resource(self, access)
+            }
+
+            fn __goldy_kernel_identity(&self) -> KernelArgIdentity {
+                KernelArgIdentity(crate::scheme::SchemeBindable::resource_identity(self))
             }
         }
     )+};
@@ -76,6 +94,10 @@ impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseTexture> {
     ) -> SchemeNodeStart<'a> {
         start.bind_resource(self, access)
     }
+
+    fn __goldy_kernel_identity(&self) -> KernelArgIdentity {
+        KernelArgIdentity(crate::scheme::SchemeBindable::resource_identity(self))
+    }
 }
 
 impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseBuffer> {
@@ -85,6 +107,10 @@ impl KernelBindable for crate::scheme::Lease<crate::scheme::LeaseBuffer> {
         access: crate::task_graph::NodeAccess,
     ) -> SchemeNodeStart<'a> {
         start.bind_resource(self, access)
+    }
+
+    fn __goldy_kernel_identity(&self) -> KernelArgIdentity {
+        KernelArgIdentity(crate::scheme::SchemeBindable::resource_identity(self))
     }
 }
 
