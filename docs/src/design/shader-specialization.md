@@ -245,6 +245,12 @@ last submit, and per slot:
 The set of slots at or past their threshold is the site's **bake target**. It is per-slot:
 a site with a stable mode flag and a moving counter bakes the flag.
 
+Sites are keyed by the dispatch the scheme actually submits. When automatic kernel fusion
+promotes an execution plan, the constituents' sites retire and the fused dispatch gets a
+fresh site against the universal fused pipeline. Other sites move to their executed index
+with their history. Returning to the recorded graph reverses this, and the constituents
+start fresh.
+
 ### Stages
 
 Compilation is expensive and uncancellable once started, so promotion is staged. Compiling

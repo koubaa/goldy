@@ -185,10 +185,17 @@ fused.record(&mut scheme, "scale+bias", &stages)?;
 ```
 
 Each constituent becomes a helper function that the fused entry calls in order,
-so `return` and locals stay per stage. Every constituent still loads and stores
-its parcels, so `t` above ends in the same state as after the unfused pair.
+so `return` and locals stay per stage. Every constituent still stores its
+parcels, so `t` above ends in the same state as after the unfused pair.
 Arguments that are the same parcel share one binding. This keeps a parcel that
 one stage writes and a later stage reads coherent within the dispatch.
+
+Scalar buffer elements that cross stages at the thread's own index, like `t[i]`
+above, are forwarded. The fused entry keeps the element in a register, so
+`bias` reads the value that `scale` stored instead of reloading it.
+`FusedDefinition::forwarded` lists these parameters.
+`FusedKernel::prepare_conservative` builds the same composition with every load
+kept, which is useful for comparing results.
 
 Composition is conservative. `prepare` returns `FusionError::Rejected` with a
 `FusionRejection` reason when any of these hold:
@@ -221,6 +228,26 @@ scheme.set_node_param(node, bias, 3.0f32.to_bits())?;
 `FusedKernel::id` is a stable identity derived from the constituent kernels,
 the argument map and the workgroup size. Two `FusedKernel`s with the same id
 compile the same program, so they share specialized variants.
+
+### Automatic fusion
+
+A retained scheme can fuse recorded dispatches without `FusedKernel`. This is
+off by default. `scheme.set_automatic_fusion(true)` turns it on for one scheme,
+and `GOLDY_FUSION=1` turns it on for every scheme that never calls
+`set_automatic_fusion`. The scheme fuses each run of adjacent generated-kernel dispatches in one
+group that the rules above admit. Planning starts after the structure has
+survived one submit, and the fused pipelines compile on worker threads. The
+recorded dispatches keep running until the compiles finish, and the scheme then
+switches over in one re-record. The recorded graph is never rewritten, so
+`NodeId`s and `set_node_param` keep addressing the recorded dispatches.
+Recording, `include`, or re-pipelining or re-gridding a constituent returns to
+the recorded graph. The fusion then comes back from the scheme's cache.
+
+`Scheme::fusion_report` lists each fused region with its constituent nodes and
+status, and each run that stopped short with its `FusionRejection`.
+`ReplayStats::fusion_promotions`, `fusion_fallbacks` and
+`fusion_compile_failures` count the transitions. A region whose compile fails
+stays unfused.
 
 Raw hand-written `[goldy_compute]` shaders continue to work. Simple sources can
 also be parsed into the same `KernelDef` shape via

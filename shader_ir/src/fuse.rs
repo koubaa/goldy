@@ -6,12 +6,17 @@
 //! body and its locals stay in its own scope. Only workgroup arrays, which Slang places
 //! at module scope, are namespaced.
 //!
-//! Every parcel load and store of every constituent is preserved. Admission proves
-//! that removing the dispatch boundary between constituents cannot change any
-//! observable parcel state: every parameter written by one constituent and accessed by
-//! another is accessed only at the invoking thread's own global id.
+//! Every parcel store of every constituent is preserved. Admission proves that removing
+//! the dispatch boundary between constituents cannot change any observable parcel
+//! state: every parameter written by one constituent and accessed by another is
+//! accessed only at the invoking thread's own global id.
+//!
+//! Such a parameter's element is also forwarded from stage to stage in registers (see
+//! [`FusedDefinition::forwarded`]), so a consumer does not reload what a producer just
+//! stored. [`FusedDefinition::conservative`] turns forwarding off and keeps every load.
 
 use crate::abi::StableHasher;
+use crate::forward::{forward_body, zero_literal, ForwardedLocal};
 use crate::{
     assemble_virtual_entry, emit_canonical_compute_source, lower_body, AccessKind, BodyEnv, BuiltinFn, BuiltinMask,
     Expr, KernelDef, KernelId, KernelParam, LoweredBody, ParamCategory, ShaderKernel, SourceMap, Stmt, SymbolKind,
@@ -25,7 +30,7 @@ pub const PORTABLE_WORKGROUP_BYTES: u32 = 16 * 1024;
 
 /// Bump when [`FusedDefinition::lower`] changes the program it emits for the same
 /// constituents, so [`FusedDefinition::id`] stops matching earlier fused programs.
-pub const FUSION_ABI_VERSION: u32 = 1;
+pub const FUSION_ABI_VERSION: u32 = 2;
 
 /// One constituent of a composition, in execution order.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +68,10 @@ pub struct FusedDefinition {
     /// `gid.xy` → 2). The dispatch grid must be one thread deep beyond this rank for
     /// those indices to be distinct per thread. `None` when no parcel crosses stages.
     pub dependence_rank: Option<u8>,
+    /// Fused buffer parameters whose element at the thread's own index is kept in
+    /// registers across stages, in ascending order. Stores still reach the parcel;
+    /// loads after a store or an earlier load read the register instead.
+    pub forwarded: Vec<usize>,
 }
 
 /// One constituent of a [`FusedDefinition`].
@@ -288,7 +297,13 @@ pub fn compose(
         });
     }
     let type_decls = merge_type_decls(stages)?;
-    let dependence_rank = dependence_rank(stages, &params)?;
+    let dependences = dependences(stages, &params)?;
+    let dependence_rank = dependences.iter().map(|&(_, r)| r).min();
+    let forwarded = dependences
+        .iter()
+        .filter(|&&(j, rank)| rank == 1 && forwardable(&params[j]))
+        .map(|&(j, _)| j)
+        .collect();
 
     let mut builtins = BuiltinMask::NONE;
     for s in stages {
@@ -316,12 +331,14 @@ pub fn compose(
         stages,
         type_decls,
         dependence_rank,
+        forwarded,
     })
 }
 
 impl FusedDefinition {
-    /// Identity of the fused program: the constituent kernel ids, the argument map and
-    /// the workgroup size, under the kernel and fusion ABI versions.
+    /// Identity of the fused program: the constituent kernel ids, the argument map, the
+    /// workgroup size and the forwarded parameters, under the kernel and fusion ABI
+    /// versions.
     ///
     /// Every other field is derived from these, so definitions with one id lower to the
     /// same program up to source-location comments.
@@ -338,7 +355,18 @@ impl FusedDefinition {
                 h.u64(j as u64);
             }
         }
+        h.u64(self.forwarded.len() as u64);
+        for &j in &self.forwarded {
+            h.u64(j as u64);
+        }
         h.finish()
+    }
+
+    /// The same composition with no value forwarding: every constituent load and store
+    /// reaches its parcel.
+    pub fn conservative(mut self) -> Self {
+        self.forwarded.clear();
+        self
     }
 
     /// Origin of every fused scalar, indexed by fused scalar slot.
@@ -377,11 +405,32 @@ impl FusedDefinition {
     /// The returned [`KernelDef`] carries no retained definition.
     pub fn lower(&self) -> KernelDef {
         let mut body = LoweredBody::default();
+        for &j in &self.forwarded {
+            let param = &self.params[j];
+            let local = forwarded_local(j);
+            let zero = zero_literal(&param.slang_type).expect("forwarded params have a forwardable element type");
+            body.stmts.push_str(&format!(
+                "    {} {} = {zero};\n    bool {} = false;\n",
+                param.slang_type, local.value, local.ok
+            ));
+        }
         for (k, stage) in self.stages.iter().enumerate() {
             let def = &stage.definition;
             let function = stage_function_name(k, &def.name);
+            let locals: HashMap<String, ForwardedLocal> = def
+                .params
+                .iter()
+                .zip(&stage.args)
+                .filter(|(_, j)| self.forwarded.contains(j))
+                .map(|(formal, &j)| (formal.name.clone(), forwarded_local(j)))
+                .collect();
+            let stmts = if locals.is_empty() {
+                std::borrow::Cow::Borrowed(&def.body)
+            } else {
+                std::borrow::Cow::Owned(forward_body(&def.body, &locals))
+            };
             let lowered = lower_body(
-                &def.body,
+                &stmts,
                 1,
                 &BodyEnv {
                     builtins: def.builtins,
@@ -397,6 +446,21 @@ impl FusedDefinition {
                 .map(|(formal, &j)| format!("{} {}", self.params[j].slang_param_type(), formal.name))
                 .collect();
             let mut actuals: Vec<String> = stage.args.iter().map(|&j| self.params[j].name.clone()).collect();
+            let mut passed: Vec<usize> = stage
+                .args
+                .iter()
+                .copied()
+                .filter(|j| self.forwarded.contains(j))
+                .collect();
+            passed.sort_unstable();
+            passed.dedup();
+            for j in passed {
+                let local = forwarded_local(j);
+                formals.push(format!("inout {} {}", self.params[j].slang_type, local.value));
+                formals.push(format!("inout bool {}", local.ok));
+                actuals.push(local.value);
+                actuals.push(local.ok);
+            }
             for (ty, name) in builtin_params(def.builtins) {
                 formals.push(format!("{ty} {name}"));
                 actuals.push(name.to_string());
@@ -424,6 +488,23 @@ impl FusedDefinition {
         };
         assemble_virtual_entry(&sig, &body)
     }
+}
+
+/// Entry locals that carry fused parameter `j`'s forwarded element between stages.
+fn forwarded_local(j: usize) -> ForwardedLocal {
+    ForwardedLocal {
+        value: format!("_goldy_fwd{j}"),
+        ok: format!("_goldy_fwd{j}_ok"),
+    }
+}
+
+/// Whether a fused parameter's element can live in a register: a scalar buffer element.
+fn forwardable(param: &KernelParam) -> bool {
+    matches!(
+        param.category,
+        ParamCategory::BufferRead | ParamCategory::BufferReadWrite | ParamCategory::BufferWrite
+    ) && !param.is_tensor
+        && zero_literal(&param.slang_type).is_some()
 }
 
 /// Module-scope name of stage `k`'s function.
@@ -558,15 +639,16 @@ impl Index {
     }
 }
 
-/// Reject cross-stage dependences that are not invocation-local; return their rank.
+/// Reject cross-stage dependences that are not invocation-local; return each fused
+/// parameter that carries one, with the number of global-id axes its indices name.
 ///
 /// A fused parameter carries a dependence when two constituents access its elements
 /// and at least one writes them. Inside one dispatch, only a thread's own prior
 /// stores are guaranteed visible and only its own later stores are guaranteed
 /// ordered after its loads, so every such access must name the thread's global id.
-fn dependence_rank(stages: &[FusionStage<'_>], params: &[KernelParam]) -> Result<Option<u8>, FusionRejection> {
+fn dependences(stages: &[FusionStage<'_>], params: &[KernelParam]) -> Result<Vec<(usize, u8)>, FusionRejection> {
     let uses: Vec<Vec<Use>> = stages.iter().map(|s| formal_uses(s.definition)).collect();
-    let mut rank: Option<u8> = None;
+    let mut found = Vec::new();
     for j in 0..params.len() {
         let touching: Vec<(usize, usize, Use)> = stages
             .iter()
@@ -602,9 +684,9 @@ fn dependence_rank(stages: &[FusionStage<'_>], params: &[KernelParam]) -> Result
                 formal: def.params[i].name.clone(),
             });
         };
-        rank = Some(rank.map_or(r, |prev| prev.min(r)));
+        found.push((j, r));
     }
-    Ok(rank)
+    Ok(found)
 }
 
 fn formal_uses(def: &ShaderKernel) -> Vec<Use> {
@@ -935,8 +1017,9 @@ mod tests {
         assert_eq!(fused.params[1].category, ParamCategory::BufferReadWrite);
         assert_eq!(fused.params[1].access, Some(AccessKind::ReadWrite));
         assert_eq!(fused.dependence_rank, Some(1));
+        assert_eq!(fused.forwarded, [1]);
 
-        let slang = fused.lower().source.canonical_slang;
+        let slang = fused.conservative().lower().source.canonical_slang;
         assert_eq!(slang.matches("[goldy_compute]").count(), 1, "{slang}");
         assert!(
             slang.contains("void goldy_fused_0_scale(BufRO<float> input, Scattered<float> output, uint count, ThreadId _goldy_gid) {\n    uint i = _goldy_gid.x;\n    if ((i >= count)) {\n        return;\n    }\n"),
@@ -950,6 +1033,145 @@ mod tests {
             slang.contains("void cs_main(BufRO<float> k0_input, Scattered<float> k0_output, uint k0_count, Scattered<float> k1_output, uint k1_count, ThreadId _goldy_gid) {\n    goldy_fused_0_scale(k0_input, k0_output, k0_count, _goldy_gid);\n    goldy_fused_1_bias(k0_output, k1_output, k1_count, _goldy_gid);\n}\n"),
             "{slang}"
         );
+    }
+
+    #[test]
+    fn forwarding_keeps_the_store_and_reads_the_register() {
+        let (a, b) = (scale(), bias());
+        let fused = compose("scale+bias", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS).unwrap();
+        let slang = fused.lower().source.canonical_slang;
+        assert!(
+            slang.contains(
+                "void goldy_fused_0_scale(BufRO<float> input, Scattered<float> output, uint count, inout float _goldy_fwd1, inout bool _goldy_fwd1_ok, ThreadId _goldy_gid) {\n    \
+                 uint i = _goldy_gid.x;\n    \
+                 if ((i >= count)) {\n        return;\n    }\n    \
+                 _goldy_fwd1 = (input[i] * 2.0);\n    \
+                 _goldy_fwd1_ok = true;\n    \
+                 output[i] = _goldy_fwd1;\n}\n"
+            ),
+            "{slang}"
+        );
+        assert!(
+            slang.contains(
+                "void goldy_fused_1_bias(Scattered<float> input, Scattered<float> output, uint count, inout float _goldy_fwd1, inout bool _goldy_fwd1_ok, ThreadId _goldy_gid) {\n    \
+                 uint i = _goldy_gid.x;\n    \
+                 if ((i >= count)) {\n        return;\n    }\n    \
+                 if ((!_goldy_fwd1_ok)) {\n        \
+                     _goldy_fwd1 = input[i];\n        \
+                     _goldy_fwd1_ok = true;\n    \
+                 }\n    \
+                 output[i] = (_goldy_fwd1 + 1.0);\n}\n"
+            ),
+            "{slang}"
+        );
+        assert!(
+            slang.contains(
+                "ThreadId _goldy_gid) {\n    \
+                 float _goldy_fwd1 = 0.0;\n    \
+                 bool _goldy_fwd1_ok = false;\n    \
+                 goldy_fused_0_scale(k0_input, k0_output, k0_count, _goldy_fwd1, _goldy_fwd1_ok, _goldy_gid);\n    \
+                 goldy_fused_1_bias(k0_output, k1_output, k1_count, _goldy_fwd1, _goldy_fwd1_ok, _goldy_gid);\n}\n"
+            ),
+            "{slang}"
+        );
+
+        let conservative = fused.clone().conservative();
+        assert!(conservative.forwarded.is_empty());
+        assert_ne!(fused.id(), conservative.id(), "forwarding changes the program");
+        assert!(!conservative.lower().source.canonical_slang.contains("_goldy_fwd"));
+    }
+
+    #[test]
+    fn in_place_updates_forward_through_one_register() {
+        let update = |name: &str, op: BinOp| {
+            let mut k = map(
+                name,
+                KernelParam::buffer_read_write("data", ElementType::F32),
+                KernelParam::buffer_read_write("data", ElementType::F32),
+                op,
+                2.0,
+                var("i"),
+            );
+            k.params.remove(1);
+            k
+        };
+        let (a, b) = (update("double", BinOp::Mul), update("inc", BinOp::Add));
+        let fused = compose("double+inc", &[stage(&a, &[0, 1]), stage(&b, &[0, 2])], &LIMITS).unwrap();
+        assert_eq!(fused.forwarded, [0]);
+        let slang = fused.lower().source.canonical_slang;
+        // The first stage materializes its own element, stores through the register, and
+        // the second stage finds it valid.
+        assert!(
+            slang.contains(
+                "    if ((!_goldy_fwd0_ok)) {\n        _goldy_fwd0 = data[i];\n        _goldy_fwd0_ok = true;\n    }\n    \
+                 _goldy_fwd0 = (_goldy_fwd0 * 2.0);\n    _goldy_fwd0_ok = true;\n    data[i] = _goldy_fwd0;\n"
+            ),
+            "{slang}"
+        );
+        assert!(
+            slang.contains(
+                "    _goldy_fwd0 = (_goldy_fwd0 + 2.0);\n    _goldy_fwd0_ok = true;\n    data[i] = _goldy_fwd0;\n"
+            ),
+            "{slang}"
+        );
+    }
+
+    #[test]
+    fn forwarding_respects_shadowing_and_short_circuits() {
+        let a = scale();
+        let mut b = bias();
+        // `if i < count && input[i] > 0.0 { let input = 3.0; output[i] = input; }`
+        b.body[2] = Stmt::If {
+            cond: bin(
+                BinOp::And,
+                bin(BinOp::Lt, var("i"), var("count")),
+                bin(BinOp::Gt, at("input", var("i")), Expr::LitF32(0.0)),
+            ),
+            then_body: vec![
+                Stmt::Let {
+                    name: "input".into(),
+                    mutable: false,
+                    ty: Some("float".into()),
+                    init: Expr::LitF32(3.0),
+                },
+                Stmt::Assign {
+                    target: at("output", var("i")),
+                    value: var("input"),
+                },
+            ],
+            else_body: None,
+        };
+        let fused = compose("a+b", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_eq!(fused.forwarded, [1]);
+        let slang = fused.lower().source.canonical_slang;
+        let consumer = &slang[slang.find("void goldy_fused_1_bias").unwrap()..];
+        assert!(
+            consumer.contains("if (((i < count) && (input[i] > 0.0))) {"),
+            "a short-circuit operand keeps its load: {consumer}"
+        );
+        assert!(!consumer.contains("_goldy_fwd1 = input[i]"), "{consumer}");
+        assert!(
+            consumer.contains("float input = 3.0;\n        output[i] = input;"),
+            "a shadowing local is not the formal: {consumer}"
+        );
+    }
+
+    #[test]
+    fn only_scalar_buffer_elements_crossing_stages_are_forwarded() {
+        let (a, b) = (scale(), bias());
+        let independent = compose("ab", &[stage(&a, &[0, 1, 2]), stage(&b, &[0, 3, 4])], &LIMITS).unwrap();
+        assert!(
+            independent.forwarded.is_empty(),
+            "a shared read-only input is not a dependence"
+        );
+
+        let mut ta = scale();
+        let mut tb = bias();
+        ta.params[1].slang_type = "Particle".into();
+        tb.params[0].slang_type = "Particle".into();
+        let structs = compose("ab", &[stage(&ta, &[0, 1, 2]), stage(&tb, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_eq!(structs.dependence_rank, Some(1));
+        assert!(structs.forwarded.is_empty(), "struct elements stay in memory");
     }
 
     #[test]

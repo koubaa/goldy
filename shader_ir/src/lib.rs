@@ -11,6 +11,7 @@
 
 mod abi;
 mod emit;
+mod forward;
 mod fuse;
 mod ir;
 mod symbols;
