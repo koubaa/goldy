@@ -4,18 +4,18 @@
 //! [`FusedKernel`] lowers compatible invocations of generated kernels to one physical
 //! dispatch that preserves every parcel load and store of the unfused sequence.
 
-use super::prepare::access_kind_to_node;
-use super::{
-    prepare_kernel, KernelBindable, KernelDef, KernelParam, PreparedKernel, RecordedDispatch, SchemeNodeStart,
-};
+use super::prepare::{access_kind_to_node, prepare_kernel_as};
+use super::{KernelBindable, KernelDef, KernelParam, PreparedKernel, RecordedDispatch, SchemeNodeStart};
 use crate::backend::shared::{MAX_BINDLESS_SLOTS, MAX_USER_SLOTS};
 use crate::error::GoldyError;
 use crate::runtime::Runtime;
 use crate::scheme::Scheme;
+use crate::shader::KernelIdentity;
 use crate::task_graph::analysis::resources_alias;
 use crate::task_graph::ResourceId;
 use goldy_shader_ir::{
-    compose, AccessKind, FusedDefinition, FusionLimits, FusionRejection, FusionStage, PORTABLE_WORKGROUP_BYTES,
+    compose, AccessKind, FusedDefinition, FusionLimits, FusionRejection, FusionStage, KernelId,
+    PORTABLE_WORKGROUP_BYTES,
 };
 
 const LIMITS: FusionLimits = FusionLimits {
@@ -218,9 +218,14 @@ impl FusedKernel {
         let definition = admit(stages).inspect_err(|reason| {
             tracing::debug!(%reason, "kernel fusion rejected");
         })?;
-        let prepared = prepare_kernel(device, definition.lower()).map_err(FusionError::Compile)?;
+        let identity = KernelIdentity {
+            id: definition.id(),
+            scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
+        };
+        let prepared = prepare_kernel_as(device, definition.lower(), Some(identity)).map_err(FusionError::Compile)?;
         tracing::debug!(
             kernel = %definition.name,
+            id = %definition.id(),
             stages = definition.stages.len(),
             params = definition.params.len(),
             "kernel fusion prepared"
@@ -230,6 +235,17 @@ impl FusedKernel {
 
     pub fn definition(&self) -> &FusedDefinition {
         &self.definition
+    }
+
+    /// Identity of the fused program. Fused kernels with one id share specialized variants.
+    pub fn id(&self) -> KernelId {
+        self.definition.id()
+    }
+
+    /// Scalar slot of the fused dispatch that scalar `formal` of stage `stage` binds, for
+    /// [`Scheme::set_node_param`].
+    pub fn scalar_slot(&self, stage: usize, formal: &str) -> Option<usize> {
+        self.definition.scalar_slot(stage, formal)
     }
 
     /// Canonical source and ABI of the fused entry.

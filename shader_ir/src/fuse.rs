@@ -11,15 +11,21 @@
 //! observable parcel state: every parameter written by one constituent and accessed by
 //! another is accessed only at the invoking thread's own global id.
 
+use crate::abi::StableHasher;
 use crate::{
-    assemble_virtual_entry, lower_body, AccessKind, BodyEnv, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam,
-    LoweredBody, ParamCategory, ShaderKernel, SourceMap, Stmt, SymbolKind, VirtualEntrySignature,
+    assemble_virtual_entry, emit_canonical_compute_source, lower_body, AccessKind, BodyEnv, BuiltinFn, BuiltinMask,
+    Expr, KernelDef, KernelId, KernelParam, LoweredBody, ParamCategory, ShaderKernel, SourceMap, Stmt, SymbolKind,
+    VirtualEntrySignature, KERNEL_ABI_VERSION,
 };
 use std::collections::HashMap;
 use std::fmt;
 
 /// Workgroup-shared bytes every Goldy backend provides (the WebGPU default limit).
 pub const PORTABLE_WORKGROUP_BYTES: u32 = 16 * 1024;
+
+/// Bump when [`FusedDefinition::lower`] changes the program it emits for the same
+/// constituents, so [`FusedDefinition::id`] stops matching earlier fused programs.
+pub const FUSION_ABI_VERSION: u32 = 1;
 
 /// One constituent of a composition, in execution order.
 #[derive(Debug, Clone, Copy)]
@@ -63,8 +69,26 @@ pub struct FusedDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FusedStage {
     pub definition: ShaderKernel,
+    /// [`KernelDef::id`] of the constituent lowered on its own, before namespacing.
+    pub kernel: KernelId,
     /// Fused parameter index of each formal.
     pub args: Vec<usize>,
+}
+
+/// The constituent scalar a fused scalar parameter binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScalarOrigin {
+    pub stage: usize,
+    pub kernel: String,
+    pub formal: String,
+    /// Scalar slot of `formal` in the constituent's own entry.
+    pub slot: usize,
+}
+
+impl fmt::Display for ScalarOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}.{}", self.stage, self.kernel, self.formal)
+    }
 }
 
 /// Why a set of dispatch invocations cannot be lowered to one physical dispatch.
@@ -280,6 +304,7 @@ pub fn compose(
                 SymbolKind::WorkgroupArray => format!("_goldy_k{k}_{name}"),
                 SymbolKind::Param | SymbolKind::Local => name.to_string(),
             }),
+            kernel: emit_canonical_compute_source(s.definition).id(),
             args: s.args.to_vec(),
         })
         .collect();
@@ -295,6 +320,58 @@ pub fn compose(
 }
 
 impl FusedDefinition {
+    /// Identity of the fused program: the constituent kernel ids, the argument map and
+    /// the workgroup size, under the kernel and fusion ABI versions.
+    ///
+    /// Every other field is derived from these, so definitions with one id lower to the
+    /// same program up to source-location comments.
+    pub fn id(&self) -> KernelId {
+        let mut h = StableHasher::new();
+        h.u32(KERNEL_ABI_VERSION).u32(FUSION_ABI_VERSION);
+        for &axis in &self.workgroup_size {
+            h.u32(axis);
+        }
+        h.u64(self.stages.len() as u64);
+        for stage in &self.stages {
+            h.u64(stage.kernel.0).u64(stage.args.len() as u64);
+            for &j in &stage.args {
+                h.u64(j as u64);
+            }
+        }
+        h.finish()
+    }
+
+    /// Origin of every fused scalar, indexed by fused scalar slot.
+    pub fn scalar_origins(&self) -> Vec<ScalarOrigin> {
+        self.params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.category.is_resource())
+            .map(|(j, _)| {
+                let (stage, i) = self
+                    .stages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(k, s)| s.args.iter().position(|&a| a == j).map(|i| (k, i)))
+                    .expect("every fused parameter is bound by a formal");
+                let def = &self.stages[stage].definition;
+                ScalarOrigin {
+                    stage,
+                    kernel: def.name.clone(),
+                    formal: def.params[i].name.clone(),
+                    slot: def.params[..i].iter().filter(|p| !p.category.is_resource()).count(),
+                }
+            })
+            .collect()
+    }
+
+    /// Fused scalar slot that scalar `formal` of stage `stage` binds.
+    pub fn scalar_slot(&self, stage: usize, formal: &str) -> Option<usize> {
+        self.scalar_origins()
+            .iter()
+            .position(|o| o.stage == stage && o.formal == formal)
+    }
+
     /// Lower to one canonical `[goldy_compute]` source unit.
     ///
     /// The returned [`KernelDef`] carries no retained definition.
@@ -873,6 +950,65 @@ mod tests {
             slang.contains("void cs_main(BufRO<float> k0_input, Scattered<float> k0_output, uint k0_count, Scattered<float> k1_output, uint k1_count, ThreadId _goldy_gid) {\n    goldy_fused_0_scale(k0_input, k0_output, k0_count, _goldy_gid);\n    goldy_fused_1_bias(k0_output, k1_output, k1_count, _goldy_gid);\n}\n"),
             "{slang}"
         );
+    }
+
+    #[test]
+    fn fused_identity_follows_constituents_and_argument_map() {
+        let (a, b) = (scale(), bias());
+        let chain = |args: &[usize]| compose("x", &[stage(&a, &[0, 1, 2]), stage(&b, args)], &LIMITS).unwrap();
+        let fused = chain(&[1, 3, 4]);
+        assert_eq!(fused.stages[0].kernel, emit_canonical_compute_source(&a).id());
+        assert_eq!(fused.stages[1].kernel, emit_canonical_compute_source(&b).id());
+        assert_eq!(fused.id(), chain(&[1, 3, 4]).id(), "deterministic");
+        assert_eq!(
+            fused.id(),
+            compose("renamed", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS)
+                .unwrap()
+                .id(),
+            "the fused name is a label, not identity"
+        );
+        assert_ne!(
+            fused.id(),
+            chain(&[3, 4, 5]).id(),
+            "sharing a parcel changes the program"
+        );
+        let swapped = compose("x", &[stage(&b, &[0, 1, 2]), stage(&a, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_ne!(fused.id(), swapped.id(), "stage order is identity");
+        let mut wide = (scale(), bias());
+        wide.0.workgroup_size = [128, 1, 1];
+        wide.1.workgroup_size = [128, 1, 1];
+        let wide = compose("x", &[stage(&wide.0, &[0, 1, 2]), stage(&wide.1, &[1, 3, 4])], &LIMITS).unwrap();
+        assert_ne!(fused.id(), wide.id());
+        assert_eq!(format!("{}", fused.id()).len(), 16);
+    }
+
+    #[test]
+    fn scalar_origins_map_fused_slots_to_constituent_scalars() {
+        let (a, b) = (scale(), bias());
+        let fused = compose("x", &[stage(&a, &[0, 1, 2]), stage(&b, &[1, 3, 4])], &LIMITS).unwrap();
+        let origins = fused.scalar_origins();
+        assert_eq!(
+            origins,
+            [
+                ScalarOrigin {
+                    stage: 0,
+                    kernel: "scale".into(),
+                    formal: "count".into(),
+                    slot: 0,
+                },
+                ScalarOrigin {
+                    stage: 1,
+                    kernel: "bias".into(),
+                    formal: "count".into(),
+                    slot: 0,
+                },
+            ]
+        );
+        assert_eq!(origins[1].to_string(), "1:bias.count");
+        assert_eq!(fused.scalar_slot(1, "count"), Some(1));
+        assert_eq!(fused.scalar_slot(0, "count"), Some(0));
+        assert_eq!(fused.scalar_slot(1, "input"), None, "resources have no scalar slot");
+        assert_eq!(fused.scalar_slot(2, "count"), None);
     }
 
     #[test]

@@ -426,6 +426,54 @@ pub struct KernelSource {
     pub canonical_slang: String,
 }
 
+/// Stable content identity of a kernel program.
+///
+/// Equal ids name programs with the same canonical source and ABI, so they bind alike
+/// and compile to interchangeable specialized variants. The hash does not depend on the
+/// process, the device or the Rust toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KernelId(pub u64);
+
+impl fmt::Display for KernelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// FNV-1a over length-prefixed fields.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StableHasher(u64);
+
+impl StableHasher {
+    pub(crate) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.raw(&(bytes.len() as u64).to_le_bytes());
+        self.raw(bytes)
+    }
+
+    pub(crate) fn u32(&mut self, value: u32) -> &mut Self {
+        self.raw(&value.to_le_bytes())
+    }
+
+    pub(crate) fn u64(&mut self, value: u64) -> &mut Self {
+        self.raw(&value.to_le_bytes())
+    }
+
+    fn raw(&mut self, bytes: &[u8]) -> &mut Self {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self
+    }
+
+    pub(crate) fn finish(&self) -> KernelId {
+        KernelId(self.0)
+    }
+}
+
 /// Full prepare-time kernel descriptor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KernelDef {
@@ -462,6 +510,14 @@ impl KernelDef {
             abi_version: KERNEL_ABI_VERSION,
             definition: None,
         }
+    }
+
+    /// Content identity of this kernel's program: its ABI version and canonical source.
+    pub fn id(&self) -> KernelId {
+        StableHasher::new()
+            .u32(self.abi_version)
+            .bytes(self.source.canonical_slang.as_bytes())
+            .finish()
     }
 
     pub fn resource_params(&self) -> impl Iterator<Item = &KernelParam> {

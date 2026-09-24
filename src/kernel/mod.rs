@@ -17,8 +17,9 @@ pub use dispatch::{DispatchBuilder, RecordedDispatch};
 pub use fusion::{FusedKernel, FusionError, Invocation, InvocationBuilder};
 pub use goldy_shader_ir::{
     AccessKind, BoundTensorDim, BuiltinMask, ElementType, FusedDefinition, FusedStage, FusionRejection, KernelDef,
-    KernelParam, KernelSource, ParamCategory, ScalarType, ShaderKernel, SourceMap, TensorDimSpec, TensorShapeSpec,
-    KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
+    KernelId, KernelParam, KernelSource, ParamCategory, ScalarOrigin, ScalarType, ShaderKernel, SourceMap,
+    TensorDimSpec, TensorShapeSpec, FUSION_ABI_VERSION, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG,
+    TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
 
 /// Structured shader IR of retained kernel definitions, and its lowering to

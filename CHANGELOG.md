@@ -44,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`FusionRejection`). Tensor-bound kernels are not yet fusable. `goldy::kernel::ir::compose`
   exposes the device-free composition.
 
+- **Fused specialization** — a fused dispatch is one specialization site. Its stable scalars
+  are baked into the fused program, and a changed baked scalar demotes the site to the
+  universal fused pipeline, never to the constituents. `FusedKernel::id` is a stable `KernelId`
+  derived from the constituents' `KernelDef::id`, the argument map and the workgroup size.
+  Fused kernels with one id share specialized variants within a scheme.
+  `FusedKernel::scalar_slot(stage, formal)` and `FusedDefinition::scalar_origins` map fused
+  scalar slots to constituent scalars, and specialization trace events name baked slots that
+  way (`1:damp.enabled=0x1`). `RecordedDispatch::node` returns the recorded `NodeId`.
+
 ### Removed
 
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.

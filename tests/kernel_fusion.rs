@@ -2,13 +2,14 @@
 //! unfused sequence on every bound parcel, not only the final output.
 
 #![cfg(feature = "gpu")]
+#![allow(clippy::too_many_arguments)]
 
 #[path = "common/submission.rs"]
 mod submission;
 
 use goldy::{
-    compute, AccessKind, Buffer, BufferKind, FusedKernel, FusionError, FusionRejection, Instance, Invocation,
-    RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
+    compute, AccessKind, BackendType, Buffer, BufferKind, FusedKernel, FusionError, FusionRejection, Instance,
+    Invocation, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
 };
 use std::sync::Arc;
 
@@ -98,6 +99,21 @@ fn shift(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32) {
     let i = goldy::gpu::global_id().x;
     if i + 1 < count {
         output[i] = input[i + 1];
+    }
+}
+
+/// `enabled` gates a loop; baking it to zero removes the loop from the fused program.
+#[compute(workgroup_size = [64, 1, 1])]
+fn damp(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, enabled: u32, rounds: u32) {
+    let i = goldy::gpu::global_id().x;
+    if i < count {
+        let mut v = input[i];
+        if enabled != 0 {
+            for _r in 0..rounds {
+                v = v * 0.5 + 1.0;
+            }
+        }
+        output[i] = v;
     }
 }
 
@@ -245,6 +261,59 @@ fn with_collective<'a>(k: &'a WithCollective, p: &'a [Buffer]) -> Vec<Invocation
     ]
 }
 
+struct Gated {
+    scale: scale::Kernel,
+    damp: damp::Kernel,
+}
+
+const ROUNDS: u32 = 6;
+
+fn gated<'a>(k: &'a Gated, p: &'a [Buffer]) -> Vec<Invocation<'a>> {
+    vec![
+        k.scale.invoke(&p[0], &p[1], N, 2.0).over_1d(N),
+        k.damp.invoke(&p[1], &p[2], N, 1, ROUNDS).over_1d(N),
+    ]
+}
+
+/// Every parcel of [`gated`] after one dispatch, computed on the host.
+fn gated_reference(enabled: bool) -> Vec<Vec<f32>> {
+    let input = input_data();
+    let n = N as usize;
+    let temporary: Vec<f32> = (0..LEN)
+        .map(|i| if i < n { input[i] * 2.0 } else { SENTINEL })
+        .collect();
+    let output = (0..LEN)
+        .map(|i| {
+            if i >= n {
+                return SENTINEL;
+            }
+            let mut v = temporary[i];
+            for _ in 0..if enabled { ROUNDS } else { 0 } {
+                v = v * 0.5 + 1.0;
+            }
+            v
+        })
+        .collect();
+    vec![input, temporary, output]
+}
+
+/// Submit `scheme`, require every parcel to match `want` byte for byte, and let any
+/// specialization compile the submit started land before the next frame.
+fn submit_and_check(scheme: &mut Scheme, parcels: &[Buffer], want: &[Vec<f32>], what: &str) -> anyhow::Result<()> {
+    {
+        let mut frame = scheme.submit()?;
+        for (j, (parcel, want)) in parcels.iter().zip(want).enumerate() {
+            let got = (&mut frame >> parcel).take::<u8>()?.to_vec();
+            assert!(
+                got == bytemuck::cast_slice::<f32, u8>(want),
+                "{what}: parcel {j} differs"
+            );
+        }
+    }
+    goldy::test_support::wait_for_specialization_compiles(scheme);
+    Ok(())
+}
+
 fn main() {
     let mut args = libtest_mimic::Arguments::from_args();
     let instance = Instance::new().expect("instance");
@@ -375,6 +444,70 @@ fn main() {
                     let want: f32 = input[g * 64..end].iter().sum();
                     assert_eq!(got[2][g], want, "sums[{g}]");
                 }
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("fusion_specializes_and_demotes_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _spec = goldy::test_support::SpecializationOverride::force_enabled();
+                // WebGPU layouts follow shader usage and CPU has no bake macros; neither predicts.
+                let predicts = !matches!(device.backend_type(), BackendType::WebGpu | BackendType::Cpu);
+                let k = Gated {
+                    scale: scale::Kernel::prepare(&device)?,
+                    damp: damp::Kernel::prepare(&device)?,
+                };
+                let init = [input_data(), sentinel(), sentinel()];
+                let enabled = gated_reference(true);
+                let disabled = gated_reference(false);
+                assert_ne!(enabled[2], disabled[2], "the gate must change the output");
+
+                // The universal fused program matches the unfused sequence.
+                let (fused, universal) = fuse_and_compare(&device, &k, &init, gated)?;
+                assert_eq!(universal, enabled);
+                let gate = fused.scalar_slot(1, "enabled").expect("stage 1 binds `enabled`");
+                assert_eq!(gate, 3, "after k0_count, k0_factor, k1_count");
+                let origins = fused.definition().scalar_origins();
+                assert_eq!(origins[gate].to_string(), "1:damp.enabled");
+                assert_eq!(origins[gate].slot, 1);
+
+                let p = buffers(&device, &init)?;
+                let ctx = device.create_context()?;
+                let mut scheme = Scheme::new(&ctx);
+                let node = fused.record(&mut scheme, "scale+damp", &gated(&k, &p))?.node();
+
+                // Frame 1 records; stable fused slots warm on frame 3 and promote on frame 11.
+                for f in 1..=11 {
+                    submit_and_check(&mut scheme, &p, &enabled, &format!("frame {f}"))?;
+                }
+                let stats = scheme.replay_stats();
+                if predicts {
+                    assert_eq!(stats.specialization_warms, 1, "one variant for the fused site");
+                    assert_eq!(stats.specialization_promotions, 1);
+                    assert!(scheme.node_is_specialized(node));
+                } else {
+                    assert_eq!(stats.specialization_warms, 0, "this backend declines to predict");
+                }
+                submit_and_check(&mut scheme, &p, &enabled, "specialized fused program")?;
+
+                // Changing a baked scalar demotes to the universal fused program at once.
+                scheme.set_node_param(node, gate, 0)?;
+                assert!(!scheme.node_is_specialized(node), "demoted inside set_node_param");
+                if predicts {
+                    assert_eq!(scheme.replay_stats().specialization_demotions, 1);
+                }
+                submit_and_check(&mut scheme, &p, &disabled, "first frame after the gate changed")?;
+                assert_eq!(scheme.ir_node_count(), 1, "demotion keeps the dispatch fused");
+
+                // Left alone, the site re-earns a variant for the new facts.
+                for f in 1..=25 {
+                    submit_and_check(&mut scheme, &p, &disabled, &format!("post-demotion frame {f}"))?;
+                }
+                if predicts {
+                    assert!(scheme.node_is_specialized(node), "re-promoted with the gate off");
+                    assert_eq!(scheme.replay_stats().specialization_demotions, 1);
+                }
+                assert_eq!(scheme.ir_node_count(), 1);
                 Ok(())
             }
         }),

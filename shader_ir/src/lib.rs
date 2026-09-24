@@ -21,7 +21,8 @@ pub use emit::{
     LoweredBody, VirtualEntrySignature, VIRTUAL_ENTRY_NAME,
 };
 pub use fuse::{
-    compose, FusedDefinition, FusedStage, FusionLimits, FusionRejection, FusionStage, PORTABLE_WORKGROUP_BYTES,
+    compose, FusedDefinition, FusedStage, FusionLimits, FusionRejection, FusionStage, ScalarOrigin, FUSION_ABI_VERSION,
+    PORTABLE_WORKGROUP_BYTES,
 };
 pub use ir::*;
 pub use symbols::SymbolKind;

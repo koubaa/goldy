@@ -8,8 +8,18 @@ pub struct DispatchBuilder<'a> {
     pub(crate) workgroup_size: [u32; 3],
 }
 
-/// Marker returned by [`DispatchBuilder::groups`] / [`DispatchBuilder::over_1d`].
-pub struct RecordedDispatch;
+/// Returned by [`DispatchBuilder::groups`] / [`DispatchBuilder::over_1d`].
+#[derive(Debug, Clone, Copy)]
+pub struct RecordedDispatch {
+    node: crate::NodeId,
+}
+
+impl RecordedDispatch {
+    /// The dispatch node, for [`crate::Scheme::set_node_param`] and friends.
+    pub fn node(&self) -> crate::NodeId {
+        self.node
+    }
+}
 
 impl<'a> DispatchBuilder<'a> {
     pub fn new(builder: SchemeNodeBuilder<'a>, workgroup_size: [u32; 3]) -> Self {
@@ -22,8 +32,9 @@ impl<'a> DispatchBuilder<'a> {
     /// Exact workgroup/grid counts (CUDA `gridDim` analogue). Workgroup size is fixed
     /// in the pipeline from `KernelDef::workgroup_size`.
     pub fn groups(self, counts: [u32; 3]) -> RecordedDispatch {
-        self.builder.dispatch(counts[0], counts[1], counts[2]);
-        RecordedDispatch
+        RecordedDispatch {
+            node: self.builder.dispatch(counts[0], counts[1], counts[2]),
+        }
     }
 
     /// Cover `n` threads in 1D using the kernel's fixed workgroup size.
