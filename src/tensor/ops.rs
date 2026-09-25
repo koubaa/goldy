@@ -320,6 +320,108 @@ impl<'a> TensorRecorder<'a> {
         self.binary_into(label, a, b, out, OP_ADD)
     }
 
+    // Into an existing view, which may be one of the inputs: each element is read
+    // before it is written by the same invocation.
+    pub fn neg_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_NEG)
+    }
+    pub fn abs_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_ABS)
+    }
+    pub fn exp_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_EXP)
+    }
+    pub fn log_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_LOG)
+    }
+    pub fn sqrt_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_SQRT)
+    }
+    pub fn reciprocal_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_RECIP)
+    }
+    pub fn sub_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        b: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_into(label, a, b, out, OP_SUB)
+    }
+    pub fn mul_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        b: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_into(label, a, b, out, OP_MUL)
+    }
+    pub fn div_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        b: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_into(label, a, b, out, OP_DIV)
+    }
+    pub fn min_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        b: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_into(label, a, b, out, OP_MIN)
+    }
+    pub fn max_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        b: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_into(label, a, b, out, OP_MAX)
+    }
+    pub fn add_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_ADD_SCALAR)
+    }
+    pub fn sub_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_SUB_SCALAR)
+    }
+    pub fn mul_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_MUL_SCALAR)
+    }
+    pub fn div_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_DIV_SCALAR)
+    }
+
     pub fn add_scalar(&mut self, label: &str, a: TensorView<'_>, scalar: f32) -> Result<Tensor, GoldyError> {
         self.binary_scalar(label, a, scalar, OP_ADD_SCALAR)
     }
@@ -350,6 +452,28 @@ impl<'a> TensorRecorder<'a> {
     }
     pub fn mean(&mut self, label: &str, src: TensorView<'_>, axis: usize) -> Result<Tensor, GoldyError> {
         self.reduce(label, src, axis, OP_MEAN, false)
+    }
+    /// [`Self::sum`] into `out`, with or without the reduced axis.
+    pub fn sum_into(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        axis: usize,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let kept = Self::kept(src, axis, out)?;
+        self.reduce_into(label, src, axis, kept, OP_SUM)
+    }
+    /// [`Self::mean`] into `out`, with or without the reduced axis.
+    pub fn mean_into(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        axis: usize,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let kept = Self::kept(src, axis, out)?;
+        self.reduce_into(label, src, axis, kept, OP_MEAN)
     }
 
     /// Softmax along `axis` as max-subtract-exp-sum-div. Not a fused NN operator.
@@ -506,7 +630,23 @@ impl<'a> TensorRecorder<'a> {
     fn binary_scalar(&mut self, label: &str, a: TensorView<'_>, scalar: f32, op: u32) -> Result<Tensor, GoldyError> {
         a.dtype().require_f32("binary_scalar")?;
         let out = Tensor::zeros(&self.kernels.runtime, a.shape(), TensorDType::F32)?;
-        let meta = encode_meta(op, 0, scalar.to_bits(), 0, Some(a), None, Some(out.view()))?;
+        self.binary_scalar_into(label, a, scalar, out.view(), op)?;
+        Ok(out)
+    }
+
+    fn binary_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+        op: u32,
+    ) -> Result<(), GoldyError> {
+        out.layout().require_writeable("binary_scalar")?;
+        a.dtype().require_f32("binary_scalar")?;
+        out.dtype().require_f32("binary_scalar")?;
+        let a = a.broadcast_to(out.shape())?;
+        let meta = encode_meta(op, 0, scalar.to_bits(), 0, Some(a), None, Some(out))?;
         let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
@@ -521,11 +661,10 @@ impl<'a> TensorRecorder<'a> {
                 &*meta_buf,
                 scalar,
             )
-            .over_1d(out.view().numel_u32().max(1))
+            .over_1d(out.numel_u32().max(1))
             .node();
-        self.scheme
-            .record_semantic_site(node, semantic::binary(op, a, a, out.view()));
-        Ok(out)
+        self.scheme.record_semantic_site(node, semantic::binary(op, a, a, out));
+        Ok(())
     }
 
     fn reduce(
@@ -537,8 +676,8 @@ impl<'a> TensorRecorder<'a> {
         keepdim: bool,
     ) -> Result<Tensor, GoldyError> {
         src.dtype().require_f32("reduce")?;
-        let reduce_len = src.shape().dim(axis)?;
         let src_shape = src.shape();
+        src_shape.dim(axis)?;
         let mut keep_dims = src_shape.dims().to_vec();
         keep_dims[axis] = 1;
         let keep_shape = TensorShape::from_dims(&keep_dims)?;
@@ -549,19 +688,44 @@ impl<'a> TensorRecorder<'a> {
         };
         let out = Tensor::zeros(&self.kernels.runtime, out_shape, TensorDType::F32)?;
         let kernel_layout = super::layout::TensorLayout::packed(out.dtype(), keep_shape, 0)?;
-        let kernel_view = TensorView::new(out.buffer(), kernel_layout)?;
+        self.reduce_into(label, src, axis, TensorView::new(out.buffer(), kernel_layout)?, op)?;
+        Ok(out)
+    }
+
+    /// Reduces `src` along `axis` into `out`, whose shape keeps `axis` with extent one.
+    fn reduce_into(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        axis: usize,
+        kernel_view: TensorView<'_>,
+        op: u32,
+    ) -> Result<(), GoldyError> {
+        kernel_view.layout().require_writeable("reduce")?;
+        src.dtype().require_f32("reduce")?;
+        kernel_view.dtype().require_f32("reduce")?;
+        let reduce_len = src.shape().dim(axis)?;
         let meta = encode_meta(op, axis as u32, 0, reduce_len, Some(src), None, Some(kernel_view))?;
         let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
             .ops
             .reduce
-            .record(self.scheme, label, src.buffer(), out.buffer(), &*meta_buf)
+            .record(self.scheme, label, src.buffer(), kernel_view.buffer(), &*meta_buf)
             .over_1d(kernel_view.numel_u32().max(1))
             .node();
         self.scheme
             .record_semantic_site(node, semantic::reduce(op, src, axis, kernel_view));
-        Ok(out)
+        Ok(())
+    }
+
+    /// `out`, reshaped to `src`'s shape with `axis` kept at extent one.
+    fn kept<'v>(src: TensorView<'_>, axis: usize, out: TensorView<'v>) -> Result<TensorView<'v>, GoldyError> {
+        let mut dims = src.shape().dims().to_vec();
+        *dims
+            .get_mut(axis)
+            .ok_or_else(|| GoldyError::Validation(format!("reduce: axis {axis} out of range")))? = 1;
+        out.reshape(&dims)
     }
 }
 

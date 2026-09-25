@@ -1,13 +1,23 @@
 //! Schedules: how a region's outputs map onto a compute grid, and lowering to a kernel.
 //!
 //! Lowering first substitutes every temporary and every output into its readers, so
-//! each output is one term over inputs. All outputs must have one rank once unit axes
-//! are dropped, and the shared domain is their largest extent on each axis; element `t`
-//! of it is one thread, or one lane group, which computes every output that spans `t`
-//! and then stores them all. Inputs are read before any store, which keeps the
-//! region's entry semantics for storage that an output overwrites in place.
+//! each output is one term over inputs. Outputs are then grouped into parts. The
+//! outputs of one part have one rank once unit axes are dropped, and the part's domain
+//! is their largest extent on each axis; element `t` of it is one thread, or one lane
+//! group, which computes every output of the part that spans `t` and then stores them
+//! all. Parts are sibling domains: each takes its own range of workgroups in the one
+//! dispatch, so outputs of different ranks, or contractions over different extents,
+//! run side by side. Inputs are read before any store, which keeps the region's entry
+//! semantics for storage that an output overwrites in place.
+//!
+//! A subterm of a reduction's body that depends on no index but its element's, and
+//! that itself reduces, is invariant in the loop around it. Lowering hoists it: each
+//! thread computes it once, before any loop, and every use reads the register. A
+//! normalization inside a matrix product's factor then costs one pass over its input
+//! per thread rather than one per term of the product.
 
 use super::affine::{Affine, IndexParam, IndexVar, Sym};
+use super::cost::{self, Estimate};
 use super::graph::Graph;
 use super::region::{ParcelId, Region, RegionError, Role, Storage};
 use super::term::{BinaryOp, CmpOp, ReduceOp, ReduceOrder, ScalarParam, Term, UnaryOp, ValueId};
@@ -108,6 +118,9 @@ pub struct Lowered {
     /// resources.
     pub scalars: Vec<ScalarParam>,
     pub workgroup_bytes: u32,
+    /// Domains the kernel dispatches side by side; see [`lower_on`].
+    pub parts: usize,
+    pub estimate: Estimate,
 }
 
 /// Why a region cannot run as one kernel.
@@ -115,12 +128,7 @@ pub struct Lowered {
 pub enum LowerError {
     Invalid(RegionError),
     NoOutputs,
-    /// Two outputs have different ranks once unit axes are dropped.
-    Domain {
-        output: String,
-        other: String,
-    },
-    /// The shared domain does not fit one grid.
+    /// The domains do not fit one grid.
     Grid {
         elements: u64,
     },
@@ -156,9 +164,6 @@ impl fmt::Display for LowerError {
         match self {
             LowerError::Invalid(e) => e.fmt(f),
             LowerError::NoOutputs => f.write_str("the region has no outputs"),
-            LowerError::Domain { output, other } => {
-                write!(f, "`{output}` and `{other}` have different ranks")
-            }
             LowerError::Grid { elements } => write!(f, "{elements} elements do not fit one grid"),
             LowerError::NotInjective { output } => write!(f, "`{output}` stores two elements in one location"),
             LowerError::OutputOverlap { output, other } => write!(f, "`{output}` and `{other}` can write one location"),
@@ -186,6 +191,12 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// [`Schedule::Lanes`] when an output has a lane-ordered reduction outside a select,
 /// exchanging through the subgroup when `target`'s holds whole lane groups, else
 /// [`Schedule::Threads`]. `sources` gives each index parameter's source.
+///
+/// An output joins the first part of its rank on which every output spanning only a
+/// prefix of the part's domain reuses the lane reductions of the outputs spanning all
+/// of it, since lane groups reduce over the whole domain; otherwise it starts a part.
+/// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
+/// one element per thread.
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
     let prepared = Prepared::new(region)?;
     let mut lanes = None;
@@ -265,18 +276,100 @@ fn top_reductions(term: &Term) -> Vec<&Term> {
     out
 }
 
-/// A region whose outputs are single terms over inputs, on shared coordinates.
-pub(super) struct Prepared {
-    region: Region,
-    /// Extents of the shared domain.
+fn is_lane_ordered(r: &&Term) -> bool {
+    matches!(
+        r,
+        Term::Reduce {
+            order: ReduceOrder::Lanes { .. },
+            ..
+        }
+    )
+}
+
+/// Outputs of squeezed `shapes` grouped into parts, in order; see [`lower_on`].
+fn partition(shapes: &[Vec<u32>], bodies: &[(ValueId, Term)], coords: &[IndexVar]) -> Vec<Part> {
+    let admits = |members: &[usize], extents: &[u32]| {
+        let full: Vec<&Term> = members
+            .iter()
+            .filter(|&&m| shapes[m] == extents)
+            .flat_map(|&m| top_reductions(&bodies[m].1))
+            .collect();
+        members.iter().all(|&m| {
+            shapes[m] == extents
+                || top_reductions(&bodies[m].1)
+                    .into_iter()
+                    .filter(is_lane_ordered)
+                    .all(|r| full.iter().any(|f| f.alpha_eq(r)))
+        })
+    };
+    let mut parts: Vec<Part> = Vec::new();
+    for (n, shape) in shapes.iter().enumerate() {
+        let widened = |p: &Part| -> Vec<u32> { p.extents.iter().zip(shape).map(|(&a, &b)| a.max(b)).collect() };
+        let joined = parts.iter().position(|p| {
+            p.extents.len() == shape.len() && admits(&[p.outputs.as_slice(), &[n]].concat(), &widened(p))
+        });
+        match joined {
+            Some(k) => {
+                parts[k].extents = widened(&parts[k]);
+                parts[k].outputs.push(n);
+            }
+            None => parts.push(Part {
+                extents: shape.clone(),
+                coords: coords[..shape.len()].to_vec(),
+                outputs: vec![n],
+            }),
+        }
+    }
+    parts
+}
+
+/// Subterms of `term` inside a reduction's body that depend on no index but `coords`,
+/// reduce, and reduce only sequentially: the loops around them do not change them.
+/// Inner ones come first, so each is computed after those it reads.
+fn hoistable(term: &Term, coords: &[IndexVar], inside: bool, found: &mut Vec<Term>) {
+    let mut sequential = true;
+    let mut reduces = false;
+    term.for_each_reduction(&mut |order| {
+        reduces = true;
+        sequential &= order == ReduceOrder::Sequential;
+    });
+    let candidate = inside && reduces && sequential && term.free_indices().iter().all(|v| coords.contains(v));
+    match term {
+        Term::Reduce { body, .. } => hoistable(body, coords, true, found),
+        _ => term.for_each_child(&mut |c| hoistable(c, coords, inside && !candidate, found)),
+    }
+    if candidate && !found.iter().any(|f| f.alpha_eq(term)) {
+        found.push(term.clone());
+    }
+}
+
+/// Outputs lowered over one domain, in one range of workgroups.
+pub(super) struct Part {
+    /// Extents of the domain.
     pub(super) extents: Vec<u32>,
     pub(super) coords: Vec<IndexVar>,
-    /// Each output and its body on `coords`.
+    /// Positions in [`Prepared::bodies`] of the outputs it computes.
+    outputs: Vec<usize>,
+}
+
+impl Part {
+    fn elements(&self) -> u64 {
+        self.extents.iter().map(|&e| u64::from(e)).product()
+    }
+}
+
+/// A region whose outputs are single terms over inputs, grouped into [`Part`]s.
+pub(super) struct Prepared {
+    region: Region,
+    pub(super) parts: Vec<Part>,
+    /// Each output and its body on its part's coordinates.
     bodies: Vec<(ValueId, Term)>,
-    /// Each output's index on `coords`.
+    /// Each output's index on its part's coordinates.
     at: Vec<Vec<Affine>>,
-    /// Per output, the axes of `coords` it spans only a prefix of, and that prefix.
+    /// Per output, the axes of its part it spans only a prefix of, and that prefix.
     limits: Vec<Vec<(usize, u32)>>,
+    /// The part of each output.
+    part_of: Vec<usize>,
 }
 
 impl Prepared {
@@ -292,37 +385,21 @@ impl Prepared {
         for &o in &outputs {
             region.substitute(o).expect("an output has a definition");
         }
-        let &first = outputs.first().ok_or(LowerError::NoOutputs)?;
-        let squeeze = |shape: &[u32]| shape.iter().copied().filter(|&e| e != 1).collect::<Vec<_>>();
-        let mut extents = squeeze(&region.value(first).expect("live").shape);
-        for &o in &outputs {
-            let value = region.value(o).expect("live");
-            let squeezed = squeeze(&value.shape);
-            if squeezed.len() != extents.len() {
-                return Err(LowerError::Domain {
-                    output: value.name.clone(),
-                    other: region.value(first).expect("live").name.clone(),
-                });
-            }
-            for (e, s) in extents.iter_mut().zip(squeezed) {
-                *e = (*e).max(s);
-            }
+        if outputs.is_empty() {
+            return Err(LowerError::NoOutputs);
         }
-        let coords: Vec<IndexVar> = (0..extents.len()).map(|a| region.index(&format!("c{a}"))).collect();
+        let squeeze = |shape: &[u32]| shape.iter().copied().filter(|&e| e != 1).collect::<Vec<_>>();
+        let shapes: Vec<Vec<u32>> = outputs
+            .iter()
+            .map(|&o| squeeze(&region.value(o).expect("live").shape))
+            .collect();
+        let rank = shapes.iter().map(Vec::len).max().unwrap_or(0);
+        // Parts of one rank share coordinates; each binds them in its own scope.
+        let coords: Vec<IndexVar> = (0..rank).map(|a| region.index(&format!("c{a}"))).collect();
         let mut bodies = Vec::new();
         let mut at = Vec::new();
-        let mut limits = Vec::new();
         for &o in &outputs {
             let value = region.value(o).expect("live");
-            limits.push(
-                squeeze(&value.shape)
-                    .into_iter()
-                    .zip(&extents)
-                    .enumerate()
-                    .filter(|(_, (s, e))| s < e)
-                    .map(|(a, (s, _))| (a, s))
-                    .collect(),
-            );
             let def = value.definition.as_ref().expect("an output has a definition");
             let mut next = coords.iter();
             let index: Vec<Affine> = value
@@ -330,23 +407,59 @@ impl Prepared {
                 .iter()
                 .map(|&e| match e {
                     1 => Affine::constant(0),
-                    _ => Affine::from(*next.next().expect("same squeezed rank")),
+                    _ => Affine::from(*next.next().expect("no wider than the widest output")),
                 })
                 .collect();
             let map: HashMap<IndexVar, Affine> = def.domain.iter().copied().zip(index.iter().cloned()).collect();
             bodies.push((o, def.body.instantiate(&|v| map.get(&v).cloned(), &HashMap::new())));
             at.push(index);
         }
+        let parts = partition(&shapes, &bodies, &coords);
+        let mut part_of = vec![0; outputs.len()];
+        for (k, part) in parts.iter().enumerate() {
+            for &n in &part.outputs {
+                part_of[n] = k;
+            }
+        }
+        let limits = shapes
+            .iter()
+            .zip(&part_of)
+            .map(|(shape, &k)| {
+                shape
+                    .iter()
+                    .zip(&parts[k].extents)
+                    .enumerate()
+                    .filter(|(_, (s, e))| s < e)
+                    .map(|(a, (&s, _))| (a, s))
+                    .collect()
+            })
+            .collect();
         let prepared = Self {
             region,
-            extents,
-            coords,
+            parts,
             bodies,
             at,
             limits,
+            part_of,
         };
         prepared.check()?;
         Ok(prepared)
+    }
+
+    /// The only part, when the region has one domain.
+    pub(super) fn single(&self) -> Option<&Part> {
+        match self.parts.as_slice() {
+            [part] => Some(part),
+            _ => None,
+        }
+    }
+
+    /// Whether an output of part `k` has a lane-ordered reduction outside a select.
+    fn has_lanes(&self, k: usize) -> bool {
+        self.parts[k]
+            .outputs
+            .iter()
+            .any(|&n| top_reductions(&self.bodies[n].1).iter().any(is_lane_ordered))
     }
 
     fn name(&self, id: ValueId) -> &str {
@@ -397,45 +510,67 @@ impl Prepared {
                 }
             }
         }
-        let mut ranges: HashMap<Sym, (i64, i64)> = self
-            .coords
-            .iter()
-            .zip(&self.extents)
-            .map(|(&c, &e)| (Sym::Index(c), (0, i64::from(e) - 1)))
-            .collect();
-        for (_, body) in &self.bodies {
-            let mut failure = None;
-            body.walk_reads(&mut ranges, &mut |value, index, ranges| {
-                if failure.is_some() {
-                    return;
-                }
-                let storage = self.storage(value);
-                let element = storage.element(index);
-                let (lo, hi) = element
-                    .bounds(&|s| match s {
-                        Sym::Param(p) => Some(self.param_range(p)),
-                        Sym::Index(_) => ranges.get(&s).copied(),
-                    })
-                    .expect("validated reads are bounded");
-                for ((o, _), at) in self.bodies.iter().zip(&self.at) {
-                    let written = self.storage(*o);
-                    if written.parcel != storage.parcel || written.element(at) == element {
-                        continue;
-                    }
-                    if interval(*o).is_some_and(|(a, b)| a <= hi && lo <= b) {
-                        failure = Some(LowerError::Race {
-                            input: self.name(value).to_string(),
-                            output: self.name(*o).to_string(),
-                        });
+        for (k, part) in self.parts.iter().enumerate() {
+            let mut ranges: HashMap<Sym, (i64, i64)> = part
+                .coords
+                .iter()
+                .zip(&part.extents)
+                .map(|(&c, &e)| (Sym::Index(c), (0, i64::from(e) - 1)))
+                .collect();
+            for &n in &part.outputs {
+                let mut failure = None;
+                self.bodies[n].1.walk_reads(&mut ranges, &mut |value, index, ranges| {
+                    if failure.is_some() {
                         return;
                     }
+                    let storage = self.storage(value);
+                    let element = storage.element(index);
+                    let (lo, hi) = element
+                        .bounds(&|s| match s {
+                            Sym::Param(p) => Some(self.param_range(p)),
+                            Sym::Index(_) => ranges.get(&s).copied(),
+                        })
+                        .expect("validated reads are bounded");
+                    for (m, ((o, _), at)) in self.bodies.iter().zip(&self.at).enumerate() {
+                        let written = self.storage(*o);
+                        // Only a thread of the same part writes the element it reads.
+                        let own = self.part_of[m] == k && written.element(at) == element;
+                        if written.parcel != storage.parcel || own {
+                            continue;
+                        }
+                        if interval(*o).is_some_and(|(a, b)| a <= hi && lo <= b) {
+                            failure = Some(LowerError::Race {
+                                input: self.name(value).to_string(),
+                                output: self.name(*o).to_string(),
+                            });
+                            return;
+                        }
+                    }
+                });
+                if let Some(failure) = failure {
+                    return Err(failure);
                 }
-            });
-            if let Some(failure) = failure {
-                return Err(failure);
             }
         }
         Ok(())
+    }
+
+    /// Distinct bytes the kernel moves: every input something reads and every output,
+    /// each at most once per element its storage spans.
+    pub(super) fn footprint(&self) -> u64 {
+        let mut bytes = 0;
+        for (id, value) in self.region.values() {
+            if value.role == Role::Temporary || (value.role == Role::Input && self.region.readers(id) == 0) {
+                continue;
+            }
+            let storage = value.storage.as_ref().expect("validated");
+            let elements: u64 = value.shape.iter().map(|&e| u64::from(e)).product();
+            let spanned = storage
+                .interval(&value.shape, &|p| self.param_range(p))
+                .map_or(elements, |(lo, hi)| (hi - lo + 1).max(0) as u64);
+            bytes += 4 * elements.min(spanned);
+        }
+        bytes
     }
 
     /// The resource and scalar parameters: every parcel an input, output or index
@@ -507,7 +642,7 @@ impl Prepared {
         })
     }
 
-    /// An emitter with each coordinate bound to its local `c{n}`.
+    /// An emitter in the first part; see [`Self::enter`].
     pub(super) fn emitter(&self) -> Emit<'_> {
         let mut emit = Emit {
             region: &self.region,
@@ -515,14 +650,109 @@ impl Prepared {
             ranges: HashMap::new(),
             fresh: 0,
             cache: Vec::new(),
+            hoisted: Vec::new(),
             loads: None,
             depth: 0,
-            output: self.name(self.bodies[0].0).to_string(),
+            output: String::new(),
         };
-        for (&c, &e) in self.coords.iter().zip(&self.extents) {
+        self.enter(&mut emit, 0);
+        emit
+    }
+
+    /// Binds each coordinate of part `k` to its local `c{n}`, and forgets what `emit`
+    /// computed in the part before, whose locals are out of scope.
+    fn enter(&self, emit: &mut Emit, k: usize) {
+        let part = &self.parts[k];
+        for (&c, &e) in part.coords.iter().zip(&part.extents) {
             emit.bind(c, coord_name(c), e);
         }
-        emit
+        emit.cache.clear();
+        emit.hoisted.clear();
+        emit.output = self.name(self.bodies[part.outputs[0]].0).to_string();
+    }
+
+    /// Computes each term [`hoistable`] finds in part `k` into a local, once per
+    /// thread, where every later use reads it. Returns the terms.
+    fn hoist(&self, k: usize, emit: &mut Emit, out: &mut Vec<Stmt>) -> Result<Vec<Term>, LowerError> {
+        let part = &self.parts[k];
+        let mut found = Vec::new();
+        for &n in &part.outputs {
+            hoistable(&self.bodies[n].1, &part.coords, false, &mut found);
+        }
+        for term in &found {
+            let name = emit.fresh("h");
+            if term.free_indices().is_empty() {
+                let x = emit.term(term, out)?;
+                out.push(let_float(&name, x));
+            } else {
+                // It reads at the element's coordinates, which only valid threads have.
+                out.push(let_float(&name, float(0.0)));
+                let mut guarded = Vec::new();
+                emit.depth += 1;
+                let x = emit.term(term, &mut guarded);
+                emit.depth -= 1;
+                guarded.push(assign(&name, x?));
+                out.push(Stmt::If {
+                    cond: var("valid"),
+                    then_body: guarded,
+                    else_body: None,
+                });
+            }
+            emit.hoisted.push((term.clone(), name));
+        }
+        Ok(found)
+    }
+
+    /// Dependent steps and loads of one thread, and operations of all of them, in part
+    /// `k`: its hoisted terms, the lane reductions `lanes` spreads over each lane group
+    /// of an element, and its outputs. A value computed once is counted once, and
+    /// `computed` values, which another stage of the kernel provides, not at all.
+    pub(super) fn estimate(&self, k: usize, lanes: Option<u32>, hoisted: &[Term], computed: &[&Term]) -> Estimate {
+        let part = &self.parts[k];
+        let mut known: Vec<&Term> = computed.to_vec();
+        let (mut serial, mut loads, mut per_thread) = (0, 0, 0);
+        for term in hoisted {
+            serial += cost::serial(term, &known);
+            loads += cost::loads(term, &known);
+            per_thread += cost::ops(term, &known);
+            known.push(term);
+        }
+        if let Some(lanes) = lanes {
+            let pending = self.top_reductions(k, true, is_lane_ordered);
+            let groups = siblings(pending.clone());
+            for group in &groups {
+                let Term::Reduce { extent, .. } = group[0] else {
+                    unreachable!("only reductions are grouped");
+                };
+                let steps = u64::from(extent.div_ceil(lanes));
+                let bodies = group.iter().map(|r| match r {
+                    Term::Reduce { body, .. } => &**body,
+                    _ => unreachable!("only reductions are grouped"),
+                });
+                serial += steps * (1 + bodies.clone().map(|b| cost::serial(b, &known)).max().unwrap_or(0));
+                loads += steps * bodies.clone().map(|b| cost::loads(b, &known)).max().unwrap_or(0);
+                per_thread += steps * bodies.map(|b| 1 + cost::ops(b, &known)).sum::<u64>();
+            }
+            if !groups.is_empty() {
+                serial += u64::from(lanes.max(1).ilog2());
+            }
+            known.extend(pending);
+        }
+        let threads = part.elements() * u64::from(lanes.unwrap_or(1));
+        let mut work = threads * per_thread;
+        for &n in &part.outputs {
+            let body = &self.bodies[n].1;
+            serial += cost::serial(body, &known) + 1;
+            loads += cost::loads(body, &known);
+            work += part.elements() * (cost::ops(body, &known) + 1);
+            known.extend(top_reductions(body));
+        }
+        Estimate {
+            serial,
+            loads,
+            work,
+            ..Estimate::default()
+        }
     }
 
     /// `q{p}`: the value of each index parameter, read from its source.
@@ -542,131 +772,172 @@ impl Prepared {
             parcels,
             scalars,
         } = self.resources(sources)?;
-        let elements: u64 = self.extents.iter().map(|&e| u64::from(e)).product();
-        let per_group = match schedule {
+        let threads = match schedule {
             Schedule::Threads { workgroup } => workgroup,
-            Schedule::Lanes { elements, .. } => elements,
+            Schedule::Lanes { lanes, elements, .. } => lanes * elements,
             Schedule::Matrix { .. } => unreachable!("matrix schedules lower from a graph"),
         };
-        let groups = elements.div_ceil(u64::from(per_group.max(1)));
-        if elements > i32::MAX as u64 || groups > 65_535 {
-            return Err(LowerError::Grid { elements });
-        }
-
+        let single = self.parts.len() == 1;
         let mut emit = self.emitter();
+        let mut decls = Vec::new();
         let mut body = Vec::new();
-        let builtins = match schedule {
-            Schedule::Threads { .. } => {
-                body.push(let_int("t", cast(field(BuiltinFn::GlobalId), "int")));
-                BuiltinMask {
-                    global_id: true,
-                    ..BuiltinMask::NONE
-                }
+        let builtins = match (single, schedule) {
+            (true, Schedule::Threads { .. }) => BuiltinMask {
+                global_id: true,
+                ..BuiltinMask::NONE
+            },
+            _ => BuiltinMask {
+                local_id: true,
+                workgroup_id: true,
+                ..BuiltinMask::NONE
+            },
+        };
+        if !single {
+            body.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
+            body.push(let_int("group", cast(field(BuiltinFn::WorkgroupId), "int")));
+        }
+        let mut workgroup_bytes = 0u32;
+        let mut groups = 0u64;
+        let mut estimate = Estimate {
+            bytes: self.footprint(),
+            ..Estimate::default()
+        };
+        for (k, part) in self.parts.iter().enumerate() {
+            if k > 0 {
+                self.enter(&mut emit, k);
             }
-            Schedule::Lanes { lanes, elements, .. } => {
-                body.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
-                body.push(let_int("lane", bin(BinOp::Rem, var("local"), int(lanes as i64)?)));
-                body.push(let_int(
+            let lanes = match schedule {
+                Schedule::Lanes {
+                    lanes,
+                    elements,
+                    exchange,
+                } if single || self.has_lanes(k) => Some((lanes, elements, exchange)),
+                _ => None,
+            };
+            let elements = part.elements();
+            let per_group = lanes.map_or(threads, |(_, elements, _)| elements);
+            let part_groups = elements.div_ceil(u64::from(per_group.max(1)));
+            if elements > i32::MAX as u64 {
+                return Err(LowerError::Grid { elements });
+            }
+            let mut work = Vec::new();
+            // Element `t` of the part: its workgroup within the part's range, and its
+            // thread or lane group within the workgroup.
+            let (group, local) = match single {
+                true => (cast(field(BuiltinFn::WorkgroupId), "int"), None),
+                false => (bin(BinOp::Sub, var("group"), int(groups as i64)?), Some(var("local"))),
+            };
+            match lanes {
+                None if single => work.push(let_int("t", cast(field(BuiltinFn::GlobalId), "int"))),
+                None => work.push(let_int(
                     "t",
                     bin(
                         BinOp::Add,
-                        bin(
-                            BinOp::Mul,
-                            cast(field(BuiltinFn::WorkgroupId), "int"),
-                            int(elements as i64)?,
-                        ),
-                        bin(BinOp::Div, var("local"), int(lanes as i64)?),
+                        bin(BinOp::Mul, group, int(i64::from(threads))?),
+                        var("local"),
                     ),
-                ));
-                BuiltinMask {
-                    local_id: true,
-                    workgroup_id: true,
-                    ..BuiltinMask::NONE
-                }
-            }
-            Schedule::Matrix { .. } => unreachable!("matrix schedules lower from a graph"),
-        };
-        body.push(Stmt::Let {
-            name: "valid".into(),
-            mutable: false,
-            ty: Some("bool".into()),
-            init: bin(BinOp::Lt, var("t"), int(elements as i64)?),
-        });
-        let mut rest = var("t");
-        for (a, (&c, &e)) in self.coords.iter().zip(&self.extents).enumerate().rev() {
-            let name = coord_name(c);
-            if a == 0 {
-                body.push(let_int(&name, rest.clone()));
-            } else {
-                body.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
-                body.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
-                rest = var(&format!("rest{a}"));
-            }
-        }
-        self.index_params(sources, &mut body);
-
-        let mut workgroup_bytes = 0u32;
-        if let Schedule::Lanes {
-            lanes,
-            elements,
-            exchange,
-        } = schedule
-        {
-            let is_lanes = |r: &&Term| {
-                matches!(
-                    r,
-                    Term::Reduce {
-                        order: ReduceOrder::Lanes { .. },
-                        ..
+                )),
+                Some((lanes, elements, _)) => {
+                    if local.is_none() {
+                        work.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
                     }
-                )
-            };
-            // Lane groups reduce over the whole domain, so an output spanning part of it
-            // may only reuse a reduction an output spanning all of it computes.
-            let pending = self.top_reductions(true, is_lanes);
-            for ((_, term), limits) in self.bodies.iter().zip(&self.limits) {
-                if !limits.is_empty()
-                    && top_reductions(term)
-                        .into_iter()
-                        .filter(is_lanes)
-                        .any(|r| !pending.iter().any(|p| p.alpha_eq(r)))
-                {
-                    return Err(self.order_error());
+                    work.push(let_int("lane", bin(BinOp::Rem, var("local"), int(lanes as i64)?)));
+                    work.push(let_int(
+                        "t",
+                        bin(
+                            BinOp::Add,
+                            bin(BinOp::Mul, group, int(elements as i64)?),
+                            bin(BinOp::Div, var("local"), int(lanes as i64)?),
+                        ),
+                    ));
                 }
             }
-            let mut work = Vec::new();
-            let mut reduced = Vec::new();
-            for group in siblings(pending) {
-                let partials = emit.lanes(&group, lanes, &mut work)?;
-                reduced.extend(group.into_iter().zip(partials));
+            work.push(Stmt::Let {
+                name: "valid".into(),
+                mutable: false,
+                ty: Some("bool".into()),
+                init: bin(BinOp::Lt, var("t"), int(elements as i64)?),
+            });
+            let mut rest = var("t");
+            for (a, (&c, &e)) in part.coords.iter().zip(&part.extents).enumerate().rev() {
+                let name = coord_name(c);
+                if a == 0 {
+                    work.push(let_int(&name, rest.clone()));
+                } else {
+                    work.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
+                    work.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
+                    rest = var(&format!("rest{a}"));
+                }
             }
-            let mut decls = Vec::new();
-            workgroup_bytes = emit.exchange(&reduced, lanes, elements, exchange, &mut decls, &mut work)?;
-            body.extend(decls);
-            body.extend(work);
-        }
-        let values = self.outputs(&mut emit)?;
-        let cond = match schedule {
-            Schedule::Lanes { .. } => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
-            _ => var("valid"),
-        };
-        body.push(Stmt::If {
-            cond,
-            then_body: values,
-            else_body: None,
-        });
+            self.index_params(sources, &mut work);
+            let hoisted = self.hoist(k, &mut emit, &mut work)?;
 
-        let workgroup_size = match schedule {
-            Schedule::Lanes { lanes, elements, .. } => [lanes * elements, 1, 1],
-            Schedule::Threads { workgroup } | Schedule::Matrix { subgroup: workgroup } => [workgroup, 1, 1],
-        };
+            if let Some((lanes, elements, exchange)) = lanes {
+                // The partition keeps an output spanning part of the domain to lane
+                // reductions an output spanning all of it computes.
+                let pending = self.top_reductions(k, true, is_lane_ordered);
+                let mut reduced = Vec::new();
+                let mut reductions = Vec::new();
+                for group in siblings(pending) {
+                    let partials = emit.lanes(&group, lanes, &mut reductions)?;
+                    reduced.extend(group.into_iter().zip(partials));
+                }
+                let mut part_decls = Vec::new();
+                workgroup_bytes +=
+                    emit.exchange(&reduced, lanes, elements, exchange, &mut part_decls, &mut reductions)?;
+                match single {
+                    true => work.extend(part_decls),
+                    false => decls.extend(part_decls),
+                }
+                work.extend(reductions);
+            }
+            let values = self.outputs(k, &mut emit)?;
+            let cond = match lanes {
+                Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
+                None => var("valid"),
+            };
+            work.push(Stmt::If {
+                cond,
+                then_body: values,
+                else_body: None,
+            });
+
+            let part = self.estimate(k, lanes.map(|(lanes, ..)| lanes), &hoisted, &[]);
+            estimate.serial = estimate.serial.max(part.serial);
+            estimate.loads = estimate.loads.max(part.loads);
+            estimate.work += part.work;
+            match single {
+                true => body.extend(work),
+                false => {
+                    let first = int(groups as i64)?;
+                    let end = int((groups + part_groups) as i64)?;
+                    body.push(Stmt::If {
+                        cond: bin(
+                            BinOp::And,
+                            bin(BinOp::Ge, var("group"), first),
+                            bin(BinOp::Lt, var("group"), end),
+                        ),
+                        then_body: work,
+                        else_body: None,
+                    });
+                }
+            }
+            groups += part_groups;
+        }
+        if groups > 65_535 {
+            return Err(LowerError::Grid {
+                elements: self.parts.iter().map(Part::elements).sum(),
+            });
+        }
+        decls.extend(body);
+
         Ok(Lowered {
             kernel: ShaderKernel {
                 name: "tensor_region".into(),
-                workgroup_size,
+                workgroup_size: [threads, 1, 1],
                 params,
                 builtins,
-                body,
+                body: decls,
                 source_map: SourceMap::default(),
                 type_decls: Vec::new(),
             },
@@ -675,19 +946,21 @@ impl Prepared {
             parcels,
             scalars,
             workgroup_bytes,
+            parts: self.parts.len(),
+            estimate,
         })
     }
 
     /// The distinct reductions `keep` selects outside any select and any other
-    /// reduction of the outputs, in evaluation order; with `whole`, of only the
-    /// outputs that span the whole domain.
-    pub(super) fn top_reductions(&self, whole: bool, keep: impl Fn(&&Term) -> bool) -> Vec<&Term> {
+    /// reduction of part `k`'s outputs, in evaluation order; with `whole`, of only the
+    /// outputs that span the part's whole domain.
+    pub(super) fn top_reductions(&self, k: usize, whole: bool, keep: impl Fn(&&Term) -> bool) -> Vec<&Term> {
         let mut found: Vec<&Term> = Vec::new();
-        for ((_, term), limits) in self.bodies.iter().zip(&self.limits) {
-            if whole && !limits.is_empty() {
+        for &n in &self.parts[k].outputs {
+            if whole && !self.limits[n].is_empty() {
                 continue;
             }
-            for r in top_reductions(term).into_iter().filter(&keep) {
+            for r in top_reductions(&self.bodies[n].1).into_iter().filter(&keep) {
                 if !found.iter().any(|f| f.alpha_eq(r)) {
                     found.push(r);
                 }
@@ -696,12 +969,12 @@ impl Prepared {
         found
     }
 
-    /// Computes every output of element `c{n}` into a local and stores them all, the
-    /// stores after every computation. Sequential sibling reductions of the outputs
-    /// that span the whole domain share loops.
-    pub(super) fn outputs(&self, emit: &mut Emit) -> Result<Vec<Stmt>, LowerError> {
+    /// Computes every output of part `k` at element `c{n}` into a local and stores them
+    /// all, the stores after every computation. Sequential sibling reductions of the
+    /// outputs that span the whole domain share loops.
+    pub(super) fn outputs(&self, k: usize, emit: &mut Emit) -> Result<Vec<Stmt>, LowerError> {
         let mut values = Vec::new();
-        let sequential = self.top_reductions(true, |r| {
+        let sequential = self.top_reductions(k, true, |r| {
             matches!(
                 r,
                 Term::Reduce {
@@ -714,7 +987,9 @@ impl Prepared {
             emit.sequential(&group, &mut values)?;
         }
         let mut stores = Vec::new();
-        for (((o, term), at), limits) in self.bodies.iter().zip(&self.at).zip(&self.limits) {
+        let coords = &self.parts[k].coords;
+        for &n in &self.parts[k].outputs {
+            let ((o, term), at, limits) = (&self.bodies[n], &self.at[n], &self.limits[n]);
             emit.output = self.name(*o).to_string();
             let name = emit.fresh("o");
             let element = self.storage(*o).element(at);
@@ -727,7 +1002,7 @@ impl Prepared {
             };
             let Some(within) = limits
                 .iter()
-                .map(|&(a, e)| Ok(bin(BinOp::Lt, var(&coord_name(self.coords[a])), int(i64::from(e))?)))
+                .map(|&(a, e)| Ok(bin(BinOp::Lt, var(&coord_name(coords[a])), int(i64::from(e))?)))
                 .reduce(|a, b| Ok(bin(BinOp::And, a?, b?)))
                 .transpose()?
             else {
@@ -806,6 +1081,8 @@ pub(super) struct Emit<'a> {
     fresh: u32,
     /// Terms computed where every later use can see them, by their term.
     pub(super) cache: Vec<(Term, String)>,
+    /// Terms hoisted out of every loop: any use, at any depth, reads the local.
+    hoisted: Vec<(Term, String)>,
     /// Loads made at the depth of `.0`, by their expression: the step of a sibling
     /// loop reads each element its reductions share once.
     loads: Option<(u32, Vec<(Expr, String)>)>,
@@ -883,6 +1160,9 @@ impl Emit<'_> {
     }
 
     pub(super) fn term(&mut self, t: &Term, out: &mut Vec<Stmt>) -> Result<Expr, LowerError> {
+        if let Some((_, name)) = self.hoisted.iter().find(|(h, _)| h.alpha_eq(t)) {
+            return Ok(var(name));
+        }
         Ok(match t {
             Term::Lit(v) => float(*v),
             Term::Scalar(s) => var(&scalar_name(*s)),

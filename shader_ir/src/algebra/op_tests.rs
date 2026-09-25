@@ -377,6 +377,61 @@ fn sequential_siblings_share_a_loop() {
     assert_eq!(slang.matches("p2[").count(), 1, "{slang}");
 }
 
+#[test]
+fn a_reduction_then_updates_in_place() {
+    let n = 16;
+    let mut graph = Graph::new();
+    graph
+        .push(op(OpKind::Reduction(Reduction {
+            op: ReduceOp::Sum,
+            order: ReduceOrder::Sequential,
+            axis: 0,
+            input: operand("x", 0, &[n]),
+            out: operand("s", 1, &[1]),
+            finish: Term::arg(0) / Term::lit(n as f32),
+        })))
+        .unwrap();
+    graph
+        .push(map(&[("s", 1)], ("s", 1), 1, Term::arg(0) + Term::lit(1e-5)))
+        .unwrap();
+    graph.push(map(&[("s", 1)], ("s", 1), 1, Term::arg(0).sqrt())).unwrap();
+    assert_sequential(&graph, &env(&[(0, data(1, n)), (1, vec![0.0])]));
+}
+
+#[test]
+fn products_of_different_rows_run_side_by_side() {
+    // Query, key and value projections of one input into disjoint ranges of one
+    // buffer: the key and value share a grid, the query runs beside them.
+    let (k, rows) = (40, [12, 4, 4]);
+    let mut graph = Graph::new();
+    let mut offset = 0;
+    for (w, m) in rows.into_iter().enumerate() {
+        let mut product = contraction(["W", "x", "y"], [w as u32, 3, 4], &[m, k], [&[0, 1], &[1], &[0]], GEMV_LANES);
+        product.lhs.name = format!("W{w}");
+        product.out = Operand::new(&format!("y{w}"), &[m], Storage::strided(ParcelId(4), offset, &[1]));
+        graph.push(op(OpKind::Contraction(product))).unwrap();
+        offset += m as i64;
+    }
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert_eq!(lowered.parts, 2);
+    // Four rows a workgroup: three workgroups of query rows, then one of key and
+    // value rows side by side.
+    assert_eq!(lowered.groups, [4, 1, 1]);
+    let slang = source(&lowered);
+    assert_eq!(slang.matches("p4[").count(), 3, "{slang}");
+    assert_eq!(slang.matches("GroupMemoryBarrierWithGroupSync").count(), 4, "{slang}");
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, data(1, 12 * k)),
+            (1, data(2, 4 * k)),
+            (2, data(3, 4 * k)),
+            (3, data(4, k)),
+            (4, vec![0.0; 20]),
+        ]),
+    );
+}
+
 /// `C[i, j] = sum{s}(A[i, s] * B[s, j])`, then `D = max(C, 0)`.
 fn gemm_relu(m: u32, n: u32, k: u32, order: ReduceOrder) -> Graph {
     let mut graph = Graph::new();
@@ -498,6 +553,14 @@ fn a_reduction_prologue_stays_inside_a_factor() {
     assert!(rows.len() == 1 && rows[0].term.alpha_eq(&c.rhs), "{rows:?}");
     let scale = c.rhs.invariants(&[c.summed[0].0]);
     assert!(scale.len() == 1 && scale[0].free.is_empty(), "{scale:?}");
-    // One grid of five rows cannot also store the mean.
-    assert!(matches!(lower(graph.region(), &[]), Err(LowerError::Domain { .. })));
+    // The square and normalized input, the scalar mean, and the product's lanes over
+    // its five rows run side by side: three parts of one kernel.
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert_eq!(lowered.parts, 3);
+    // The scale depends on no index, so each thread of the product computes it once
+    // before its loop, rather than once per term: besides the product's own loop and
+    // its lane exchange, one loop over `x` in each part.
+    let slang = source(&lowered);
+    assert_eq!(slang.matches("while (").count(), 5, "{slang}");
+    assert_eq!(slang.matches("sqrt(").count(), 2, "{slang}");
 }

@@ -187,6 +187,10 @@ pub enum FusionRejection {
         stage: usize,
         reason: String,
     },
+    /// The run fuses, but its kernel is estimated to take longer than the dispatches
+    /// it replaces, such as a product a native library runs faster, or a factor the
+    /// kernel recomputes for every element that reads it.
+    Cost { fused_ns: u64, unfused_ns: u64 },
 }
 
 impl fmt::Display for FusionRejection {
@@ -231,6 +235,10 @@ impl fmt::Display for FusionRejection {
                 write!(f, "fused entry needs {bytes} workgroup-shared bytes, limit is {max}")
             }
             Self::Semantic { stage, reason } => write!(f, "stage {stage} does not fuse semantically: {reason}"),
+            Self::Cost { fused_ns, unfused_ns } => write!(
+                f,
+                "the fused kernel is estimated at {fused_ns} ns, the dispatches it replaces at {unfused_ns} ns"
+            ),
         }
     }
 }

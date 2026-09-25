@@ -9,6 +9,7 @@
 //! [`Prepared`] checks are the same.
 
 use super::affine::{Affine, IndexVar};
+use super::cost::{self, Estimate};
 use super::graph::Graph;
 use super::schedule::{
     assign, barrier, bin, cast, coord_name, field, float, int, let_float, let_int, var, IndexSource, LowerError,
@@ -34,7 +35,7 @@ struct Tile {
 /// applies to.
 pub(super) fn lower(graph: &Graph, sources: &[IndexSource], subgroup: u32) -> Option<Lowered> {
     let prepared = Prepared::new(graph.region()).ok()?;
-    let &[m, n] = prepared.extents.as_slice() else {
+    let &[m, n] = prepared.single()?.extents.as_slice() else {
         return None;
     };
     let tiles = tiles(graph, &prepared, [m, n]);
@@ -48,8 +49,9 @@ pub(super) fn lower(graph: &Graph, sources: &[IndexSource], subgroup: u32) -> Op
 /// into a row factor and a column factor, that an output spanning the whole domain
 /// reads outside any select and any other reduction.
 fn tiles(graph: &Graph, prepared: &Prepared, extents: [u32; 2]) -> Vec<Tile> {
-    let [row, column] = [prepared.coords[0], prepared.coords[1]];
-    let read = prepared.top_reductions(true, |_| true);
+    let coords = &prepared.parts[0].coords;
+    let [row, column] = [coords[0], coords[1]];
+    let read = prepared.top_reductions(0, true, |_| true);
     let mut tiles = Vec::new();
     for c in graph.structure().contractions {
         let [(index, extent)] = c.summed[..] else {
@@ -58,7 +60,7 @@ fn tiles(graph: &Graph, prepared: &Prepared, extents: [u32; 2]) -> Vec<Tile> {
         if c.shape.iter().copied().filter(|&e| e != 1).ne(extents) {
             continue;
         }
-        let mut coords = prepared.coords.iter();
+        let mut coords = coords.iter();
         let map: HashMap<IndexVar, Affine> = c
             .domain
             .iter()
@@ -119,7 +121,7 @@ fn emit(
     if elements > i32::MAX as u64 || groups > 65_535 {
         return Err(LowerError::Grid { elements });
     }
-    let [row, column] = [prepared.coords[0], prepared.coords[1]];
+    let [row, column] = [prepared.parts[0].coords[0], prepared.parts[0].coords[1]];
     let mut emit = prepared.emitter();
     let mut decls = Vec::new();
     let mut body = vec![
@@ -254,7 +256,7 @@ fn emit(
         ));
         emit.cache.push((tile.term.clone(), v));
     }
-    values.extend(prepared.outputs(&mut emit)?);
+    values.extend(prepared.outputs(0, &mut emit)?);
     element.push(Stmt::If {
         cond: bin(
             BinOp::And,
@@ -268,6 +270,28 @@ fn emit(
 
     let workgroup_bytes = tiles.len() as u32 * area * (2 + 2 + 4);
     decls.extend(body);
+    // Each tile step stages both factors, a subgroup's lanes taking turns over the
+    // tile, then multiplies; the epilogue reads the tiles.
+    let (mut serial, mut loads, mut work) = (0, 0, 0);
+    let mut macs = 0;
+    let turns = u64::from(area.div_ceil(subgroup));
+    for tile in tiles {
+        let steps = u64::from(tile.extent.div_ceil(MATRIX_TILE));
+        let stage = cost::serial(&tile.row, &[]).max(cost::serial(&tile.column, &[])) + 1;
+        serial += steps * (turns * stage + 2);
+        loads += steps * turns * cost::loads(&tile.row, &[]).max(cost::loads(&tile.column, &[]));
+        work += groups * steps * u64::from(area) * (cost::ops(&tile.row, &[]) + cost::ops(&tile.column, &[]) + 2);
+        macs += u64::from(m) * u64::from(n) * u64::from(tile.extent);
+    }
+    let computed: Vec<&Term> = tiles.iter().map(|t| &t.term).collect();
+    let epilogue = prepared.estimate(0, None, &[], &computed);
+    let estimate = Estimate {
+        bytes: prepared.footprint(),
+        serial: serial + turns * epilogue.serial,
+        loads: loads + turns * epilogue.loads,
+        work: work + epilogue.work,
+        matrix: macs,
+    };
     Ok(Lowered {
         kernel: ShaderKernel {
             name: "tensor_region".into(),
@@ -287,5 +311,7 @@ fn emit(
         parcels,
         scalars,
         workgroup_bytes,
+        parts: 1,
+        estimate,
     })
 }

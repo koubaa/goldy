@@ -26,6 +26,7 @@
 //! consumers'. The remaining nodes are matched by composing kernel bodies.
 
 use crate::backend::ComputePipelineHandle;
+use crate::fusion_cost::FusionCostModel;
 use crate::kernel::{
     access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
 };
@@ -180,7 +181,17 @@ pub struct FusionRegion {
     pub structure: Option<String>,
     /// For a [`FusionTier::Semantic`] region, how its kernel maps onto the device.
     pub schedule: Option<FusionSchedule>,
+    /// For a [`FusionTier::Semantic`] region, what the scheme's
+    /// [`crate::FusionCostModel`] estimates it and its constituents take.
+    pub cost: Option<FusionCost>,
     pub status: FusionRegionStatus,
+}
+
+/// Estimated times of a fused kernel and of the dispatches it replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FusionCost {
+    pub fused_ns: u64,
+    pub unfused_ns: u64,
 }
 
 /// How a [`FusionTier::Semantic`] region's kernel maps its outputs onto the device.
@@ -317,6 +328,7 @@ struct Region {
     nodes: Range<usize>,
     program: Program,
     id: KernelId,
+    cost: Option<FusionCost>,
     status: FusionRegionStatus,
 }
 
@@ -398,6 +410,7 @@ pub(crate) struct FusionPlanner {
     plan: Option<Plan>,
     events: FusionEvents,
     precision: ContractionPrecision,
+    cost: FusionCostModel,
 }
 
 impl FusionPlanner {
@@ -412,6 +425,7 @@ impl FusionPlanner {
             plan: None,
             events: FusionEvents::default(),
             precision: ContractionPrecision::Exact,
+            cost: FusionCostModel::default(),
         }
     }
 
@@ -422,6 +436,15 @@ impl FusionPlanner {
     /// Admit `precision` from the next plan on; the caller replans.
     pub(crate) fn set_precision(&mut self, precision: ContractionPrecision) {
         self.precision = precision;
+    }
+
+    pub(crate) fn cost_model(&self) -> FusionCostModel {
+        self.cost
+    }
+
+    /// Price runs with `cost` from the next plan on; the caller replans.
+    pub(crate) fn set_cost_model(&mut self, cost: FusionCostModel) {
+        self.cost = cost;
     }
 
     pub(crate) fn events(&self) -> FusionEvents {
@@ -627,6 +650,7 @@ impl FusionPlanner {
                         nodes: start..end,
                         id: definition.id(),
                         program: Program::Composed(definition),
+                        cost: None,
                         status: FusionRegionStatus::Compiling,
                     });
                     start = end;
@@ -659,6 +683,19 @@ impl FusionPlanner {
         let semantic = |i: usize| semantic.get(&(i as u32)).filter(|s| s.exact || reassociates);
         let site = |i: usize| semantic(i).or_else(|| lifted.get(&i));
         let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic(i).is_some());
+        // Each site as recorded, priced once.
+        let mut alone: HashMap<usize, f64> = HashMap::new();
+        let cost = self.cost;
+        let mut alone_ns = |i: usize, s: &SemanticSite| {
+            *alone.entry(i).or_insert_with(|| {
+                let estimate = s
+                    .exact
+                    .then(|| synthesize(&[s], target, ContractionPrecision::Exact).ok())
+                    .flatten()
+                    .map(|p| p.lowered.estimate);
+                cost.site_ns(s, estimate.as_ref())
+            })
+        };
         let mut taken = vec![false; n];
         let mut start = 0;
         while start < n {
@@ -667,15 +704,31 @@ impl FusionPlanner {
                 continue;
             };
             let mut run = vec![first];
-            let mut best = None;
+            let mut unfused_ns = alone_ns(start, first);
+            // The prefix that saves the most, and the longest one, with their costs.
+            let mut best: Option<(SemanticProgram, usize, FusionCost)> = None;
+            let mut longest: Option<(usize, FusionCost)> = None;
             let mut end = start + 1;
             while end < n && ir.nodes[end].group == ir.nodes[start].group {
                 let Some(next) = site(end) else { break };
                 run.push(next);
+                unfused_ns += alone_ns(end, next);
                 match synthesize(&run, target, self.precision) {
                     Ok(program) => {
-                        best = Some(program);
                         end += 1;
+                        if !recorded(start..end) {
+                            continue;
+                        }
+                        let fused_ns = cost.kernel_ns(&program.lowered.estimate);
+                        let priced = FusionCost {
+                            fused_ns: fused_ns as u64,
+                            unfused_ns: unfused_ns as u64,
+                        };
+                        longest = Some((end, priced));
+                        let saves = |c: &FusionCost| c.unfused_ns as f64 - c.fused_ns as f64;
+                        if saves(&priced) > best.as_ref().map_or(0.0, |(_, _, c)| saves(c)) {
+                            best = Some((program, end, priced));
+                        }
                     }
                     Err(reason) => {
                         if recorded(start..end + 1) && !self.rejected.iter().any(|r| r.nodes.end == end + 1) {
@@ -689,18 +742,31 @@ impl FusionPlanner {
                     }
                 }
             }
-            match best.filter(|_| recorded(start..end)) {
-                Some(program) => {
+            match best {
+                Some((program, end, priced)) => {
                     taken[start..end].fill(true);
                     self.regions.push(Region {
                         nodes: start..end,
                         id: program.id(),
                         program: Program::Semantic(Arc::new(program)),
+                        cost: Some(priced),
                         status: FusionRegionStatus::Compiling,
                     });
                     start = end;
                 }
-                None => start += 1,
+                None => {
+                    if let Some((end, priced)) = longest.filter(|(end, _)| !self.rejected.iter().any(|r| r.nodes.end == *end)) {
+                        tracing::debug!(?priced, first = start, end, "semantic fusion: run costs more fused");
+                        self.rejected.push(Rejection {
+                            nodes: start..end,
+                            reason: FusionRejection::Cost {
+                                fused_ns: priced.fused_ns,
+                                unfused_ns: priced.unfused_ns,
+                            },
+                        });
+                    }
+                    start += 1;
+                }
             }
         }
         taken
@@ -768,6 +834,7 @@ impl FusionPlanner {
                         elided,
                         structure: r.program.structure(),
                         schedule: r.program.schedule(),
+                        cost: r.cost,
                         status: r.status.clone(),
                     }
                 })

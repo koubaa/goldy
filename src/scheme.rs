@@ -2304,6 +2304,23 @@ impl Scheme {
         self.fusion.precision()
     }
 
+    /// How automatic fusion prices a semantic region against the dispatches it
+    /// replaces. The planner fuses the prefix of a run that saves the most estimated
+    /// time and leaves a run that saves none unfused
+    /// ([`goldy_shader_ir::FusionRejection::Cost`]), such as a product the native
+    /// library runs faster. The default models a discrete desktop GPU. A change replans.
+    pub fn set_fusion_cost_model(&mut self, model: crate::FusionCostModel) {
+        if self.fusion.cost_model() != model {
+            self.fusion.set_cost_model(model);
+            self.replan_fusion();
+        }
+    }
+
+    /// See [`Self::set_fusion_cost_model`].
+    pub fn fusion_cost_model(&self) -> crate::FusionCostModel {
+        self.fusion.cost_model()
+    }
+
     /// Which recorded dispatches automatic fusion runs, or tried to run, as one dispatch.
     ///
     /// Empty unless [`Self::automatic_fusion`] is on and the scheme's structure has

@@ -35,6 +35,7 @@
 
 mod affine;
 mod compose;
+mod cost;
 mod graph;
 mod interp;
 mod matrix;
@@ -53,6 +54,7 @@ mod tests;
 
 pub use affine::{Affine, IndexParam, IndexVar, Sym};
 pub use compose::{Appended, ComposeError};
+pub use cost::Estimate;
 pub use graph::{Contracted, Edge, Graph, GraphError, SharedFactor, Structure};
 pub use interp::{Environment, EvalError};
 pub use op::{Contraction, Expanded, Factor, Map, Op, OpError, OpKind, Operand, Params, Reduction};
