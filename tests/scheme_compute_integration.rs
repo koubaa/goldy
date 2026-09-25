@@ -374,18 +374,18 @@ mod imp {
             goldy::test_support::wait_for_specialization_compiles(scheme);
         };
 
-        // Frame 1 records; frames 2..=11 are clean. Streak 2 (frame 3) starts the compile,
-        // streak 10 (frame 11) swaps the variant in as a params-only re-record.
-        for f in 1..=11 {
+        // Neither word has changed since recording: frame 1 starts the compile baking both,
+        // and frame 2 swaps the variant in as a params-only re-record.
+        for f in 1..=2 {
             frame_and_check(&mut scheme, 3, 7, &format!("frame {f} (universal or variant)"));
         }
         let stats = scheme.replay_stats();
         if predicts {
             assert_eq!(
                 stats.specialization_warms, 1,
-                "one compile for the stable (factor, bias) pair"
+                "one compile for the recorded (factor, bias) pair"
             );
-            assert_eq!(stats.specialization_promotions, 1, "promoted on the 10th clean frame");
+            assert_eq!(stats.specialization_promotions, 1, "promoted on the second frame");
             assert!(scheme.node_is_specialized(node));
             assert_eq!(stats.records, 2, "initial record plus the promotion re-record");
         } else {

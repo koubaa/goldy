@@ -2045,7 +2045,7 @@ impl Scheme {
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
             launch_words: Vec::new(),
-            certain_facts: Vec::new(),
+            tensor_facts: Vec::new(),
             slot_access: parts.slot_access.clone(),
             provenance: Some(std::sync::Arc::clone(&parts.provenance)),
             yielding: None,
@@ -2076,7 +2076,7 @@ impl Scheme {
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
             launch_words: Vec::new(),
-            certain_facts: Vec::new(),
+            tensor_facts: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
             provenance: None,
             yielding: None,
@@ -2242,14 +2242,14 @@ impl Scheme {
         }
         let label = self.desc.ir.nodes[node.index()].label.clone();
         // The node's layouts outlive the swap, so its shape facts stay certain.
-        let certain = self.specialization.certain_facts(exec as u32);
+        let facts = self.specialization.tensor_facts(exec as u32);
         self.specialization.register_site(
             exec as u32,
             pipeline.handle,
             &pipeline.provenance,
             label,
             &slots,
-            &certain,
+            &facts,
         );
         if changed {
             self.mark_params_dirty();
@@ -2430,7 +2430,7 @@ impl Scheme {
                 if let NodeKind::Dispatch { user_slots, .. } = &mut ir.nodes[exec].kind {
                     user_slots[slot] = value;
                 }
-                if let Some(universal) = self.specialization.on_param_changed(exec as u32, slot) {
+                if let Some(universal) = self.specialization.on_param_changed(exec as u32, slot, value) {
                     let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
                     if let NodeKind::Dispatch { pipeline, .. } = &mut ir.nodes[exec].kind {
                         *pipeline = universal;
@@ -2540,14 +2540,12 @@ impl Scheme {
 
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
         {
-            // The predictor sees the scheme as the caller left it (clean or not) and may
-            // rebind a node to a specialized variant; that rebind is a params-only mutation
-            // this same submit records.
+            // The predictor may rebind a node to a specialized variant; that rebind is a
+            // params-only mutation this same submit records.
             let _tz = crate::tracy_zone!("scheme.submit.specialization");
-            let was_clean = self.dirty == SchemeDirty::Clean && !topo_dirty;
             let device = self.ctx.runtime().clone();
             let ir = executed_ir_mut(&mut self.desc, &mut self.fusion);
-            if self.specialization.begin_submit(&device, ir, was_clean, topo_dirty) {
+            if self.specialization.begin_submit(&device, ir) {
                 self.mark_params_dirty();
             }
         }
@@ -3865,8 +3863,8 @@ pub struct SchemeNodeBuilder<'a> {
     user_slots: Vec<u32>,
     /// See [`NodeKind::Dispatch`]'s `launch_words`.
     launch_words: Vec<u32>,
-    /// Specialization facts that hold for the node's lifetime, as `(slot, word)`.
-    certain_facts: crate::specialization::BakedSlots,
+    /// The node's tensor layout facts for the specializer, as `(fact slot, word)`.
+    tensor_facts: crate::specialization::BakedSlots,
     /// Per-slot descriptor access required by the shader signature (from pipeline
     /// reflection), in shader-signature order. Lets [`Self::with_parcel`] pick the
     /// correct SRV/UAV descriptor independent of the graph [`NodeAccess`].
@@ -4015,10 +4013,9 @@ impl<'a> SchemeNodeBuilder<'a> {
         self
     }
 
-    /// Hand the specialization predictor facts that hold for the node's lifetime:
-    /// `#[fact]` scalars and tensor shape facts, in ascending slot order.
-    pub(crate) fn with_certain_facts(mut self, facts: crate::specialization::BakedSlots) -> Self {
-        self.certain_facts = facts;
+    /// Hand the specialization predictor the node's tensor shape facts, in ascending slot order.
+    pub(crate) fn with_tensor_facts(mut self, facts: crate::specialization::BakedSlots) -> Self {
+        self.tensor_facts = facts;
         self
     }
 
@@ -4249,7 +4246,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 provenance,
                 self.label.clone(),
                 &self.user_slots,
-                &self.certain_facts,
+                &self.tensor_facts,
             );
         }
     }
@@ -8949,7 +8946,6 @@ mod specialization_tests {
     use crate::test_support::{mock_runtime, with_mock, SpecializationOverride};
     use std::sync::Arc;
 
-    const WARM: u32 = SpecializationPolicy::DEFAULT_WARM_AFTER;
     const PROMOTE: u32 = SpecializationPolicy::DEFAULT_PROMOTE_AFTER;
 
     fn scalar_shader(device: &Runtime) -> ShaderModule {
@@ -8985,8 +8981,8 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         _spec: SpecializationOverride,
     }
 
-    /// A scheme with one dispatch carrying `params`, recorded once (first submit done).
-    fn fixture(device: &Arc<Runtime>, pool: &Runtime, params: &[u32]) -> Fixture {
+    /// A scheme with one dispatch carrying `params`, not yet submitted.
+    fn record(device: &Arc<Runtime>, pool: &Runtime, params: &[u32]) -> Fixture {
         let _cb = crate::test_support::CbReuseOverride::force_enabled();
         let _spec = SpecializationOverride::force_enabled();
         let ctx = device.create_context().unwrap();
@@ -8999,7 +8995,6 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
             builder = builder.with_param(p);
         }
         let node = builder.dispatch(1, 1, 1);
-        scheme.submit().unwrap();
         Fixture {
             scheme,
             node,
@@ -9008,6 +9003,13 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
             _cb,
             _spec,
         }
+    }
+
+    /// [`record`], then the first submit, with the compile it started landed.
+    fn fixture(device: &Arc<Runtime>, pool: &Runtime, params: &[u32]) -> Fixture {
+        let mut f = record(device, pool, params);
+        frame(&mut f.scheme);
+        f
     }
 
     fn bound_pipeline(scheme: &Scheme, node: NodeId) -> crate::backend::ComputePipelineHandle {
@@ -9034,26 +9036,21 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     #[test]
-    fn promotes_after_the_streak_and_rebinds_the_node() {
+    fn recorded_words_bake_at_the_first_submit_and_the_node_rebinds() {
         let device = mock_runtime();
         let pool = &device;
-        let mut f = fixture(&device, &pool, &[7, 9]);
+        let mut f = record(&device, &pool, &[7, 9]);
         let node = f.node;
         let universal = f.universal.handle;
 
-        // Frame 1 recorded; streaks start counting on the clean frames after it.
-        // Streak reaches WARM on clean frame WARM (submit WARM+1) -> compile starts.
-        frames(&mut f.scheme, WARM);
+        // The first submit warms a variant baking both recorded words; it runs universal.
+        frame(&mut f.scheme);
         assert_eq!(f.scheme.replay_stats().specialization_warms, 1);
         assert_eq!(variant_compiles(&device), 1);
-        assert_eq!(f.scheme.replay_stats().specialization_promotions, 0);
-
-        // Streak reaches PROMOTE on clean frame PROMOTE (submit PROMOTE+1).
-        frames(&mut f.scheme, PROMOTE - WARM - 1);
-        assert_eq!(f.scheme.replay_stats().specialization_promotions, 0);
         assert!(!f.scheme.node_is_specialized(node));
         assert_eq!(bound_pipeline(&f.scheme, node), universal);
 
+        // Words the caller never changed need no proof: the next submit promotes.
         frame(&mut f.scheme);
         let stats = f.scheme.replay_stats();
         assert_eq!(stats.specialization_promotions, 1);
@@ -9063,13 +9060,50 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert_eq!(stats.records, 2);
         assert!(!f.scheme.is_dirty(), "the promoting submit left the scheme clean");
 
-        // Steady state: nothing else happens.
+        // Steady state: nothing else happens, and no submit steps the site.
+        assert!(f.scheme.specialization().is_idle());
         frames(&mut f.scheme, 5);
         let stats = f.scheme.replay_stats();
         assert_eq!(stats.records, 2);
         assert_eq!(stats.specialization_warms, 1);
         assert_eq!(stats.specialization_promotions, 1);
         assert_eq!(variant_compiles(&device), 1);
+        assert!(f.scheme.specialization().is_idle());
+    }
+
+    #[test]
+    fn a_change_before_the_first_submit_is_still_recording() {
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = record(&device, &pool, &[7]);
+        f.scheme.set_node_param(f.node, 0, 8).unwrap();
+        frames(&mut f.scheme, 2);
+        assert!(f.scheme.node_is_specialized(f.node));
+        assert_eq!(
+            f.scheme.specialization().site_held(f.node.index() as u32),
+            Some(vec![None])
+        );
+    }
+
+    #[test]
+    fn a_dirty_scheme_still_promotes_its_stable_nodes() {
+        let device = mock_runtime();
+        let pool = &device;
+        let mut f = record(&device, &pool, &[0]);
+        let stable = f
+            .scheme
+            .node("tint", &f.universal)
+            .with_parcel(&f._buf, NodeAccess::Write)
+            .with_param(7)
+            .dispatch(1, 1, 1);
+        frame(&mut f.scheme);
+        // Every frame dirties the scheme through the other node.
+        for i in 1..=4u32 {
+            f.scheme.set_node_param(f.node, 0, i).unwrap();
+            frame(&mut f.scheme);
+        }
+        assert!(f.scheme.node_is_specialized(stable), "its words never changed");
+        assert!(!f.scheme.node_is_specialized(f.node), "its word changes every frame");
     }
 
     #[test]
@@ -9096,7 +9130,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     #[test]
-    fn a_changed_slot_needs_a_longer_streak_before_it_is_baked_again() {
+    fn a_changed_slot_must_hold_longer_before_it_is_baked_again() {
         let device = mock_runtime();
         let pool = &device;
         let mut f = fixture(&device, &pool, &[7, 9]);
@@ -9106,15 +9140,19 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert_eq!(variant_compiles(&device), 1);
 
         f.scheme.set_node_param(node, 0, 8).unwrap();
-        // Slot 1 is still stable and long past PROMOTE: a variant baking only slot 1 is
-        // compiled and promoted while slot 0 re-earns trust.
-        frames(&mut f.scheme, 3);
+        // Slot 1 was never changed: a variant baking only slot 1 is compiled and promoted
+        // while slot 0 re-earns trust.
+        frames(&mut f.scheme, 2);
         assert_eq!(variant_compiles(&device), 2, "variant for {{slot 1}} alone");
         assert!(f.scheme.node_is_specialized(node));
         assert_eq!(f.scheme.replay_stats().specialization_promotions, 2);
+        assert_eq!(
+            f.scheme.specialization().site_held(node.index() as u32),
+            Some(vec![Some(1), None])
+        );
 
-        // Slot 0 now needs PROMOTE clean frames (not WARM) before it is baked; once it is,
-        // the site widens to both slots.
+        // Slot 0 burned a promotion, so it needs PROMOTE submits (not WARM) before it is
+        // baked; once it is, the site widens to both slots.
         frames(&mut f.scheme, PROMOTE);
         assert_eq!(variant_compiles(&device), 3, "widened variant for both slots");
         assert_eq!(f.scheme.replay_stats().specialization_promotions, 3);
@@ -9122,7 +9160,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     #[test]
-    fn a_word_that_flips_every_frame_never_warms() {
+    fn a_word_that_flips_every_frame_is_baked_once_then_left_dynamic() {
         let device = mock_runtime();
         let pool = &device;
         let mut f = fixture(&device, &pool, &[0]);
@@ -9131,10 +9169,12 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
             f.scheme.set_node_param(node, 0, i % 2).unwrap();
             frame(&mut f.scheme);
         }
+        // The recorded word was baked at the first submit; the first flip dropped that
+        // compile before it was promoted, and the slot never holds long enough again.
         let stats = f.scheme.replay_stats();
-        assert_eq!(stats.specialization_warms, 0);
+        assert_eq!(stats.specialization_warms, 1);
         assert_eq!(stats.specialization_promotions, 0);
-        assert_eq!(variant_compiles(&device), 0);
+        assert_eq!(variant_compiles(&device), 1);
     }
 
     #[test]
@@ -9143,7 +9183,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         let pool = &device;
         let mut f = fixture(&device, &pool, &[7, 0]);
         let node = f.node;
-        // Slot 1 changes every 4th frame: enough to pass WARM once, never PROMOTE.
+        // Slot 1 changes every 4th frame: enough to pass WARM, never PROMOTE.
         for i in 1..=60u32 {
             if i % 4 == 0 {
                 f.scheme.set_node_param(node, 1, i).unwrap();
@@ -9152,11 +9192,11 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         }
         let stats = f.scheme.replay_stats();
         assert!(f.scheme.node_is_specialized(node), "slot 0 alone still gets promoted");
-        // One compile for {0,1} (cancelled by the first flip), one for {0}; after the burn
-        // slot 1 needs PROMOTE consecutive clean frames it never gets.
+        // One compile for {0,1}, promoted and then demoted by the first flip, one for {0};
+        // after the burn slot 1 needs PROMOTE submits it never gets.
         assert_eq!(variant_compiles(&device), 2, "warms: {}", stats.specialization_warms);
-        assert_eq!(stats.specialization_promotions, 1);
-        assert_eq!(stats.specialization_demotions, 0);
+        assert_eq!(stats.specialization_promotions, 2);
+        assert_eq!(stats.specialization_demotions, 1);
     }
 
     #[test]
@@ -9219,7 +9259,7 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     fn off_switch_keeps_every_node_on_the_callers_pipeline() {
         let device = mock_runtime();
         let pool = &device;
-        let mut f = fixture(&device, &pool, &[7]);
+        let mut f = record(&device, &pool, &[7]);
         let _off = SpecializationOverride::force_disabled();
         frames(&mut f.scheme, 2 * PROMOTE);
         let stats = f.scheme.replay_stats();
@@ -9261,8 +9301,8 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
         assert!(!f.scheme.node_is_specialized(node));
         assert_eq!(bound_pipeline(&f.scheme, node), replacement.handle);
         assert_eq!(
-            f.scheme.specialization().site_streaks(node.index() as u32),
-            Some(vec![0])
+            f.scheme.specialization().site_held(node.index() as u32),
+            Some(vec![None])
         );
 
         // History restarts against the new universal and promotes a variant of *it*.
@@ -9273,34 +9313,28 @@ void tint(Scattered<uint> buf, ThreadId id, uint a, uint b) { buf[0] = a + b; }
     }
 
     #[test]
-    fn topology_dirtiness_resets_streaks() {
+    fn topology_dirtiness_leaves_a_settled_site_alone() {
         let device = mock_runtime();
         let pool = &device;
         let mut f = fixture(&device, &pool, &[7, 9]);
         let node = f.node;
-        frames(&mut f.scheme, 1);
-        assert_eq!(
-            f.scheme.specialization().site_streaks(node.index() as u32),
-            Some(vec![1, 1])
-        );
+        frame(&mut f.scheme);
+        assert!(f.scheme.node_is_specialized(node));
         f.scheme.topology_dirty.store(true, Ordering::Release);
         frame(&mut f.scheme);
-        assert_eq!(
-            f.scheme.specialization().site_streaks(node.index() as u32),
-            Some(vec![0, 0])
-        );
+        assert!(f.scheme.node_is_specialized(node), "no word changed");
+        assert!(f.scheme.specialization().is_idle());
+        assert_eq!(f.scheme.replay_stats().specialization_warms, 1);
     }
 
     #[test]
     fn a_job_is_cancelled_when_its_baked_word_moves_before_it_lands() {
         let device = mock_runtime();
         let pool = &device;
-        let mut f = fixture(&device, &pool, &[7]);
+        let mut f = record(&device, &pool, &[7]);
         let node = f.node;
         // Do not wait for the compile: the job is in flight (or done) when the word changes.
-        for _ in 0..WARM {
-            f.scheme.submit().unwrap();
-        }
+        f.scheme.submit().unwrap();
         assert!(f.scheme.specialization().site_has_job(node.index() as u32));
         f.scheme.set_node_param(node, 0, 8).unwrap();
         assert!(
