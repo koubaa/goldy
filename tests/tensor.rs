@@ -305,9 +305,12 @@ fn tensor_kernel_canonical_source_and_abi() {
     let slang = copy_view::CANONICAL_SOURCE;
     assert!(slang.contains("struct GoldyTensorLayout"));
     assert!(slang.contains("BufRO<GoldyTensorLayout> _goldy_tensor_meta"));
-    assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
-    assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[1u]"));
+    // Offsets and facts come from per-slot macros that default to the metadata parcel.
+    assert!(slang.contains("#define _GOLDY_TENSOR_OFF0 _goldy_tensor_meta[0u].off"));
     assert!(slang.contains("_goldy_tensor_meta[1u].numel"));
+    assert!(slang.contains("goldy_tensor_offset(_goldy_t0,"));
+    assert!(slang.contains("goldy_tensor_offset(_goldy_t1,"));
+    assert!(slang.contains("_goldy_t1.numel"));
     assert!(scale_view::CANONICAL_SOURCE.contains("float a"));
 }
 
@@ -438,10 +441,10 @@ fn tensor_shape_contract_accepts_matching_and_strided_views() {
 
 #[test]
 fn tensor_shape_contract_lowers_each_rank() {
-    assert!(copy_eq::CANONICAL_SOURCE.contains("goldy_tensor_offset1(_goldy_tensor_meta[0u]"));
-    assert!(copy_wildcard_cols::CANONICAL_SOURCE.contains("goldy_tensor_offset2(_goldy_tensor_meta[0u]"));
-    assert!(copy_rank3::CANONICAL_SOURCE.contains("goldy_tensor_offset3(_goldy_tensor_meta[0u]"));
-    assert!(copy_view::CANONICAL_SOURCE.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
+    assert!(copy_eq::CANONICAL_SOURCE.contains("goldy_tensor_offset1(_goldy_t0,"));
+    assert!(copy_wildcard_cols::CANONICAL_SOURCE.contains("goldy_tensor_offset2(_goldy_t0,"));
+    assert!(copy_rank3::CANONICAL_SOURCE.contains("goldy_tensor_offset3(_goldy_t0,"));
+    assert!(copy_view::CANONICAL_SOURCE.contains("goldy_tensor_offset(_goldy_t0,"));
 }
 
 /// Each contracted rank reads non-contiguous views: a strided column and a broadcast at
@@ -509,6 +512,109 @@ fn tensor_shape_contract_reads_strided_views_at_each_rank() {
         .flat_map(|k| (0..2).flat_map(move |i| (0..3).map(move |j| (i * 12 + j * 4 + k) as f32)))
         .collect();
     assert_eq!(read_f32(&mut scheme, dst.buffer()), expected);
+}
+
+/// Strided views compute the same on the universal program (layouts from the metadata
+/// parcel) and on the promoted variants (offsets as launch words, shape facts baked).
+/// Views that differ only in offset share one variant.
+#[test]
+fn strided_views_survive_layout_promotion() {
+    let _gpu = gpu_lock();
+    let _spec = goldy::test_support::SpecializationOverride::force_enabled();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let predicts = !matches!(
+        device.backend_type(),
+        goldy::BackendType::WebGpu | goldy::BackendType::Cpu
+    );
+    let values: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let parent = Tensor::from_f32(&device, TensorShape::from_dims(&[2, 3, 4]).unwrap(), &values).unwrap();
+    let column = |offset| {
+        let layout = TensorLayout::strided(TensorDType::F32, TensorShape::vector(3), offset, &[4]).unwrap();
+        TensorView::new(parent.buffer(), layout).unwrap()
+    };
+    let rank1 = copy_eq::Kernel::prepare(&device).unwrap();
+    let rank2 = copy_wildcard_cols::Kernel::prepare(&device).unwrap();
+    let rank3 = copy_rank3::Kernel::prepare(&device).unwrap();
+    let col1 = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let col2 = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let plane = Tensor::zeros(&device, TensorShape::matrix(4, 3), TensorDType::F32).unwrap();
+    let cube = Tensor::zeros(&device, TensorShape::from_dims(&[4, 2, 3]).unwrap(), TensorDType::F32).unwrap();
+
+    let mut scheme = Scheme::new(&ctx);
+    let nodes = [
+        rank1
+            .record(&mut scheme, "col1", column(1), col1.view())
+            .unwrap()
+            .over_1d(3)
+            .node(),
+        rank1
+            .record(&mut scheme, "col2", column(2), col2.view())
+            .unwrap()
+            .over_1d(3)
+            .node(),
+        rank2
+            .record(
+                &mut scheme,
+                "transpose",
+                parent
+                    .view()
+                    .narrow(0, 1, 1)
+                    .unwrap()
+                    .reshape(&[3, 4])
+                    .unwrap()
+                    .transpose()
+                    .unwrap(),
+                plane.view(),
+            )
+            .unwrap()
+            .over_1d(12)
+            .node(),
+        rank3
+            .record(
+                &mut scheme,
+                "permute",
+                parent.view().permute(&[2, 0, 1]).unwrap(),
+                cube.view(),
+            )
+            .unwrap()
+            .over_1d(24)
+            .node(),
+    ];
+
+    let transposed: Vec<f32> = (0..4)
+        .flat_map(|c| (0..3).map(move |r| (12 + r * 4 + c) as f32))
+        .collect();
+    let permuted: Vec<f32> = (0..4)
+        .flat_map(|k| (0..2).flat_map(move |i| (0..3).map(move |j| (i * 12 + j * 4 + k) as f32)))
+        .collect();
+    let frame_and_check = |scheme: &mut Scheme, what: &str| {
+        let mut sub = scheme.submit().expect(what);
+        let mut take = |buf: &goldy::Buffer| -> Vec<f32> {
+            let bytes = (&mut sub >> buf).take::<u8>().expect("host take");
+            bytemuck::cast_slice(&bytes).to_vec()
+        };
+        assert_eq!(take(col1.buffer()), vec![1.0, 5.0, 9.0], "{what}: col1");
+        assert_eq!(take(col2.buffer()), vec![2.0, 6.0, 10.0], "{what}: col2");
+        assert_eq!(take(plane.buffer()), transposed, "{what}: transpose");
+        assert_eq!(take(cube.buffer()), permuted, "{what}: permute");
+        drop(sub);
+        goldy::test_support::wait_for_specialization_compiles(scheme);
+    };
+
+    // Shape facts are certain, so the first submit already warms every variant and the
+    // second swaps them in.
+    frame_and_check(&mut scheme, "universal");
+    frame_and_check(&mut scheme, "promoted");
+    let stats = scheme.replay_stats();
+    if predicts {
+        assert_eq!(stats.specialization_warms, 3, "col1 and col2 share one compile");
+        assert_eq!(stats.specialization_promotions, 4);
+        assert!(nodes.iter().all(|&n| scheme.node_is_specialized(n)));
+    } else {
+        assert_eq!(stats.specialization_warms, 0);
+    }
+    frame_and_check(&mut scheme, "steady state");
 }
 
 #[test]

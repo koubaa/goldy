@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Bump when the wire layout or parameter classification changes.
-pub const KERNEL_ABI_VERSION: u32 = 3;
+pub const KERNEL_ABI_VERSION: u32 = 4;
 
 /// Hidden structured-buffer parameter that packs every tensor layout for one dispatch.
 pub const TENSOR_META_PARAM: &str = "_goldy_tensor_meta";
@@ -18,6 +18,52 @@ pub const TENSOR_LAYOUT_SLANG: &str = "GoldyTensorLayout";
 
 /// Host/device stride of [`TENSOR_LAYOUT_SLANG`] (`12` `uint`s, 16-byte aligned).
 pub const TENSOR_LAYOUT_STRIDE_BYTES: u32 = 48;
+
+/// Tensor slots whose element offset also rides in a launch word.
+///
+/// Native backends carry these words in `PushLayout` region C after the three frame-table
+/// words, and CUDA as trailing kernel arguments. A slot at or past this count reads its
+/// offset from [`TENSOR_META_PARAM`] in every program.
+pub const TENSOR_LAUNCH_WORDS: usize = 13;
+
+/// Layout fields a site can bake, in [`TENSOR_LAYOUT_SLANG`] word order after `off`.
+///
+/// They are fixed for a dispatch node's lifetime, unlike the element offset, which
+/// differs between sites that bind views of one shape.
+pub const TENSOR_FACTS: [&str; 11] = ["rank", "numel", "d0", "d1", "d2", "d3", "s0", "s1", "s2", "s3", "flags"];
+
+/// Upper-case stem of every specialization macro scoped to the `[goldy_compute]` function `entry`.
+pub fn specialization_macro_stem(entry: &str) -> String {
+    entry
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Macro that supplies tensor slot `slot`'s element offset.
+///
+/// It defaults to the metadata parcel. A virtual-main wrapper that carries launch words
+/// defines it first, for slots below [`TENSOR_LAUNCH_WORDS`].
+pub fn tensor_offset_macro(slot: u32) -> String {
+    format!("_GOLDY_TENSOR_OFF{slot}")
+}
+
+/// Macro that supplies layout field [`TENSOR_FACTS`]`[fact]` of tensor slot `slot` in `entry`.
+///
+/// It defaults to the metadata parcel. Defining it to a wire-word literal bakes the field.
+pub fn tensor_fact_macro(entry: &str, slot: u32, fact: usize) -> String {
+    format!(
+        "_GOLDY_SPEC_{}_T{slot}_{}",
+        specialization_macro_stem(entry),
+        TENSOR_FACTS[fact].to_ascii_uppercase()
+    )
+}
 
 /// Bitflags for hidden builtins injected into the generated Slang signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

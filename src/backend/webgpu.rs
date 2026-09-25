@@ -3166,6 +3166,8 @@ impl WebGpuBackend {
         let mut current_pipeline: Option<ComputePipelineHandle> = None;
         let mut current_indices: Vec<u32> = Vec::new();
         let mut current_user: Vec<u32> = Vec::new();
+        // WebGPU kernels read tensor offsets from the metadata parcel, so launch words only pad the scalars.
+        let mut current_has_launch = false;
         let mut frame_table: Option<&[u32]> = None;
         let mut user_slot_i = 0usize;
 
@@ -3179,7 +3181,9 @@ impl WebGpuBackend {
                     }
                     GpuCommand::BindResourcesRaw { indices, user, .. } => {
                         current_indices.clone_from(indices);
-                        current_user.clone_from(user);
+                        let (scalars, launch) = super::shared::split_bind_words(user);
+                        current_user = scalars.to_vec();
+                        current_has_launch = !launch.is_empty();
                     }
                     GpuCommand::Dispatch {
                         label,
@@ -3224,7 +3228,7 @@ impl WebGpuBackend {
                             queue.write_buffer(buffer, offset, &pack_user_uniform(&current_user));
                             user_slot_i += 1;
                             Some((buffer, offset))
-                        } else if !current_user.is_empty() {
+                        } else if !current_user.is_empty() && !current_has_launch {
                             anyhow::bail!(
                                 "WebGPU: shader has no scalar parameters but BindResourcesRaw.user is non-empty"
                             );
@@ -3313,7 +3317,7 @@ impl WebGpuBackend {
                             queue.write_buffer(buffer, off, &pack_user_uniform(&current_user));
                             user_slot_i += 1;
                             Some((buffer, off))
-                        } else if !current_user.is_empty() {
+                        } else if !current_user.is_empty() && !current_has_launch {
                             anyhow::bail!(
                                 "WebGPU: shader has no scalar parameters but BindResourcesRaw.user is non-empty"
                             );

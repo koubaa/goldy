@@ -3,22 +3,17 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, TensorOpMeta, UnaryF32Kernel, OP_ABS, OP_ADD,
-    OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_GATHER, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN,
-    OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX,
-    OP_SCATTER_MIN, OP_SCATTER_SET, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
+    CopyU32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR,
+    OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR,
+    OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN,
+    OP_SCATTER_SET, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
 };
-use super::layout::GoldyTensorLayout;
 use super::semantic;
 use super::shape::TensorShape;
 use super::view::{broadcast_shapes, Tensor, TensorView};
-use super::MAX_TENSOR_RANK;
 use crate::error::GoldyError;
-use crate::parcel::Buffer;
 use crate::runtime::Runtime;
 use crate::scheme::Scheme;
-use crate::types::BufferKind;
-use std::sync::Arc;
 
 /// Host scalar for fill / scalar-broadcast binary ops.
 #[derive(Debug, Clone, Copy)]
@@ -132,15 +127,6 @@ pub struct TensorRecorder<'a> {
 }
 
 impl<'a> TensorRecorder<'a> {
-    pub(crate) fn intern_meta(&mut self, meta: TensorOpMeta) -> Result<Arc<Buffer>, GoldyError> {
-        let buf = self
-            .kernels
-            .runtime
-            .acquire_buffer_with_data(&[meta], BufferKind::Scattered)
-            .map_err(GoldyError::from)?;
-        Ok(self.scheme.intern_record_buffer_arc(buf))
-    }
-
     pub fn scheme(&mut self) -> &mut Scheme {
         self.scheme
     }
@@ -154,30 +140,23 @@ impl<'a> TensorRecorder<'a> {
         if value.dtype() != out.dtype() {
             return Err(GoldyError::Validation("tensor fill: scalar dtype mismatch".into()));
         }
-        let meta = encode_meta(OP_FILL, 0, value.bits(), 0, None, None, Some(out))?;
-        let meta_buf = self.intern_meta(meta)?;
         let n = out.numel_u32().max(1);
+        // The source operand is never read by a fill.
         if out.dtype() == TensorDType::F32 {
             let node = self
                 .kernels
                 .ops
                 .unary
-                .record(
-                    self.scheme,
-                    label,
-                    out.buffer(),
-                    out.buffer(),
-                    &*meta_buf,
-                    value.as_f32()?,
-                )
+                .record(self.scheme, label, out, out, value.as_f32()?, OP_FILL)?
                 .over_1d(n)
                 .node();
             self.scheme.record_semantic_site(node, semantic::fill(out));
         } else {
+            let out = out.reinterpret(TensorDType::U32)?;
             self.kernels
                 .ops
                 .copy
-                .record(self.scheme, label, out.buffer(), out.buffer(), &*meta_buf, value.bits())
+                .record(self.scheme, label, out, out, OP_FILL, value.bits())?
                 .over_1d(n);
         }
         Ok(())
@@ -189,13 +168,18 @@ impl<'a> TensorRecorder<'a> {
             return Err(GoldyError::Validation("tensor copy: dtype mismatch".into()));
         }
         let src = src.broadcast_to(dst.shape())?;
-        let meta = encode_meta(OP_COPY, 0, 0, 0, Some(src), None, Some(dst))?;
-        let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
             .ops
             .copy
-            .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf, 0)
+            .record(
+                self.scheme,
+                label,
+                src.reinterpret(TensorDType::U32)?,
+                dst.reinterpret(TensorDType::U32)?,
+                OP_COPY,
+                0,
+            )?
             .over_1d(dst.numel_u32().max(1))
             .node();
         self.scheme.record_semantic_site(node, semantic::copy(src, dst));
@@ -222,43 +206,32 @@ impl<'a> TensorRecorder<'a> {
         if src.dtype() == dst.dtype() {
             return self.copy(label, src, dst);
         }
-        let meta = encode_meta(OP_COPY, 0, 0, 0, Some(src), None, Some(dst))?;
-        let meta_buf = self.intern_meta(meta)?;
+        // Elements pair up in logical order.
         let n = dst.numel_u32().max(1);
+        let ops = &self.kernels.ops;
         match (src.dtype(), dst.dtype()) {
             (TensorDType::F32, TensorDType::I32) => {
-                self.kernels
-                    .ops
-                    .cast_f32_i32
-                    .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf)
-                    .over_1d(n);
+                ops.cast_f32_i32.record(self.scheme, label, src, dst)?.over_1d(n);
             }
             (TensorDType::F32, TensorDType::U32) => {
-                self.kernels
-                    .ops
-                    .cast_f32_u32
-                    .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf)
-                    .over_1d(n);
+                ops.cast_f32_u32.record(self.scheme, label, src, dst)?.over_1d(n);
             }
             (TensorDType::I32, TensorDType::F32) => {
-                self.kernels
-                    .ops
-                    .cast_i32_f32
-                    .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf)
-                    .over_1d(n);
+                ops.cast_i32_f32.record(self.scheme, label, src, dst)?.over_1d(n);
             }
             (TensorDType::U32, TensorDType::F32) => {
-                self.kernels
-                    .ops
-                    .cast_u32_f32
-                    .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf)
-                    .over_1d(n);
+                ops.cast_u32_f32.record(self.scheme, label, src, dst)?.over_1d(n);
             }
             (TensorDType::I32, TensorDType::U32) | (TensorDType::U32, TensorDType::I32) => {
-                self.kernels
-                    .ops
-                    .copy
-                    .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf, 0)
+                ops.copy
+                    .record(
+                        self.scheme,
+                        label,
+                        src.reinterpret(TensorDType::U32)?,
+                        dst.reinterpret(TensorDType::U32)?,
+                        OP_COPY,
+                        0,
+                    )?
                     .over_1d(n);
             }
             _ => {
@@ -501,19 +474,17 @@ impl<'a> TensorRecorder<'a> {
         }
         src.shape().dim(axis)?;
         let out = Tensor::zeros(&self.kernels.runtime, index.shape(), src.dtype())?;
-        let meta = encode_meta(OP_GATHER, axis as u32, 0, 0, Some(src), Some(index), Some(out.view()))?;
-        let meta_buf = self.intern_meta(meta)?;
         self.kernels
             .ops
             .gather
             .record(
                 self.scheme,
                 label,
-                src.buffer(),
-                index.buffer(),
-                out.buffer(),
-                &*meta_buf,
-            )
+                src,
+                index.reinterpret(TensorDType::I32)?,
+                out.view(),
+                axis as u32,
+            )?
             .over_1d(out.view().numel_u32().max(1));
         Ok(out)
     }
@@ -536,8 +507,6 @@ impl<'a> TensorRecorder<'a> {
             ScatterMode::Min => OP_SCATTER_MIN,
             ScatterMode::Max => OP_SCATTER_MAX,
         };
-        let meta = encode_meta(op, axis as u32, 0, 0, Some(src), Some(index), Some(dst))?;
-        let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
             .ops
@@ -545,11 +514,12 @@ impl<'a> TensorRecorder<'a> {
             .record(
                 self.scheme,
                 label,
-                src.buffer(),
-                index.buffer(),
-                dst.buffer(),
-                &*meta_buf,
-            )
+                src,
+                index.reinterpret(TensorDType::I32)?,
+                dst,
+                op,
+                axis as u32,
+            )?
             .groups([1, 1, 1])
             .node();
         if mode == ScatterMode::UniqueWrite {
@@ -570,13 +540,11 @@ impl<'a> TensorRecorder<'a> {
         dst.layout().require_writeable("unary")?;
         src.dtype().require_f32("unary")?;
         dst.dtype().require_f32("unary")?;
-        let meta = encode_meta(op, 0, 0, 0, Some(src), None, Some(dst))?;
-        let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
             .ops
             .unary
-            .record(self.scheme, label, src.buffer(), dst.buffer(), &*meta_buf, 0.0)
+            .record(self.scheme, label, src, dst, 0.0, op)?
             .over_1d(dst.numel_u32().max(1))
             .node();
         self.scheme.record_semantic_site(node, semantic::unary(op, src, dst));
@@ -606,21 +574,11 @@ impl<'a> TensorRecorder<'a> {
         out.dtype().require_f32("binary")?;
         let a = a.broadcast_to(out.shape())?;
         let b = b.broadcast_to(out.shape())?;
-        let meta = encode_meta(op, 0, 0, 0, Some(a), Some(b), Some(out))?;
-        let meta_buf = self.intern_meta(meta)?;
         let node = self
             .kernels
             .ops
             .binary
-            .record(
-                self.scheme,
-                label,
-                a.buffer(),
-                b.buffer(),
-                out.buffer(),
-                &*meta_buf,
-                0.0,
-            )
+            .record(self.scheme, label, a, b, out, 0.0, op)?
             .over_1d(out.numel_u32().max(1))
             .node();
         self.scheme.record_semantic_site(node, semantic::binary(op, a, b, out));
@@ -646,21 +604,12 @@ impl<'a> TensorRecorder<'a> {
         a.dtype().require_f32("binary_scalar")?;
         out.dtype().require_f32("binary_scalar")?;
         let a = a.broadcast_to(out.shape())?;
-        let meta = encode_meta(op, 0, scalar.to_bits(), 0, Some(a), None, Some(out))?;
-        let meta_buf = self.intern_meta(meta)?;
+        // `b` is never read by a scalar op.
         let node = self
             .kernels
             .ops
             .binary
-            .record(
-                self.scheme,
-                label,
-                a.buffer(),
-                a.buffer(),
-                out.buffer(),
-                &*meta_buf,
-                scalar,
-            )
+            .record(self.scheme, label, a, a, out, scalar, op)?
             .over_1d(out.numel_u32().max(1))
             .node();
         self.scheme.record_semantic_site(node, semantic::binary(op, a, a, out));
@@ -705,13 +654,12 @@ impl<'a> TensorRecorder<'a> {
         src.dtype().require_f32("reduce")?;
         kernel_view.dtype().require_f32("reduce")?;
         let reduce_len = src.shape().dim(axis)?;
-        let meta = encode_meta(op, axis as u32, 0, reduce_len, Some(src), None, Some(kernel_view))?;
-        let meta_buf = self.intern_meta(meta)?;
+        let inner = src.shape().dims()[axis + 1..].iter().product::<u32>();
         let node = self
             .kernels
             .ops
             .reduce
-            .record(self.scheme, label, src.buffer(), kernel_view.buffer(), &*meta_buf)
+            .record(self.scheme, label, src, kernel_view, op, reduce_len, inner)?
             .over_1d(kernel_view.numel_u32().max(1))
             .node();
         self.scheme
@@ -726,87 +674,5 @@ impl<'a> TensorRecorder<'a> {
             .get_mut(axis)
             .ok_or_else(|| GoldyError::Validation(format!("reduce: axis {axis} out of range")))? = 1;
         out.reshape(&dims)
-    }
-}
-
-pub(crate) fn encode_meta(
-    op: u32,
-    axis: u32,
-    scalar_bits: u32,
-    reduce_len: u32,
-    a: Option<TensorView<'_>>,
-    b: Option<TensorView<'_>>,
-    o: Option<TensorView<'_>>,
-) -> Result<TensorOpMeta, GoldyError> {
-    let a = a
-        .map(|v| v.layout().gpu_coords())
-        .transpose()?
-        .unwrap_or(empty_coords());
-    let b = b
-        .map(|v| v.layout().gpu_coords())
-        .transpose()?
-        .unwrap_or(empty_coords());
-    let o = o
-        .map(|v| v.layout().gpu_coords())
-        .transpose()?
-        .unwrap_or(empty_coords());
-    Ok(pack_meta(op, axis, scalar_bits, reduce_len, a, b, o))
-}
-
-fn empty_coords() -> GoldyTensorLayout {
-    GoldyTensorLayout {
-        offset: 0,
-        rank: 0,
-        numel: 0,
-        shape: [1; MAX_TENSOR_RANK],
-        stride: [0; MAX_TENSOR_RANK],
-        flags: 0,
-    }
-}
-
-fn pack_meta(
-    op: u32,
-    axis: u32,
-    scalar_bits: u32,
-    reduce_len: u32,
-    a: GoldyTensorLayout,
-    b: GoldyTensorLayout,
-    o: GoldyTensorLayout,
-) -> TensorOpMeta {
-    TensorOpMeta {
-        op,
-        axis,
-        scalar_bits,
-        reduce_len,
-        a_off: a.offset,
-        a_numel: a.numel,
-        a_s0: a.stride[0],
-        a_s1: a.stride[1],
-        a_s2: a.stride[2],
-        a_s3: a.stride[3],
-        a_d0: a.shape[0],
-        a_d1: a.shape[1],
-        a_d2: a.shape[2],
-        a_d3: a.shape[3],
-        b_off: b.offset,
-        b_numel: b.numel,
-        b_s0: b.stride[0],
-        b_s1: b.stride[1],
-        b_s2: b.stride[2],
-        b_s3: b.stride[3],
-        b_d0: b.shape[0],
-        b_d1: b.shape[1],
-        b_d2: b.shape[2],
-        b_d3: b.shape[3],
-        o_off: o.offset,
-        o_numel: o.numel,
-        o_s0: o.stride[0],
-        o_s1: o.stride[1],
-        o_s2: o.stride[2],
-        o_s3: o.stride[3],
-        o_d0: o.shape[0],
-        o_d1: o.shape[1],
-        o_d2: o.shape[2],
-        o_d3: o.shape[3],
     }
 }

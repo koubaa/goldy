@@ -574,7 +574,11 @@ mod tests {
         };
         let scaled = MatMulDesc { beta: 1.0, ..gemv };
         for desc in [gemm, transposed, scaled] {
-            assert_eq!(MatMulFallback::for_node(&desc, &a, &b, &c), MatMulFallback::Gemm, "{desc:?}");
+            assert_eq!(
+                MatMulFallback::for_node(&desc, &a, &b, &c),
+                MatMulFallback::Gemm,
+                "{desc:?}"
+            );
         }
         let far = operand(u64::from(u32::MAX) + 1, 9);
         assert_eq!(MatMulFallback::for_node(&gemv, &far, &b, &c), MatMulFallback::Gemm);

@@ -406,7 +406,13 @@ fn products_of_different_rows_run_side_by_side() {
     let mut graph = Graph::new();
     let mut offset = 0;
     for (w, m) in rows.into_iter().enumerate() {
-        let mut product = contraction(["W", "x", "y"], [w as u32, 3, 4], &[m, k], [&[0, 1], &[1], &[0]], GEMV_LANES);
+        let mut product = contraction(
+            ["W", "x", "y"],
+            [w as u32, 3, 4],
+            &[m, k],
+            [&[0, 1], &[1], &[0]],
+            GEMV_LANES,
+        );
         product.lhs.name = format!("W{w}");
         product.out = Operand::new(&format!("y{w}"), &[m], Storage::strided(ParcelId(4), offset, &[1]));
         graph.push(op(OpKind::Contraction(product))).unwrap();

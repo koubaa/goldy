@@ -156,9 +156,7 @@ pub(super) fn load_host_copy(ctx: &Arc<CudaContext>, compute_capability: (i32, i
         },
     )
     .with_context(|| format!("CUDA: NVRTC failed compiling {COPY_FROM_HOST_FN} for {arch}"))?;
-    let module = ctx
-        .load_module(ptx)
-        .context("CUDA: load host-copy PTX module failed")?;
+    let module = ctx.load_module(ptx).context("CUDA: load host-copy PTX module failed")?;
     let function = module
         .load_function(COPY_FROM_HOST_FN)
         .with_context(|| format!("CUDA: cuModuleGetFunction({COPY_FROM_HOST_FN}) failed"))?;

@@ -94,8 +94,8 @@ pub use fusion_cost::FusionCostModel;
 pub use fusion_plan::{
     FusionCost, FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier, RejectedFusion,
 };
-pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;
 pub use goldy_shader_ir::algebra::ContractionPrecision;
+pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;
 pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};

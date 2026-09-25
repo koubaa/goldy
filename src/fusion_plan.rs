@@ -755,7 +755,9 @@ impl FusionPlanner {
                     start = end;
                 }
                 None => {
-                    if let Some((end, priced)) = longest.filter(|(end, _)| !self.rejected.iter().any(|r| r.nodes.end == *end)) {
+                    if let Some((end, priced)) =
+                        longest.filter(|(end, _)| !self.rejected.iter().any(|r| r.nodes.end == *end))
+                    {
                         tracing::debug!(?priced, first = start, end, "semantic fusion: run costs more fused");
                         self.rejected.push(Rejection {
                             nodes: start..end,
@@ -996,6 +998,7 @@ fn fused_node(
             pipeline: pipeline.handle,
             resource_slots,
             user_slots,
+            launch_words: Vec::new(),
             dispatch: constituents[0].3.clone(),
         },
     };
@@ -1083,6 +1086,7 @@ fn semantic_node(
             pipeline: pipeline.handle,
             resource_slots,
             user_slots,
+            launch_words: Vec::new(),
             dispatch: DispatchDim::Direct { x, y, z },
         },
     };

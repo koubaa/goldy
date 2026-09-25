@@ -244,7 +244,9 @@ fn in_scheme_unaligned_and_large_deposits_replay_fresh_bytes() {
     let mut expected = vec![0u8; WORDS * 4];
     const FRAMES: u8 = 4;
     for frame in 1..=FRAMES {
-        let small_bytes: Vec<u8> = (0..SMALL_LEN as u8).map(|i| frame.wrapping_mul(31).wrapping_add(i)).collect();
+        let small_bytes: Vec<u8> = (0..SMALL_LEN as u8)
+            .map(|i| frame.wrapping_mul(31).wrapping_add(i))
+            .collect();
         let large_bytes: Vec<u8> = (0..LARGE_LEN)
             .map(|i| frame.wrapping_mul(7).wrapping_add(i as u8))
             .collect();

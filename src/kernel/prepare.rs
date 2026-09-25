@@ -71,6 +71,8 @@ impl PreparedKernel {
             def: &self.def,
             resource_i: 0,
             scalar_i: 0,
+            last_scalar: 0,
+            facts: Vec::new(),
             #[cfg(feature = "tensor")]
             tensor_layouts: Vec::new(),
         }
@@ -84,6 +86,9 @@ pub struct SchemeNodeStart<'a> {
     def: &'a KernelDef,
     resource_i: usize,
     scalar_i: usize,
+    last_scalar: u32,
+    /// Scalars marked `#[fact]`, as `(slot, word)`.
+    facts: crate::specialization::BakedSlots,
     #[cfg(feature = "tensor")]
     tensor_layouts: Vec<crate::tensor::GoldyTensorLayout>,
 }
@@ -128,7 +133,19 @@ impl<'a> SchemeNodeStart<'a> {
 
     pub fn bind_u32(mut self, value: u32) -> Self {
         self.scalar_i += 1;
+        self.last_scalar = value;
         self.builder = self.builder.with_param(value);
+        self
+    }
+
+    /// Declare the scalar bound last fixed for the node's lifetime (`#[fact]`).
+    ///
+    /// The specialization predictor bakes it at the node's first submit instead of
+    /// waiting for it to hold still. Changing it later with `Scheme::set_node_param`
+    /// is still correct; the node then treats it as an ordinary param.
+    pub fn mark_fact(mut self) -> Self {
+        debug_assert!(self.scalar_i > 0, "mark_fact follows a scalar bind");
+        self.facts.push((self.scalar_i as u32 - 1, self.last_scalar));
         self
     }
 
@@ -191,6 +208,11 @@ impl<'a> SchemeNodeStart<'a> {
     }
 
     /// Pack collected tensor layouts into a scheme-owned metadata parcel and bind it last.
+    ///
+    /// The first [`goldy_shader_ir::TENSOR_LAUNCH_WORDS`] element offsets also travel as
+    /// launch words, and every tensor's shape facts go to the specialization predictor as
+    /// certain facts; the parcel serves the universal program and tensors past the launch
+    /// words.
     #[cfg(feature = "tensor")]
     pub fn finish_with_tensor_meta(mut self) -> Result<DispatchBuilder<'a>, crate::error::GoldyError> {
         let layouts = std::mem::take(&mut self.tensor_layouts);
@@ -199,17 +221,40 @@ impl<'a> SchemeNodeStart<'a> {
                 "kernel tensor metadata: no tensor views were bound".into(),
             ));
         }
+        let offsets = layouts
+            .iter()
+            .take(goldy_shader_ir::TENSOR_LAUNCH_WORDS)
+            .map(|l| l.offset)
+            .collect();
+        self.facts.extend(layouts.iter().enumerate().flat_map(|(slot, l)| {
+            tensor_fact_words(l)
+                .into_iter()
+                .enumerate()
+                .map(move |(fact, word)| (crate::specialization::tensor_fact_slot(slot as u32, fact), word))
+        }));
         let runtime = self.builder.scheme_runtime();
         let buf = runtime
             .acquire_buffer_with_data(&layouts, crate::types::BufferKind::Scattered)
             .map_err(crate::error::GoldyError::from)?;
-        self.builder = self.builder.bind_record_constant(buf, NodeAccess::Read);
+        self.builder = self
+            .builder
+            .with_launch_words(offsets)
+            .bind_record_constant(buf, NodeAccess::Read);
         Ok(self.finish())
     }
 
     pub fn finish(self) -> DispatchBuilder<'a> {
-        DispatchBuilder::new(self.builder, self.workgroup_size)
+        let builder = self.builder.with_certain_facts(self.facts);
+        DispatchBuilder::new(builder, self.workgroup_size)
     }
+}
+
+/// `layout`'s fields in [`goldy_shader_ir::TENSOR_FACTS`] order.
+#[cfg(feature = "tensor")]
+fn tensor_fact_words(layout: &crate::tensor::GoldyTensorLayout) -> [u32; goldy_shader_ir::TENSOR_FACTS.len()] {
+    let [d0, d1, d2, d3] = layout.shape;
+    let [s0, s1, s2, s3] = layout.stride;
+    [layout.rank, layout.numel, d0, d1, d2, d3, s0, s1, s2, s3, layout.flags]
 }
 
 pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {

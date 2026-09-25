@@ -412,12 +412,14 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             pipeline,
             resource_slots,
             user_slots,
+            launch_words,
             dispatch,
         } => {
             0u8.hash(h);
             pipeline.hash(h);
             resource_slots.hash(h);
             user_slots.hash(h);
+            launch_words.hash(h);
             match dispatch {
                 DispatchDim::Direct { x, y, z } => {
                     0u8.hash(h);
@@ -783,12 +785,14 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 pipeline,
                 resource_slots,
                 user_slots,
+                launch_words,
                 dispatch,
             } => {
                 0u8.hash(&mut h);
                 pipeline.hash(&mut h);
                 hash_resource_slots_for_fingerprint(resource_slots, &mut h);
                 user_slots.hash(&mut h);
+                launch_words.hash(&mut h);
                 match dispatch {
                     DispatchDim::Direct { x, y, z } => {
                         0u8.hash(&mut h);
@@ -2803,6 +2807,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2842,6 +2847,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2908,6 +2914,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3073,6 +3080,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3109,6 +3117,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3358,6 +3367,7 @@ mod slice_retention_tests {
                 pipeline: p,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3684,6 +3694,7 @@ mod slice_retention_tests {
                         pipeline: p,
                         resource_slots: vec![],
                         user_slots: vec![],
+                        launch_words: Vec::new(),
                         dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                     },
                 },
@@ -3758,6 +3769,7 @@ mod slice_retention_tests {
                         pipeline: p,
                         resource_slots: vec![],
                         user_slots: vec![],
+                        launch_words: Vec::new(),
                         dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                     },
                 },
@@ -4161,6 +4173,7 @@ mod slice_retention_tests {
                 pipeline: p_a.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4181,6 +4194,7 @@ mod slice_retention_tests {
                 pipeline: p_b.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4195,6 +4209,7 @@ mod slice_retention_tests {
                 pipeline: p_c.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4379,6 +4394,7 @@ mod slice_retention_tests {
                 pipeline: p_b.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4399,6 +4415,7 @@ mod slice_retention_tests {
                 pipeline: p_c.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4469,6 +4486,7 @@ mod partitioning_tests {
                 pipeline,
                 resource_slots: Vec::new(),
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }

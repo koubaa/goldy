@@ -102,7 +102,11 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
         let pname = name.ident.to_string();
         let pident = &name.ident;
         let shape_spec = take_tensor_shape_spec(attrs)?;
+        let fact = take_fact_attr(attrs)?;
         let classified = classify_param_type(ty)?;
+        if let (Some(attr), false) = (fact, matches!(classified, ClassifiedParam::Scalar(_))) {
+            return Err(Error::new(attr.span(), "#[fact] is only valid on scalar parameters"));
+        }
         if shape_spec.is_some()
             && !matches!(
                 classified,
@@ -294,6 +298,9 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                         invoke_stmts.push(quote! { args = args.bind_bool(#pident); });
                     }
                 }
+                if fact.is_some() {
+                    bind_stmts.push(quote! { start = start.mark_fact(); });
+                }
             }
             ClassifiedParam::StorageImage(elem) => {
                 params.push(KernelParam::storage_image(&pname, &elem));
@@ -482,6 +489,21 @@ fn is_compute_attr(attr: &Attribute) -> bool {
             p.is_ident("compute") || p.segments.last().is_some_and(|s| s.ident == "compute")
         }
     }
+}
+
+/// The parameter's `#[fact]` attribute, if any.
+fn take_fact_attr(attrs: &[Attribute]) -> Result<Option<&Attribute>, Error> {
+    let mut found = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("fact")) {
+        if !matches!(attr.meta, Meta::Path(_)) {
+            return Err(Error::new(attr.span(), "#[fact] takes no arguments"));
+        }
+        if found.is_some() {
+            return Err(Error::new(attr.span(), "duplicate #[fact] attribute"));
+        }
+        found = Some(attr);
+    }
+    Ok(found)
 }
 
 fn take_tensor_shape_spec(attrs: &[Attribute]) -> Result<Option<TensorShapeSpec>, Error> {

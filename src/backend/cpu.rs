@@ -489,6 +489,8 @@ impl CpuBackend {
         };
         let layout = kernel.layout();
         let mut views = Vec::new();
+        // Host-callable kernels read tensor offsets from the metadata parcel; launch words only pad the scalars.
+        let (mut user, launch) = crate::backend::shared::split_bind_words(user);
         if layout.is_empty() {
             for &index in indices {
                 views.push(self.host_view_for_bindless(index, 4)?);
@@ -520,6 +522,9 @@ impl CpuBackend {
                 );
             }
             let expected_scalars = layout.iter().filter(|s| matches!(s, CpuParamSlot::Scalar)).count();
+            if !launch.is_empty() && expected_scalars <= user.len() {
+                user = &user[..expected_scalars];
+            }
             if user.len() != expected_scalars {
                 anyhow::bail!(
                     "CPU: dispatch provided {} scalar user word(s) but shader expects {expected_scalars}",

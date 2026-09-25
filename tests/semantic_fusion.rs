@@ -10,9 +10,8 @@ mod submission;
 
 use goldy::{
     compute, BackendType, ContractionPrecision, FusionRegionStatus, FusionRejection, FusionSchedule, FusionTier,
-    GoldyError, NodeId,
-    RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels, TensorRecorder,
-    TensorShape,
+    GoldyError, NodeId, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels,
+    TensorRecorder, TensorShape,
 };
 use std::sync::Mutex;
 
@@ -354,7 +353,10 @@ fn normalized_input_of_a_product() {
             let normalized = rec.mul("normalize", t[1].view(), scale.view())?;
             let weighted = rec.mul("weight", normalized.view(), t[2].view())?;
             rec.matmul_into("project", t[0].view(), weighted.view(), t[3].view())?;
-            Ok((vec![square, mean, shifted, root, scale, normalized, weighted], Vec::new()))
+            Ok((
+                vec![square, mean, shifted, root, scale, normalized, weighted],
+                Vec::new(),
+            ))
         },
         5,
     );
@@ -543,7 +545,11 @@ fn a_product_the_library_runs_faster_stays_with_it() {
     }
     // One tile a subgroup on matrix units is far slower than the library at this size,
     // which saving the epilogue's dispatch does not repay.
-    assert!(scheme.fusion_report().regions.is_empty(), "{:?}", scheme.fusion_report());
+    assert!(
+        scheme.fusion_report().regions.is_empty(),
+        "{:?}",
+        scheme.fusion_report()
+    );
     let (fused_ns, unfused_ns) = cost_rejection(&scheme).expect("a cost rejection");
     assert!(fused_ns > unfused_ns);
     assert_eq!(scheme.executed_node_count(), 2);

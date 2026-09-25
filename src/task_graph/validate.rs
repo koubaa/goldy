@@ -276,6 +276,7 @@ mod tests {
                 pipeline: 1,
                 resource_slots: vec![0],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: crate::task_graph::DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         }

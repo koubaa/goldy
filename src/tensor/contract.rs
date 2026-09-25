@@ -149,5 +149,5 @@ fn kernel_shape_contracts_are_host_only() {
         .check("copy", "dst", TensorShape::vector(4).dims(), &mut env)
         .unwrap_err();
     assert!(err.contains("expected `n`=3"), "{err}");
-    assert_eq!(crate::KERNEL_ABI_VERSION, 3);
+    assert_eq!(crate::KERNEL_ABI_VERSION, 4);
 }

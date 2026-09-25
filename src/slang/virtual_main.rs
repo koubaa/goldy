@@ -42,7 +42,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use goldy_shader_ir::{
-    AccessKind, BuiltinMask, ElementType, KernelDef, KernelParam, ParamCategory, ScalarType, SourceMap,
+    specialization_macro_stem, tensor_offset_macro, AccessKind, BuiltinMask, ElementType, KernelDef, KernelParam,
+    ParamCategory, ScalarType, SourceMap, TENSOR_LAUNCH_WORDS, TENSOR_META_PARAM,
 };
 
 // ---------------------------------------------------------------------------
@@ -1328,12 +1329,14 @@ pub enum CudaLaunchArgKind {
     Sampler,
     /// Consumes the next `BindResourcesRaw.user` u32 word.
     Scalar,
+    /// Launch word `index` of the dispatch (a tensor element offset), zero when not sent.
+    LaunchWord { index: usize },
 }
 
 impl CudaLaunchArgKind {
     /// True when this kind consumes one entry from `BindResourcesRaw.indices`.
     pub fn consumes_registry_index(&self) -> bool {
-        !matches!(self, Self::Scalar)
+        !matches!(self, Self::Scalar | Self::LaunchWord { .. })
     }
 }
 
@@ -1515,6 +1518,9 @@ pub fn extract_cuda_compute_launch_layout(
                 ));
             }
         }
+    }
+    if has_tensor_meta(entry) {
+        layout.extend((0..TENSOR_LAUNCH_WORDS).map(|index| CudaLaunchArgKind::LaunchWord { index }));
     }
     Ok(layout)
 }
@@ -1711,10 +1717,23 @@ pub fn transform_virtual_main_cuda_compute_specialized(
             ));
         }
 
+        let launch_words = has_tensor_meta(entry);
+        if launch_words {
+            // Trailing arguments, matching `CudaLaunchArgKind::LaunchWord` at the end of the launch layout.
+            for k in 0..TENSOR_LAUNCH_WORDS {
+                let word = format!("_goldy_cuda_launch_{k}");
+                signature.push(format!("uniform uint {word}"));
+                body.push_str(&format!("    {} = {word};\n", launch_word_static(k)));
+            }
+        }
+
         for (macro_name, default_expr) in &scalar_macros {
             generated.push_str(&format!(
                 "#ifndef {macro_name}\n#define {macro_name} {default_expr}\n#endif\n"
             ));
+        }
+        if launch_words {
+            generated.push_str(&launch_word_prelude());
         }
         generated.push_str(entry.stage.shader_attr());
         generated.push('\n');
@@ -3083,6 +3102,14 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
     wb.push_sig("uniform uint _rs0");
     wb.push_sig("uniform uint _rs1");
     wb.push_sig("uniform uint _rs2");
+    let launch_words = has_tensor_meta(entry);
+    if launch_words {
+        for k in 0..TENSOR_LAUNCH_WORDS {
+            let word = crate::backend::shared::LAUNCH_WORD_BASE + k;
+            wb.push_sig(&format!("uniform uint _rs{word}"));
+            wb.push_body_stmt(&format!("    {} = _rs{word};", launch_word_static(k)));
+        }
+    }
 
     for item in &entry.params {
         match item {
@@ -3138,17 +3165,47 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
     // Scalar reads go through overridable macros so that a caller-supplied define can
     // bake a known wire word in place of the push-constant read. Emitted ahead of the
     // stage attribute, which has to stay adjacent to the function it decorates.
-    if !wb.scalar_slots.is_empty() {
-        let mut prelude = String::new();
-        for slot in &wb.scalar_slots {
-            let macro_name = scalar_specialization_macro(&entry.fn_name, *slot);
-            prelude.push_str(&format!(
-                "#ifndef {macro_name}\n#define {macro_name} _uw{slot}\n#endif\n"
-            ));
-        }
-        out.insert_str(0, &prelude);
+    let mut prelude = String::new();
+    for slot in &wb.scalar_slots {
+        let macro_name = scalar_specialization_macro(&entry.fn_name, *slot);
+        prelude.push_str(&format!(
+            "#ifndef {macro_name}\n#define {macro_name} _uw{slot}\n#endif\n"
+        ));
     }
+    if launch_words {
+        prelude.push_str(&launch_word_prelude());
+    }
+    out.insert_str(0, &prelude);
 
+    out
+}
+
+/// Whether `entry` binds packed tensor layouts, whose offsets the host also sends as launch words.
+fn has_tensor_meta(entry: &EntryDef) -> bool {
+    entry.stage == Stage::Compute
+        && entry
+            .params
+            .iter()
+            .any(|item| matches!(item, ParamItem::Single(p) if p.name == TENSOR_META_PARAM))
+}
+
+/// Per-invocation copy of launch word `k`, which the entry wrapper writes before calling the user function.
+fn launch_word_static(k: usize) -> String {
+    format!("_goldy_lw{k}")
+}
+
+/// Declares the launch-word statics and points each tensor offset macro at one.
+///
+/// Guarded so several entries of one source share the declarations; each entry writes
+/// the statics from its own launch words.
+fn launch_word_prelude() -> String {
+    let mut out = String::from("#ifndef _GOLDY_TENSOR_LAUNCH_WORDS\n#define _GOLDY_TENSOR_LAUNCH_WORDS\n");
+    for k in 0..TENSOR_LAUNCH_WORDS {
+        let name = launch_word_static(k);
+        out.push_str(&format!("static uint {name};\n"));
+        out.push_str(&format!("#define {} {name}\n", tensor_offset_macro(k as u32)));
+    }
+    out.push_str("#endif\n");
     out
 }
 
@@ -3160,15 +3217,7 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
 /// constant-fold and dead-strip the paths that value selects. The macro is scoped to the
 /// entry point so that sources with several entries specialize independently.
 pub fn scalar_specialization_macro(entry_fn_name: &str, slot: u32) -> String {
-    let mut sanitized = String::with_capacity(entry_fn_name.len());
-    for ch in entry_fn_name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            sanitized.extend(ch.to_uppercase());
-        } else {
-            sanitized.push('_');
-        }
-    }
-    format!("_GOLDY_SPEC_{sanitized}_UW{slot}")
+    format!("_GOLDY_SPEC_{}_UW{slot}", specialization_macro_stem(entry_fn_name))
 }
 
 /// User function name of the `[goldy_compute]` entry when `source` declares exactly one.
@@ -3979,6 +4028,67 @@ void second(Scattered<uint> data, ThreadId id, uint base) {
         // The stage attribute has to stay adjacent to the function it decorates.
         assert!(!result.contains("#endif\nvoid first"));
         assert!(result.contains("#endif\n[shader(\"compute\")]"));
+    }
+
+    const TENSOR_KERNEL_SRC: &str = r#"import goldy_exp;
+struct GoldyTensorLayout { uint off; uint rank; uint numel; uint d0; uint d1; uint d2; uint d3; uint s0; uint s1; uint s2; uint s3; uint flags; };
+#ifndef _GOLDY_TENSOR_OFF0
+#define _GOLDY_TENSOR_OFF0 _goldy_tensor_meta[0u].off
+#endif
+
+[goldy_compute]
+[numthreads(64, 1, 1)]
+void copy(BufRW<float> dst, ThreadId id, uint n, BufRO<GoldyTensorLayout> _goldy_tensor_meta) {
+    dst[_GOLDY_TENSOR_OFF0 + id.x] = (float)n;
+}
+"#;
+
+    #[test]
+    fn tensor_offsets_ride_region_c_launch_words() {
+        let result = transform_virtual_main(TENSOR_KERNEL_SRC);
+        let first = crate::backend::shared::LAUNCH_WORD_BASE;
+        let last = first + TENSOR_LAUNCH_WORDS - 1;
+        assert!(result.contains(&format!("uniform uint _rs{first}")));
+        assert!(result.contains(&format!("uniform uint _rs{last}")));
+        assert!(!result.contains(&format!("_rs{}", last + 1)));
+        assert!(result.contains(&format!("_goldy_lw0 = _rs{first};")));
+        // The launch-word define has to precede the canonical source's parcel default.
+        let define = result
+            .find("#define _GOLDY_TENSOR_OFF0 _goldy_lw0")
+            .expect("launch-word define");
+        let default = result.find("#ifndef _GOLDY_TENSOR_OFF0").expect("parcel default");
+        assert!(define < default);
+        // Kernels without tensors keep region C words 3.. free.
+        let plain = transform_virtual_main(
+            "import goldy_exp;\n[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(BufRW<uint> d, ThreadId id) { d[id.x] = 1; }\n",
+        );
+        assert!(!plain.contains("_goldy_lw0"));
+        assert!(!plain.contains(&format!("_rs{first}")));
+    }
+
+    #[test]
+    fn tensor_offsets_ride_trailing_cuda_kernel_args() {
+        let layout = extract_cuda_compute_launch_layout(TENSOR_KERNEL_SRC, &[]).unwrap();
+        let words: Vec<_> = layout
+            .iter()
+            .filter_map(|k| match k {
+                CudaLaunchArgKind::LaunchWord { index } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words, (0..TENSOR_LAUNCH_WORDS).collect::<Vec<_>>());
+        assert!(layout[layout.len() - TENSOR_LAUNCH_WORDS..]
+            .iter()
+            .all(|k| matches!(k, CudaLaunchArgKind::LaunchWord { .. })));
+        let cuda = transform_virtual_main_cuda_compute(TENSOR_KERNEL_SRC, &[]).unwrap();
+        let last = TENSOR_LAUNCH_WORDS - 1;
+        assert!(cuda.contains(&format!("uniform uint _goldy_cuda_launch_{last}")));
+        assert!(cuda.contains("_goldy_lw0 = _goldy_cuda_launch_0;"));
+        let define = cuda
+            .find("#define _GOLDY_TENSOR_OFF0 _goldy_lw0")
+            .expect("launch-word define");
+        let default = cuda.find("#ifndef _GOLDY_TENSOR_OFF0").expect("parcel default");
+        assert!(define < default);
     }
 
     #[test]

@@ -190,7 +190,10 @@ pub enum FusionRejection {
     /// The run fuses, but its kernel is estimated to take longer than the dispatches
     /// it replaces, such as a product a native library runs faster, or a factor the
     /// kernel recomputes for every element that reads it.
-    Cost { fused_ns: u64, unfused_ns: u64 },
+    Cost {
+        fused_ns: u64,
+        unfused_ns: u64,
+    },
 }
 
 impl fmt::Display for FusionRejection {

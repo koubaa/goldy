@@ -333,6 +333,19 @@ impl<'a> TensorView<'a> {
             .map_err(|_| GoldyError::Validation("tensor flatten: numel does not fit in u32".into()))?;
         self.reshape(&[n])
     }
+
+    /// The same elements read as `dtype`, which must have the same size.
+    pub(crate) fn reinterpret(self, dtype: TensorDType) -> Result<Self, GoldyError> {
+        if dtype.size_bytes() != self.dtype().size_bytes() {
+            return Err(GoldyError::Validation(format!(
+                "tensor reinterpret: {} and {} differ in size",
+                self.dtype().name(),
+                dtype.name()
+            )));
+        }
+        let layout = TensorLayout::strided(dtype, self.shape(), self.storage_offset(), self.layout.strides())?;
+        Self::new(self.buffer, layout)
+    }
 }
 
 pub(crate) fn broadcast_shapes(a: TensorShape, b: TensorShape) -> Result<TensorShape, GoldyError> {
