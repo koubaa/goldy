@@ -36,6 +36,23 @@ uint goldy_tensor_offset(GoldyTensorLayout L, uint i) {
     return L.off + i0 * L.s0 + i1 * L.s1 + i2 * L.s2 + i3 * L.s3;
 }
 
+uint goldy_tensor_offset1(GoldyTensorLayout L, uint i) {
+    return L.off + i * L.s0;
+}
+
+uint goldy_tensor_offset2(GoldyTensorLayout L, uint i) {
+    if ((L.flags & 1u) != 0u)
+        return L.off + i;
+    return L.off + (i / L.d1) * L.s0 + (i % L.d1) * L.s1;
+}
+
+uint goldy_tensor_offset3(GoldyTensorLayout L, uint i) {
+    if ((L.flags & 1u) != 0u)
+        return L.off + i;
+    uint rest = i / L.d2;
+    return L.off + (rest / L.d1) * L.s0 + (rest % L.d1) * L.s1 + (i % L.d2) * L.s2;
+}
+
 uint goldy_tensor_dim(GoldyTensorLayout L, uint axis) {
     if (axis == 0) return L.d0;
     if (axis == 1) return L.d1;
@@ -55,20 +72,52 @@ pub const VIRTUAL_ENTRY_NAME: &str = "cs_main";
 /// compile without it takes the portable form.
 pub const SUBGROUP_WIDTH_DEFINE: &str = "GOLDY_SUBGROUP_WIDTH";
 
+/// A tensor parameter's place in the entry's packed [`TENSOR_META_PARAM`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TensorSlot {
+    pub slot: u32,
+    /// Rank fixed by the parameter's shape contract, which `record` enforces.
+    pub rank: Option<usize>,
+}
+
+impl TensorSlot {
+    fn layout(self) -> String {
+        format!("{TENSOR_META_PARAM}[{}u]", self.slot)
+    }
+
+    /// Parent-buffer element of logical index `index`.
+    ///
+    /// A contracted rank below four delinearizes only its own axes. Rank 1 needs no
+    /// division, and no contiguity test, because its one stride covers both cases.
+    fn offset(self, index: &str) -> String {
+        let helper = match self.rank {
+            Some(1) => "goldy_tensor_offset1",
+            Some(2) => "goldy_tensor_offset2",
+            Some(3) => "goldy_tensor_offset3",
+            _ => "goldy_tensor_offset",
+        };
+        format!("{helper}({}, {index})", self.layout())
+    }
+}
+
+/// Tensor parameter name → its [`TensorSlot`].
+pub type TensorSlots = HashMap<String, TensorSlot>;
+
 /// Slot of each tensor parameter in the entry's packed [`TENSOR_META_PARAM`], in declaration order.
-pub fn tensor_slot_map(params: &[KernelParam]) -> HashMap<String, u32> {
+pub fn tensor_slot_map(params: &[KernelParam]) -> TensorSlots {
     let mut map = HashMap::new();
     let mut slot = 0u32;
     for p in params {
         if p.is_tensor {
-            map.insert(p.name.clone(), slot);
+            let rank = p.shape_spec.as_ref().map(|s| s.rank());
+            map.insert(p.name.clone(), TensorSlot { slot, rank });
             slot += 1;
         }
     }
     map
 }
 
-fn tensor_slot(expr: &Expr, slots: &HashMap<String, u32>) -> Option<u32> {
+fn tensor_slot(expr: &Expr, slots: &TensorSlots) -> Option<TensorSlot> {
     match expr {
         Expr::Var(name) => slots.get(name).copied(),
         _ => None,
@@ -85,7 +134,7 @@ pub struct BodyEnv {
     /// Builtins declared by the enclosing entry signature.
     pub builtins: BuiltinMask,
     /// Tensor parameter name → slot in the enclosing entry's tensor metadata.
-    pub tensor_slots: HashMap<String, u32>,
+    pub tensor_slots: TensorSlots,
 }
 
 impl BodyEnv {
@@ -235,7 +284,7 @@ fn indent(level: usize) -> String {
     "    ".repeat(level)
 }
 
-fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) {
+fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize, builtins: &BuiltinMask, tensor_slots: &TensorSlots) {
     let pad = indent(level);
     match stmt {
         Stmt::Let {
@@ -379,7 +428,7 @@ fn emit_workgroup_reduce(
     scratch: &str,
     dest: &Expr,
     builtins: &BuiltinMask,
-    tensor_slots: &HashMap<String, u32>,
+    tensor_slots: &TensorSlots,
 ) {
     let pad = indent(level);
     let inner = indent(level + 1);
@@ -439,9 +488,9 @@ fn emit_workgroup_reduce(
     out.push_str(&format!("{pad}}}\n"));
 }
 
-fn tensor_index_expr(buf: &str, index: &str, tensor_slots: &HashMap<String, u32>) -> String {
+fn tensor_index_expr(buf: &str, index: &str, tensor_slots: &TensorSlots) -> String {
     match tensor_slots.get(buf) {
-        Some(slot) => format!("{buf}[goldy_tensor_offset({TENSOR_META_PARAM}[{slot}u], {index})]"),
+        Some(slot) => format!("{buf}[{}]", slot.offset(index)),
         None => format!("{buf}[{index}]"),
     }
 }
@@ -456,7 +505,7 @@ fn emit_workgroup_softmax(
     count: &Expr,
     scratch: &str,
     builtins: &BuiltinMask,
-    tensor_slots: &HashMap<String, u32>,
+    tensor_slots: &TensorSlots,
 ) {
     let pad = indent(level);
     let inner = indent(level + 1);
@@ -514,7 +563,7 @@ fn emit_workgroup_softmax(
     out.push_str(&format!("{pad}}}\n"));
 }
 
-fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
+fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &TensorSlots) -> String {
     match expr {
         Expr::LitU32(v) => format!("{v}u"),
         Expr::LitI32(v) => format!("{v}"),
@@ -533,14 +582,14 @@ fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String,
             let index_s = emit_expr(index, builtins, tensor_slots);
             if let Some(slot) = tensor_slot(base, tensor_slots) {
                 let buf = emit_expr(base, builtins, tensor_slots);
-                format!("{buf}[goldy_tensor_offset({TENSOR_META_PARAM}[{slot}u], {index_s})]")
+                format!("{buf}[{}]", slot.offset(&index_s))
             } else {
                 format!("{}[{}]", emit_expr(base, builtins, tensor_slots), index_s)
             }
         }
         Expr::Len { base } => {
             if let Some(slot) = tensor_slot(base, tensor_slots) {
-                format!("{TENSOR_META_PARAM}[{slot}u].numel")
+                format!("{}.numel", slot.layout())
             } else {
                 format!("goldy_buf_len({})", emit_expr(base, builtins, tensor_slots))
             }
@@ -548,7 +597,8 @@ fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String,
         Expr::Dim { base, axis } => {
             if let Some(slot) = tensor_slot(base, tensor_slots) {
                 format!(
-                    "goldy_tensor_dim({TENSOR_META_PARAM}[{slot}u], {})",
+                    "goldy_tensor_dim({}, {})",
+                    slot.layout(),
                     emit_expr(axis, builtins, tensor_slots)
                 )
             } else {
@@ -561,7 +611,7 @@ fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String,
         }
         Expr::Rank { base } => {
             if let Some(slot) = tensor_slot(base, tensor_slots) {
-                format!("{TENSOR_META_PARAM}[{slot}u].rank")
+                format!("{}.rank", slot.layout())
             } else {
                 "0u".to_string()
             }
@@ -578,7 +628,7 @@ fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &HashMap<String,
     }
 }
 
-fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
+fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slots: &TensorSlots) -> String {
     match func {
         BuiltinFn::GlobalId => {
             assert!(builtins.global_id, "global_id used without builtin mask");
@@ -666,7 +716,7 @@ fn emit_matrix(out: &mut String, level: usize, op: &MatrixOp) {
     }
 }
 
-fn join_args(args: &[Expr], builtins: &BuiltinMask, tensor_slots: &HashMap<String, u32>) -> String {
+fn join_args(args: &[Expr], builtins: &BuiltinMask, tensor_slots: &TensorSlots) -> String {
     args.iter()
         .map(|a| emit_expr(a, builtins, tensor_slots))
         .collect::<Vec<_>>()
@@ -1013,6 +1063,17 @@ mod tests {
         assert!(!def.params[2].is_tensor);
         assert_eq!(def.params[2].name, "_goldy_tensor_meta");
         assert_eq!(def.abi_version, crate::KERNEL_ABI_VERSION);
+
+        let mut contracted = kernel;
+        let spec = |rank| crate::TensorShapeSpec {
+            dims: vec![crate::TensorDimSpec::Any; rank],
+        };
+        contracted.params[0].shape_spec = Some(spec(2));
+        contracted.params[1].shape_spec = Some(spec(1));
+        let slang = emit_canonical_compute_source(&contracted).source.canonical_slang;
+        assert!(slang.contains("x[goldy_tensor_offset2(_goldy_tensor_meta[0u], "));
+        assert!(slang.contains("y[goldy_tensor_offset1(_goldy_tensor_meta[1u], i)]"));
+        assert!(!slang.contains("goldy_tensor_offset(_goldy_tensor_meta"));
     }
 
     /// `fn name(input: &[f32], output: Scattered<f32>, count: u32) { let i = gid.x; if i < count { output[i] = input[i] <op> k; } }`

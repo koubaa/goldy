@@ -129,6 +129,12 @@ binding parcels or appending GraphIR. Failures name the kernel, parameter, axis,
 expected spec, and actual shape. Shader parameter order, the 48-byte
 `GoldyTensorLayout` ABI, and `KERNEL_ABI_VERSION` are unchanged.
 
+Because `record` enforces the rank, a contract of rank 1, 2 or 3 also selects that
+rank's indexing helper. Rank 1 lowers `view[i]` to `offset + i * stride`, which serves
+contiguous, strided and broadcast views alike. Ranks 2 and 3 keep the contiguous fast
+path and otherwise delinearize only their own axes. Unannotated parameters and rank 4
+use the general four-axis helper.
+
 Relationships that are not dimension equality — for example query-head /
 KV-head divisibility — stay explicit kernel or domain checks, not part of this
 DSL.
