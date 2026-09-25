@@ -1808,4 +1808,6 @@ pub(super) struct Dx12State {
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The validation this backend was created with.
+    pub validation: crate::Validation,
 }

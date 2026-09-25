@@ -264,9 +264,9 @@ oversized shape). Uploads and other fully graph-unsafe partitions stay on the
 stream command-replay path, where indirect grids are resolved with a worker-side DtoH
 before `cuLaunchKernel`. Dynamic waits and completion events remain outside the
 captured graph. Stream capture is skipped when `CUDA_LAUNCH_BLOCKING` is set
-(including under `GOLDY_VALIDATION=api`).
+and on backends created with GPU API validation.
 
-With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. It may set `CUDA_LAUNCH_BLOCKING=1` when unset. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
+With `GOLDY_VALIDATION=api` (or `all`), the CUDA backend enables Driver diagnostics: PTX JIT error/info logs on module load, host-side launch-limit checks, StructuredBuffer ABI checks, and per-op stream synchronize with labeled errors. A validated backend never captures CUDA graphs; it does not set `CUDA_LAUNCH_BLOCKING`, so other backends in the process still capture. Deep memory/race checking still requires external [`compute-sanitizer`](https://docs.nvidia.com/compute-sanitizer/), not `GOLDY_VALIDATION`.
 
 ### WebGPU Backend (in progress)
 

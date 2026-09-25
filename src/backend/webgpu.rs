@@ -666,8 +666,8 @@ pub(crate) struct WebGpuBackend {
     render_frame_table: Option<Arc<[u32]>>,
     /// `None` after [`GpuBackend::release_idle_shader_compiler`]; recreated on the next compile.
     slang_compiler: Option<crate::slang::SlangCompiler>,
-    /// Snapshotted at backend init (`GOLDY_VALIDATION` `api` / `all` / `1`).
-    gpu_api_validation: bool,
+    /// The validation this backend was created with.
+    validation: crate::Validation,
 }
 
 #[cfg(feature = "graphics")]
@@ -1160,6 +1160,10 @@ struct WebGpuComputePipeline {
 
 impl WebGpuBackend {
     pub(crate) fn new() -> Result<Self> {
+        Self::with_validation(crate::Validation::from_env())
+    }
+
+    pub(crate) fn with_validation(validation: crate::Validation) -> Result<Self> {
         let _span = goldy_span!("backend.webgpu.init").entered();
         tracing::info!("Initializing WebGPU backend");
         if let Ok(backend) = std::env::var("WGPU_BACKEND") {
@@ -1244,7 +1248,7 @@ impl WebGpuBackend {
             next_render_target: 1,
             render_frame_table: None,
             slang_compiler: None,
-            gpu_api_validation: crate::validation_env::gpu_api_validation_enabled(),
+            validation,
         })
     }
 
@@ -2020,7 +2024,7 @@ impl WebGpuBackend {
     }
 
     fn pso_error_scopes(&self) -> bool {
-        cfg!(debug_assertions) || self.gpu_api_validation
+        cfg!(debug_assertions) || self.validation.gpu_api
     }
 
     fn hash_wgsl(wgsl: &str) -> u64 {
@@ -2555,7 +2559,7 @@ impl WebGpuBackend {
         // `GOLDY_VALIDATION` requested GPU API validation (debug PSO scopes stay on).
         let bind_group = with_wgpu_error_scope(
             &gpu.device,
-            self.gpu_api_validation,
+            self.validation.gpu_api,
             "WebGPU bind group validation failed",
             || {
                 gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4157,6 +4161,10 @@ impl GpuBackend for WebGpuBackend {
         BackendType::WebGpu
     }
 
+    fn validation(&self) -> crate::Validation {
+        self.validation
+    }
+
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         self.adapter_info.clone()
     }
@@ -4252,7 +4260,7 @@ impl GpuBackend for WebGpuBackend {
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "disabled".to_string()),
-            gpu_api_validation = self.gpu_api_validation,
+            gpu_api_validation = self.validation.gpu_api,
             "Created WebGPU device"
         );
         self.devices.insert(

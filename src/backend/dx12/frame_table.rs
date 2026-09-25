@@ -734,7 +734,7 @@ pub(crate) fn prepare_render_commands(
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
 
-    crate::backend::with_layout_validation(|| {
+    crate::backend::with_layout_validation(record.validation, || {
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {

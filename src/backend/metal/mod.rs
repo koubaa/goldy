@@ -147,8 +147,15 @@ pub(crate) struct MetalBackend {
 }
 
 impl MetalBackend {
-    /// Create a new Metal backend.
+    /// Create a new Metal backend, validating as [`crate::Validation::from_env`] requests.
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
+        Self::with_validation(crate::Validation::from_env())
+    }
+
+    /// Create a Metal backend with explicit validation. `MTL_SHADER_VALIDATION` is
+    /// process-wide, so only the first backend's `gpu_api` choice reaches Metal itself.
+    pub fn with_validation(validation: crate::Validation) -> Result<Self> {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
@@ -160,7 +167,7 @@ impl MetalBackend {
         // first MTLDevice is created. Use a process-wide Once so parallel test
         // threads do not race on `setenv`.
         METAL_VALIDATION_INIT.call_once(|| {
-            if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
+            if validation.gpu_api && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
                 // SAFETY: called exactly once per process, before `Runtime::all()` below.
                 unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
                 tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
@@ -172,6 +179,19 @@ impl MetalBackend {
                 tracing::info!("Set METAL_CAPTURE_ENABLED=1 (GOLDY_METAL_CAPTURE)");
             }
         });
+        let shader_validation = std::env::var_os("MTL_SHADER_VALIDATION").is_some_and(|v| v != "0");
+        if shader_validation != validation.gpu_api {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "goldy::validation",
+                    "Metal shader validation is {} for the whole process (MTL_SHADER_VALIDATION), \
+                     but this backend requested GPU API validation {}",
+                    if shader_validation { "on" } else { "off" },
+                    if validation.gpu_api { "on" } else { "off" },
+                );
+            });
+        }
 
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
@@ -213,6 +233,7 @@ impl MetalBackend {
                 accels: std::collections::HashMap::new(),
                 next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
+                validation,
             },
         })
     }
@@ -344,6 +365,10 @@ impl GpuBackend for MetalBackend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Metal
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.state.validation
     }
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {

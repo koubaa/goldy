@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`goldy::Validation`** — the validation checks an instance runs (`layout`, `gpu_api`,
+  `timeline`, `scheme`, `host_access`, `fatal`). `Instance::with_validation(v)` chooses them
+  per instance and `Runtime::validation()` reports them. `Instance::new()` uses
+  `Validation::from_env()`, so `GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS` and
+  `GOLDY_VALIDATION_FATAL` now only set the default. Tests that need a check off (or on) no
+  longer depend on the process environment.
+
 - **Deposit `<<`** — `(&deposit << &data)?` tenders a per-submission memory-exchange occurrence (`Shl` on `&DepositTransaction`, offset 0). `write` / `write_data` remain for offsets and partial fills. Mirrored in Python (`deposit << bytes`), C++ (`deposit << vector`), C# (`deposit << byte[]`), and ffi-client (`&deposit << &[u8]`).
 
 - **Host claims** — `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`) realizes a public CPU read of a parcel after the submission gate. Host-coherent media map in place; others copy through a context staging pool. `BufferFlags::CPU_READABLE` is a placement hint that backends may honor with a mapped pointer (`RuntimeCapabilities::has_zero_copy_storage_readback`).
@@ -84,6 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Breaking:** `goldy::layout_validation_enabled()` (read `Runtime::validation().layout`)
+  and `test_support::HostAccessOverride` (build the instance with
+  `Instance::with_validation(Validation { host_access: true, .. })`).
+
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
 
 - Deprecated `Instance::create_runtime` / `create_runtime_for_adapter`,
@@ -95,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Runtime::acquire_texture(..., init)`.
 
 ### Changed
+
+- CUDA GPU API validation no longer sets `CUDA_LAUNCH_BLOCKING=1` for the process. A
+  validated CUDA backend skips graph capture and synchronizes after every op itself, so
+  unvalidated backends in the same process still capture graphs. A `CUDA_LAUNCH_BLOCKING`
+  you set yourself still disables capture.
 
 - **Breaking:** `TensorContext` is now `TensorKernels` (C `GoldyTensorKernels` /
   `goldy_tensor_kernels_*`, C++ / Python / ffi-client same name). It is prepared portable

@@ -972,7 +972,7 @@ pub(super) fn record_commands_to_buffer(
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
-                    crate::backend::with_layout_validation(|| {
+                    crate::backend::with_layout_validation(state.validation, || {
                         crate::backend::validate_raw_binding_strides(
                             raw_indices,
                             &pipeline.push_constant_categories,
@@ -1849,7 +1849,12 @@ fn submit_graph_inner(
                     }
 
                     let (render_staging, lowered_render, has_render_bindings) =
-                        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, render_cmds)?;
+                        super::frame_table::prepare_render_commands(
+                            state.validation,
+                            &state.buffers,
+                            &state.pipelines,
+                            render_cmds,
+                        )?;
                     if has_render_bindings {
                         if let Some(row) = prologue_row {
                             let graph_staging = super::frame_table::extract_staging_from_graph(commands)

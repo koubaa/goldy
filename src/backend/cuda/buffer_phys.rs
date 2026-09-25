@@ -609,7 +609,7 @@ impl CudaBackend {
         let device = self.buffers.get(&buffer).unwrap().device;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let buffer_ref = self.buffers.get(&buffer).unwrap();
-        Self::write_buffer_region(&stream, buffer_ref, offset, data)?;
+        Self::write_buffer_region(&stream, buffer_ref, offset, data, self.validation.gpu_api)?;
         Ok(())
     }
 

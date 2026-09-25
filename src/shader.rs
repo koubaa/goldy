@@ -43,7 +43,7 @@
 
 use crate::backend::{GpuBackend, ShaderHandle};
 use crate::runtime::Runtime;
-use crate::slang::{layout_validation_enabled, GpuType, LayoutCheck, OwnedLayoutCheck};
+use crate::slang::{GpuType, LayoutCheck, OwnedLayoutCheck};
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -257,9 +257,9 @@ impl ShaderModule {
     /// Create a shader module with full control over compilation options.
     ///
     /// `layout_checks` declares Rust struct layouts to validate against Slang reflection.
-    /// Validation only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
-    /// `GOLDY_VALIDATION=layout`, etc. — see `validation_env`); otherwise the checks
-    /// are ignored (zero cost). Pass `&[]` when no validation is needed.
+    /// Validation only runs when the runtime's [`crate::Validation`] enables layout checks
+    /// (by default `GOLDY_VALIDATE_LAYOUTS` or `GOLDY_VALIDATION=layout`); otherwise the
+    /// checks are ignored (zero cost). Pass `&[]` when no validation is needed.
     ///
     /// Use `OptimizationLevel::None` to disable compiler optimizations for
     /// shaders that hit driver bugs on software renderers (e.g. lavapipe).
@@ -354,7 +354,7 @@ impl ShaderModule {
             effective_source.as_str()
         };
 
-        let validate_authored = layout_validation_enabled() && !layout_checks.is_empty();
+        let validate_authored = device.validation().layout && !layout_checks.is_empty();
         let validate = validate_authored || !generated_checks.is_empty();
 
         tracing::debug!(

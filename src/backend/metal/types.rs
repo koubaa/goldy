@@ -1656,6 +1656,7 @@ pub(super) struct MetalState {
     /// `None` after release via [`crate::runtime::Runtime::release_idle_shader_compiler`].
     /// Re-created automatically on demand when a shader must be lazily compiled.
     pub slang_compiler: Option<crate::slang::SlangCompiler>,
+    pub validation: crate::Validation,
 }
 
 impl MetalState {

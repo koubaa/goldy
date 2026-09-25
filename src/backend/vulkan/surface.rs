@@ -659,6 +659,7 @@ pub(super) fn acquire(
     ctx: super::ContextHandle,
 ) -> Result<(SwapchainImageHandle, u32)> {
     let _tz = crate::tracy_zone!("vk.surface.acquire");
+    let timeline_checks = state.validation.timeline;
 
     // Get surface state and current frame index.
     let (device_handle, current_frame, swapchain, image_available_semaphore) = {
@@ -705,7 +706,7 @@ pub(super) fn acquire(
             super::context::wait_until_device_seq_at_least(state, device_handle, next_compute);
         }
         let slot_timeline = slot_copy.max(next_compute);
-        if slot_timeline > 0 && crate::validation_env::timeline_validation_enabled() {
+        if slot_timeline > 0 && timeline_checks {
             let completed = super::context::device_retired(state, device_handle);
             assert!(
                 completed >= slot_timeline,
@@ -715,10 +716,7 @@ pub(super) fn acquire(
                  slot_copy={slot_copy} next_compute={next_compute})"
             );
         }
-        if crate::validation_env::timeline_validation_enabled()
-            && next_compute == 0
-            && surface_state.frame_sync[next_slot].copy_timeline_value.is_some()
-        {
+        if timeline_checks && next_compute == 0 && surface_state.frame_sync[next_slot].copy_timeline_value.is_some() {
             tracing::warn!(
                 current_frame,
                 next_slot,

@@ -2,10 +2,12 @@
 //!
 //! Isolated crate so the env override cannot race other GPU tests.
 
-use goldy::{BufferKind, Instance, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule};
+use goldy::{
+    BufferKind, Instance, NodeAccess, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, Validation,
+};
 
-fn run_scheme_double_u32() {
-    let instance = Instance::new().expect("instance");
+fn run_scheme_double_u32(validation: Validation) {
+    let instance = Instance::with_validation(validation).expect("instance");
     assert_eq!(instance.backend_type(), goldy::BackendType::Cpu);
     let device = instance
         .request_adapter(&RequestAdapterOptions::default())
@@ -52,13 +54,15 @@ fn run_scheme_double_u32() {
 fn scheme_double_u32() {
     // SAFETY: this integration test is its own process.
     unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
-    run_scheme_double_u32();
+    run_scheme_double_u32(Validation::from_env());
 }
 
 #[test]
 fn scheme_double_u32_host_access() {
     // SAFETY: this integration test is its own process.
     unsafe { std::env::set_var("GOLDY_BACKEND", "cpu") };
-    let _protect = goldy::test_support::HostAccessOverride::force_enabled();
-    run_scheme_double_u32();
+    run_scheme_double_u32(Validation {
+        host_access: true,
+        ..Validation::from_env()
+    });
 }

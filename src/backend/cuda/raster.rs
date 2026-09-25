@@ -1197,7 +1197,7 @@ pub(super) fn render_to_target(
                     } else {
                         raw_indices.clone()
                     };
-                    crate::backend::with_layout_validation(|| {
+                    crate::backend::with_layout_validation(backend.validation, || {
                         crate::backend::validate_bindless_slot_kinds(
                             &staged,
                             &pipeline.push_constant_slot_kinds,
@@ -1299,7 +1299,7 @@ fn prepare_cuda_render_commands(
     commands: &[RenderCommand],
     graph_staging: Option<&[u32]>,
 ) -> Result<(Vec<u32>, Vec<RenderCommand>, bool)> {
-    crate::backend::with_layout_validation(|| {
+    crate::backend::with_layout_validation(backend.validation, || {
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {
