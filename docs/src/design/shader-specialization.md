@@ -56,8 +56,10 @@ the scalar params of every dispatch site.
 `Scheme::with_param` takes a `u32` wire word. Those words are the program's own encoding of
 whatever it decided — a tint factor, a mode enum, a filter toggle, a count — and Goldy
 stores them on the dispatch node, hashes them into the emission fingerprint, and writes
-them into push constants on every record. A value that has been the same for the last ten
-frames is a fact about the scene, and the runtime can see that without being told.
+them into push constants on every record. A word the caller has never changed since
+recording is a constant of the recorded program, and a word that has held its value for
+the last ten submits is a fact about the scene. The runtime can see both without being
+told.
 
 So the specialization key for a site is derived, not supplied: it is the tuple of scalar
 wire words the site dispatches with. Goldy never interprets a word. It only compares words
@@ -160,10 +162,11 @@ A uniform branch on a push constant is already non-divergent and cheap. Removing
 | Value that changes every few frames | Predictor raises the bake threshold and leaves the slot dynamic | None — it will not stay promoted |
 | Value that lives in a bound buffer | Invisible to the predictor | None — put scene facts in `with_param` if they should bake |
 
-The cost is a full Slang compile plus PSO creation on a worker thread, which is why
-warm waits for two clean hits and promotion waits for ten. A scheme whose many nodes
-all stabilize at once will spend real CPU in the background for a moment; the 16-entry
-per-scheme cache bounds the steady state.
+The cost is a full Slang compile plus PSO creation on a worker thread. Words fixed at
+record time pay it once, at the first submit; a word that has changed must hold for two
+submits before it is compiled and ten before it is swapped in. A scheme whose many
+nodes are all recorded at once spends real CPU in the background for a moment; the
+16-entry per-scheme cache bounds the steady state.
 
 Shader authors do not opt sites in, but they do choose where facts live. A mode flag
 in a `Scattered` buffer cannot bake. A mode flag passed with `with_param`, with the
@@ -189,14 +192,34 @@ fingerprint, so flipping one re-records. That is not a cost of this mechanism, i
 signal that drives it: a param that changes every frame re-records anyway and will never
 earn promotion, and a param that is stable is both free to retain and profitable to bake.
 
-### Certain facts: tensor layouts and `#[fact]`
+### Certain words: what recording already decided
 
-Some words need no streak, because the host already knows they cannot change for the life
-of the node. The runtime hands these to the site as **certain facts**. They skip the
-streak, join every bake target and count as proven for promotion, so a site whose only
-facts are certain warms at its first submit and promotes as soon as the compile lands.
+"Compile time" has three meanings here, and only one of them is useful for values:
 
-Tensor layouts are the main source. A `GoldyTensorLayout` in the metadata parcel is exactly
+| Stage | Knows | Can decide |
+|---|---|---|
+| `rustc` (the `#[goldy::compute]` macro) | Kernel structure: which params are scalars, how the body uses them | What *could* bake — not values, which do not exist yet |
+| Recording (`Scheme::node` … `dispatch`) | Every word and layout the node was built with | That those values are constants of the recorded program until the caller says otherwise |
+| Slang and the driver JIT | Whatever the defines say | Folding, dead-code removal, unrolling |
+
+Recording is the compile step that sees values. A scheme is a program, and the words a
+node was recorded with are its constants. The only way to change one afterwards is
+`Scheme::set_node_param`, so the runtime knows exactly which words have *ever* changed,
+and that knowledge is not a prediction.
+
+A word that has not changed since the node's first submit is therefore **certain**. It
+needs no history, joins every bake target and counts as proven for promotion. A node
+whose words are all certain warms at its first submit and promotes as soon as the compile
+lands, usually on the second. Nobody annotates anything: a shader author cannot say
+"this is fixed" more reliably than the absence of `set_node_param` calls does. A change
+before the first submit is still part of recording and leaves the word certain.
+
+Only words that have changed need history (below). That is where the prediction lives,
+and where time to promotion is a real cost.
+
+### Tensor layouts
+
+Tensor layouts are the other certain source. A `GoldyTensorLayout` in the metadata parcel is exactly
 the invisible bound-buffer fact described above, and every tensor kernel used to load it
 before its first data access. The layout is now split by how widely it is shared:
 
@@ -207,16 +230,31 @@ before its first data access. The layout is now split by how widely it is shared
   tensors. Offsets never bake, so sites that differ only in placement share one variant.
 - **The shape facts** are rank, element count, four extents, four strides and flags. Each
   one reads through a macro like `_GOLDY_SPEC_RMSNORM_T0_D0`, which defaults to the
-  parcel, so the universal program is unchanged. A node's shape facts are certain. A
-  promoted variant has no layout load and indexes with literal extents and strides.
-
-A `#[goldy::compute]` scalar marked `#[fact]` is certain in the same way: the recording site
-states that it is fixed at record time. The tensor recorder marks its op codes, axes and
-reduction lengths this way. `set_node_param` on a `#[fact]` scalar still works. It
-demotes as usual, and the slot becomes an ordinary streak slot.
+  parcel, so the universal program is unchanged. A node's shape facts are certain: nothing
+  can rebind a node's tensor views after recording. A promoted variant has no layout load
+  and indexes with literal extents and strides.
 
 Tensor shape facts are never compared at submit and never reach the wire; they exist only
-as bake inputs. A `#[fact]` scalar is still an ordinary push word.
+as bake inputs.
+
+### What the predictor can see
+
+Baking a value needs three things at once: the host knows the value, the host knows it
+is constant, and the shader reads it through a name the runtime can substitute (a
+`_GOLDY_SPEC_*` macro). Values fall into three tiers:
+
+| Tier | Examples | Today |
+|---|---|---|
+| Visible | Scalar push words (`with_param`, kernel scalars) | Baked |
+| Host-known, behind a load | Tensor layouts; buffer lengths (`buf.len()`); fields of a `Uniform<T>` written once at record time; dispatch grid dimensions | Layouts baked; the rest not yet |
+| Invisible | Anything the GPU writes, or the host writes into a parcel every frame | Never |
+
+The middle tier is the interesting one. Each entry is a constant the host already holds,
+read by the shader through a load or a query the compiler cannot fold. Moving one into
+the visible tier is the same three steps tensor layouts took: give the shader read a
+macro that defaults to the load, have recording hand the value to the site, and make the
+single place that can change it (a rebind, a parcel write, a grid change) report the
+change the way `set_node_param` does. See [Follow-ups](#follow-ups).
 
 ## Two caches, deliberately separate
 
@@ -227,7 +265,8 @@ as bake inputs. A `#[fact]` scalar is still an ordinary push word.
 
 Keeping them separate means a site can be demoted without throwing away the compiled
 pipeline, so re-promotion later is nearly free: a demoted site whose words come back is
-promoted straight from the cache once its streak recovers, with no compile.
+promoted straight from the cache once the changed slot has held long enough, with no
+compile.
 
 The PSO cache is **scheme-scoped** and bounded (16 variants, LRU). A device-scoped cache
 was the first design and does not work as stated: a `ComputePipeline` holds a strong
@@ -247,32 +286,50 @@ plus defines, so a cold process still avoids full recompiles.
 
 ## The predictor
 
-The hard part is not compiling two pipelines. It is first-frame uncertainty: when a scheme
-is recorded, nothing knows whether the next hundred frames will use the same params. So the
-predictor never speculates about the *current* frame — the params for the current frame are
-already known exactly, and history only decides whether to prepare a specialization for
-*future* frames.
+The hard part is not compiling two pipelines. It is the words that *have* changed: once a
+caller has moved one, nothing knows whether the next hundred frames will use the same
+value. So the predictor never speculates about the *current* frame — the params for the
+current frame are already known exactly, and history only decides whether to prepare a
+specialization for *future* frames.
 
-### Per-slot streaks
+### Per-slot history
 
-Every dispatch node with at least one `with_param` gets a site record when it is declared
-(`Scheme::node`, `ComputeNodeRecord::commit_dispatch_scheme`, or a caller-side
-`set_node_pipeline`, which starts the site over against the new pipeline). The record holds
-the caller's pipeline (the *universal*), the shader's provenance, the words seen at the
-last submit, and per slot:
+Every dispatch node with at least one `with_param` or tensor view gets a site record when
+it is declared (`Scheme::node`, `ComputeNodeRecord::commit_dispatch_scheme`, or a
+caller-side `set_node_pipeline`, which starts the site over against the new pipeline).
+The record holds the caller's pipeline (the *universal*), the shader's provenance, the
+node's current words, and per slot:
 
-- a **streak** — consecutive clean submits during which the word held its value. A changed
-  word resets its slot to zero on any submit; an unchanged word advances only when the
-  scheme was otherwise clean, so a scheme that re-records every frame for unrelated
-  reasons keeps its history but does not earn promotions from it. Topology dirtiness
-  (a foreign scheme changing shared-parcel interaction) resets every slot.
-- a **bake threshold** — the streak the slot needs before it is baked. It starts at the
-  warm threshold and grows every time the slot invalidates a compile or a promotion (to
-  the promote threshold, then doubling), so a fact that flips every few frames is baked
-  once, disproved once, and thereafter left dynamic while its neighbours specialize.
+- whether the word has **changed** since the node's first submit. An unchanged word is
+  certain (above).
+- for a changed word, the submit from which it has **held** its current value. Every
+  change arrives through `set_node_param`, which restarts the count; nothing else can
+  move a word, so a submit that re-records the scheme for unrelated reasons, or a foreign
+  scheme dirtying shared-parcel topology, says nothing about this node and leaves its
+  history alone. Stability is a property of the dispatch, not of the scheme around it.
+- a **bake threshold** — how long a changed slot must hold before it is baked. It starts
+  at the warm threshold and grows every time the slot invalidates a compile or a
+  promotion (to the promote threshold, then doubling), so a fact that flips every few
+  frames is baked once, disproved once, and thereafter left dynamic while its neighbours
+  specialize.
 
-The set of slots at or past their threshold is the site's **bake target**. It is per-slot:
-a site with a stable mode flag and a moving counter bakes the flag.
+The certain slots plus the changed slots at or past their threshold are the site's **bake
+target**. It is per-slot: a site with a stable mode flag and a moving counter bakes the
+flag.
+
+### Off the hot path
+
+A site is only worth looking at when something happened to it: it was declared, a word
+changed, a compile is in flight, or a changed slot is about to cross a threshold. The
+predictor keeps the sites that need a look in an *awake* set and the next decision point
+of every other site in a wake queue keyed by submit number. `set_node_param` wakes its
+site; each step computes when the site next needs one (the submit a held slot crosses its
+threshold, or the next submit while a compile is in flight) or nothing at all.
+
+A settled site — promoted, with every word unchanged or already baked, or pinned —
+schedules nothing and is never touched again until the caller changes one of its words.
+At steady state a submit does no predictor work beyond an empty-set check, however many
+nodes the scheme holds.
 
 Sites are keyed by the dispatch the scheme actually submits. When automatic kernel fusion
 promotes an execution plan, the constituents' sites retire and the fused dispatch gets a
@@ -287,22 +344,28 @@ is separated from swapping, with different thresholds:
 
 | Stage | Entered when | Behaviour |
 |---|---|---|
-| Observing | Site declared, or after a demotion | Universal runs; streaks accumulate |
+| Observing | After a demotion, or while a changed slot has not yet held long enough | Universal runs; held slots accumulate |
 | Warming | Bake target non-empty and not what is already promoted | Universal still runs; a variant baking the target compiles on a worker thread (or is taken from the cache) |
-| Ready | The compile landed | Universal still runs until every baked slot's streak reaches the promote threshold |
-| Promoted | Every baked slot at or past the promote threshold | Node rebound to the variant as a params-only re-record; the site keeps observing the slots it did not bake and may warm a *wider* variant |
+| Ready | The compile landed | Universal still runs until every changed baked slot has held for the promote threshold |
+| Promoted | Every baked slot certain or past the promote threshold | Node rebound to the variant as a params-only re-record; the site keeps observing the slots it did not bake and may warm a *wider* variant |
 | Pinned | Three failed compiles | Universal only; the site is never consulted again |
 
-Defaults are warm at 2, promote at 10 (`SpecializationPolicy`). The two-hit warm threshold
-skips the common ping-pong case, where a value alternates every frame and no specialization
-would ever pay off. The ten-hit promotion threshold buys confidence that the streak is a
-scene property rather than a coincidence, and it usually gives the compile enough time to
-finish before the swap is wanted.
+A new site goes straight to Warming at its first submit, because every word it has is
+certain.
+
+Defaults are warm at 2, promote at 10 (`SpecializationPolicy`), and they apply only to
+slots that have changed. The two-submit warm threshold skips the common ping-pong case,
+where a value alternates every frame and no specialization would ever pay off. The
+ten-submit promotion threshold buys confidence that the new value is a scene property
+rather than a coincidence, and it usually gives the compile enough time to finish before
+the swap is wanted.
 
 The predictor runs at the top of `Scheme::submit`, before dirtiness is read for recording,
 so a promotion is recorded by the very submit that decided it and the scheme is clean again
 afterwards. It never touches a node whose current words differ from the variant's baked
-words — a swap is only ever to a program that agrees with the frame.
+words — a swap is only ever to a program that agrees with the frame. Promotions land as
+their compiles do, so a scheme whose nodes warm together may still promote over two or
+three submits, each a params-only re-record.
 
 ### Demotion is mandatory, not optional
 
@@ -320,11 +383,11 @@ inside the runtime rather than in a caller's hands.
 
 Sites that warm the same program with the same baked words at the same time share one
 compile: a site whose job would duplicate one still in flight takes a hold on that job
-instead of spawning its own. Certain facts make this common, because every site of a
+instead of spawning its own. Certain words make this common, because every site of a
 kernel over one shape warms at the same first submit.
 
-A baked word changing while a compile is in flight — in `set_node_param`, or observed at
-the next submit — drops the site's hold. A job no site holds any more is skipped if it has
+A baked word changing while a compile is in flight, in `set_node_param`, drops the site's
+hold. A job no site holds any more is skipped if it has
 not started; it cannot interrupt work already running, because Slang compilation runs
 behind a process-global lock and the driver's pipeline creation is not interruptible, so a
 cancelled compile may still run to completion.
@@ -335,7 +398,7 @@ later, there is nothing left to compile.
 
 ### Cost model
 
-A streak alone is not the whole story. Recording a partition costs CPU time and, on
+Stability alone is not the whole story. Recording a partition costs CPU time and, on
 backends that require it, a wait for the previous retained command storage to retire; a
 tiny dispatch cannot repay that. The shipped predictor has no dispatch-size term — the
 thresholds are the only cost model — so a small, long-lived, stable dispatch pays one
@@ -344,15 +407,17 @@ rare by construction) and is listed as a follow-up rather than guessed at withou
 
 ### First frame, oscillation, reset
 
-- **First frames** always run universal. There is no speculation before any history exists.
+- **The first frame** always runs universal while the variant for its recorded words
+  compiles. That compile is the one optimistic step: a word the caller changes every
+  frame costs one compile that is dropped on the first change, and then the slot's
+  threshold rises out of reach.
 - **A miss** demotes immediately, as above.
-- **Oscillation** is absorbed by the two-hit warm gate and the growing per-slot bake
+- **Oscillation** is absorbed by the two-submit warm gate and the growing per-slot bake
   threshold, and three failed compiles move the site to Pinned so a pathological shader
   cannot make Goldy compile forever.
-- **Reset** happens on topology dirtiness (a foreign scheme changing shared-parcel
-  interaction topology, which already forces a re-record) and on a caller-side
-  `set_node_pipeline`, which replaces the universal. Both clear streaks; neither clears the
-  PSO cache.
+- **Reset** happens only on a caller-side `set_node_pipeline`, which replaces the
+  universal and restarts every held count. Words that never changed stay certain, and the
+  PSO cache is kept.
 - **Turning the feature off** at runtime (the environment variable is read every submit)
   demotes every promoted site on the next submit and drops in-flight compiles.
 
@@ -488,11 +553,10 @@ Tensor shape facts appear as `t{tensor}.{field}`, as in `t0.d0=0x120`.
 
 ### Backend differences
 
-Metal and WebGPU do not retain command lists, so partition-level resubmit counters are not
-a usable predictor signal there. Scheme cleanliness is: whether a submit found the scheme
-`Clean` is tracked on every backend, independent of retention, and that is what the streak
-counts. The specialization mechanism therefore behaves the same everywhere; only the size
-of the saving differs.
+The predictor's inputs are `set_node_param` events and the submit count, neither of which
+depends on command-list retention, so the mechanism behaves the same on backends that
+retain command lists and on Metal and WebGPU, which do not; only the size of the saving
+differs.
 
 The overridable macro is emitted by every compute lowering — the native push-constant path,
 the WebGPU uniform-buffer path, and the CUDA kernel-argument path — each defaulting the
@@ -502,6 +566,20 @@ specialization is defined for dispatch sites, so that is deliberate.
 
 ## Follow-ups
 
+- **Host-known values behind loads.** The middle tier of
+  [What the predictor can see](#what-the-predictor-can-see):
+  - *Buffer lengths.* `goldy_buf_len` is a `GetDimensions` query on DX12, Vulkan and the
+    CPU backend, and returns `0xFFFFFFFF` on CUDA, Metal and WebGPU, where pointer
+    descriptors carry no length. Passing the bound element count as a launch word (like
+    tensor offsets) would fix those backends and give the read a macro to bake through.
+    Rebinding a node's parcel would report the change as `set_node_param` does.
+  - *Record-constant `Uniform<T>` fields.* A uniform written once at record time and
+    never again is certain in the same sense as a scalar never passed to
+    `set_node_param`. The shader-side read would need a per-field macro, and parcel
+    writes would need to report which node's uniform they touched.
+  - *Grid dimensions.* The dispatch size is host-known and is changed only through the
+    scheme, but kernels do not read it as a value today. It would bake loop bounds
+    derived from `num_workgroups()`.
 - **Cost model.** A dispatch-size (or measured-duration) term so tiny dispatches are never
   promoted. Needs profiles from a real consumer before the threshold is more than a guess.
 - **Runtime-level variant sharing.** Many schemes running one shader with the same stable

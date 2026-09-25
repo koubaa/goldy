@@ -2,7 +2,7 @@
 //!
 //! Operands are tensor views, so element offsets travel as launch words and shapes bake
 //! through the specializer. The op code, axis, reduction length and scalar operand are
-//! `#[fact]`s: fixed when the op is recorded, and baked at the node's first submit.
+//! scalars fixed when the op is recorded, so they bake at the node's first submit too.
 
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
@@ -48,12 +48,7 @@ pub const OP_CAST_U32_I32: u32 = 35;
 ///
 /// `scalar` is user slot 0, where semantic sites read it (`semantic.rs`).
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_unary_f32(
-    src: goldy::gpu::Tensor<f32>,
-    dst: goldy::gpu::TensorWrite<f32>,
-    #[fact] scalar: f32,
-    #[fact] op: u32,
-) {
+fn tensor_unary_f32(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f32>, scalar: f32, op: u32) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
         let mut v = scalar;
@@ -85,8 +80,8 @@ fn tensor_binary_f32(
     a: goldy::gpu::Tensor<f32>,
     b: goldy::gpu::Tensor<f32>,
     dst: goldy::gpu::TensorWrite<f32>,
-    #[fact] scalar: f32,
-    #[fact] op: u32,
+    scalar: f32,
+    op: u32,
 ) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
@@ -115,12 +110,7 @@ fn tensor_binary_f32(
 
 /// 32-bit copy, or `bits` for [`OP_FILL`]. Views of other 32-bit dtypes are reinterpreted.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_copy_u32(
-    src: goldy::gpu::Tensor<u32>,
-    dst: goldy::gpu::TensorWrite<u32>,
-    #[fact] op: u32,
-    #[fact] bits: u32,
-) {
+fn tensor_copy_u32(src: goldy::gpu::Tensor<u32>, dst: goldy::gpu::TensorWrite<u32>, op: u32, bits: u32) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
         if op == 1 {
@@ -171,9 +161,9 @@ fn tensor_cast_u32_f32(src: goldy::gpu::Tensor<u32>, dst: goldy::gpu::TensorWrit
 fn tensor_reduce_f32(
     src: goldy::gpu::Tensor<f32>,
     dst: goldy::gpu::TensorWrite<f32>,
-    #[fact] op: u32,
-    #[fact] reduce_len: u32,
-    #[fact] inner: u32,
+    op: u32,
+    reduce_len: u32,
+    inner: u32,
 ) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
@@ -210,7 +200,7 @@ fn tensor_gather_f32(
     src: goldy::gpu::Tensor<f32>,
     index: goldy::gpu::Tensor<i32>,
     dst: goldy::gpu::TensorWrite<f32>,
-    #[fact] axis: u32,
+    axis: u32,
 ) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
@@ -243,8 +233,8 @@ fn tensor_scatter_f32(
     src: goldy::gpu::Tensor<f32>,
     index: goldy::gpu::Tensor<i32>,
     dst: goldy::gpu::TensorMut<f32>,
-    #[fact] op: u32,
-    #[fact] axis: u32,
+    op: u32,
+    axis: u32,
 ) {
     let lid = goldy::gpu::global_id().x;
     if lid != 0 {

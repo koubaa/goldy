@@ -55,12 +55,11 @@ Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
 | `gpu::DirectSpatial<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
-| `#[fact] u32` (any scalar) | the same push word, fixed at record time and baked at the first submit |
 
-Mark a scalar `#[fact]` when the recording site fixes it for the node's lifetime, such as
-an op code or an axis. Its site then skips the specializer's streak and bakes the value at
-the first submit (see [shader specialization](../design/shader-specialization.md)).
-`set_node_param` still works on it; the site demotes and treats the slot as ordinary.
+A scalar the caller never changes with `set_node_param` after recording, such as an op
+code or an axis, is baked into the node's program at its first submit (see
+[shader specialization](../design/shader-specialization.md)). Nothing marks it; the
+runtime sees that no change was made.
 
 Hidden builtins (appended to the Slang signature when used):
 
