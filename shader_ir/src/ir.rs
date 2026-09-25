@@ -179,9 +179,16 @@ pub enum Stmt {
     },
     /// Tree-reduce `val` across `n` lanes; every lane receives the result in `dest`.
     ///
-    /// `n` must be a power of two. Emitted Slang includes a trailing barrier, so
-    /// `dest` is immediately readable. All workgroup threads must execute this
-    /// statement (convergent).
+    /// `n` must be a power of two and the workgroup `[n, 1, 1]`. Emitted Slang includes
+    /// a trailing barrier, so `dest` is immediately readable. All workgroup threads must
+    /// execute this statement (convergent).
+    ///
+    /// The association is the pairwise tree over adjacent local ids: `T(a, b) =
+    /// T(a, m) ⊕ T(m, b)` with `m` the midpoint and the lower half on the left, on every
+    /// target and for every lowering.
+    ///
+    /// [`SUBGROUP_WIDTH_DEFINE`](crate::SUBGROUP_WIDTH_DEFINE) selects the lowering
+    /// with subgroup reads when the width `w` satisfies `w ≤ n ≤ w²`.
     WorkgroupReduce {
         op: WorkgroupReduceOp,
         n: u32,

@@ -48,6 +48,13 @@ uint goldy_tensor_dim(GoldyTensorLayout L, uint axis) {
 /// Entry-point name of every generated virtual compute entry.
 pub const VIRTUAL_ENTRY_NAME: &str = "cs_main";
 
+/// Preprocessor macro holding the device's fixed subgroup width, when it has one.
+///
+/// Every subgroup of a one-dimensional workgroup then holds that many consecutive
+/// local invocations. Emitted source only tests it with `defined(...)` first, so a
+/// compile without it takes the portable form.
+pub const SUBGROUP_WIDTH_DEFINE: &str = "GOLDY_SUBGROUP_WIDTH";
+
 /// Slot of each tensor parameter in the entry's packed [`TENSOR_META_PARAM`], in declaration order.
 pub fn tensor_slot_map(params: &[KernelParam]) -> HashMap<String, u32> {
     let mut map = HashMap::new();
@@ -323,6 +330,45 @@ fn reduce_steps(n: u32) -> u32 {
     n.trailing_zeros()
 }
 
+fn reduce_combine(op: WorkgroupReduceOp, a: &str, b: &str) -> String {
+    match op {
+        WorkgroupReduceOp::Sum => format!("{a} + {b}"),
+        WorkgroupReduceOp::Max => format!("max({a}, {b})"),
+    }
+}
+
+/// Pairwise tree over blocks of `extent` consecutive lanes of `_goldy_red`, in which
+/// every lane of a block ends with the block's value.
+///
+/// Each step combines the lower half of a block with the upper half, in that operand
+/// order on every lane, so all lanes hold the bits lane 0 of the block would.
+fn emit_subgroup_tree(out: &mut String, level: usize, op: WorkgroupReduceOp, extent: &str) {
+    let pad = indent(level);
+    let inner = indent(level + 1);
+    let combined = reduce_combine(
+        op,
+        "(_goldy_upper ? _goldy_other : _goldy_red)",
+        "(_goldy_upper ? _goldy_red : _goldy_other)",
+    );
+    out.push_str(&format!(
+        "{pad}for (uint _goldy_s = 1u; _goldy_s < {extent}; _goldy_s <<= 1u) {{\n"
+    ));
+    // Slang lowers `WaveReadLaneAt` on CUDA by synthesizing an active mask, which puts a
+    // warp vote on every branch of the calling function. Every lane of every subgroup
+    // runs this loop, so the full mask is exact, and `__shfl_sync` waits for all of them.
+    out.push_str(&format!(
+        "{inner}float _goldy_other = WaveMaskReadLaneAt(0xFFFFFFFFu, _goldy_red, int(_goldy_lane ^ _goldy_s));\n"
+    ));
+    out.push_str(&format!("{inner}bool _goldy_upper = (_goldy_lane & _goldy_s) != 0u;\n"));
+    out.push_str(&format!("{inner}_goldy_red = {combined};\n"));
+    out.push_str(&format!("{pad}}}\n"));
+}
+
+/// Both forms combine lane `l` with lane `l + 2^s` for `s = 0, 1, …`, which is the
+/// pairwise tree over adjacent lanes, so they produce the same bits. With a
+/// [`SUBGROUP_WIDTH_DEFINE`] `w` where `w ≤ n ≤ w²`, the steps below `w` run as subgroup
+/// reads, and the `n / w` subgroup partials are exchanged through `scratch` and reduced
+/// by the same subgroup tree: two workgroup barriers instead of `2·log2(n) + 1`.
 #[allow(clippy::too_many_arguments)]
 fn emit_workgroup_reduce(
     out: &mut String,
@@ -337,33 +383,57 @@ fn emit_workgroup_reduce(
 ) {
     let pad = indent(level);
     let inner = indent(level + 1);
-    let loop_pad = indent(level + 2);
+    let body = indent(level + 2);
+    let nested = indent(level + 3);
+    let width = SUBGROUP_WIDTH_DEFINE;
     let steps = reduce_steps(n);
     out.push_str(&format!("{pad}{{\n"));
     out.push_str(&format!(
         "{inner}float _goldy_red = {};\n",
         emit_expr(val, builtins, tensor_slots)
     ));
-    out.push_str(&format!("{inner}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+
+    out.push_str(&format!("#if defined({width})\n"));
+    out.push_str(&format!("{inner}if ({width} <= {n} && {n} <= {width} * {width}) {{\n"));
+    out.push_str(&format!("{body}uint _goldy_lane = WaveGetLaneIndex();\n"));
+    out.push_str(&format!("{body}uint _goldy_parts = {n}u / uint({width});\n"));
+    emit_subgroup_tree(out, level + 2, op, &format!("uint({width})"));
+    out.push_str(&format!("{body}if (_goldy_parts > 1u) {{\n"));
+    out.push_str(&format!("{nested}if (_goldy_lane == 0u)\n"));
     out.push_str(&format!(
-        "{inner}for (uint _goldy_s = 0u; _goldy_s < {steps}u; ++_goldy_s) {{\n"
+        "{nested}    {scratch}[_goldy_lid.x / uint({width})] = _goldy_red;\n"
+    ));
+    out.push_str(&format!("{nested}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!(
+        "{nested}_goldy_red = {scratch}[_goldy_lane & (_goldy_parts - 1u)];\n"
+    ));
+    emit_subgroup_tree(out, level + 3, op, "_goldy_parts");
+    out.push_str(&format!("{body}}}\n"));
+    out.push_str(&format!("{body}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{inner}}} else\n"));
+    out.push_str("#endif\n");
+
+    let loop_pad = indent(level + 3);
+    out.push_str(&format!("{inner}{{\n"));
+    out.push_str(&format!("{body}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!(
+        "{body}for (uint _goldy_s = 0u; _goldy_s < {steps}u; ++_goldy_s) {{\n"
     ));
     out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
     out.push_str(&format!("{loop_pad}if (_goldy_lid.x + (1u << _goldy_s) < {n}u)\n"));
-    match op {
-        WorkgroupReduceOp::Sum => out.push_str(&format!(
-            "{loop_pad}    _goldy_red = _goldy_red + {scratch}[_goldy_lid.x + (1u << _goldy_s)];\n"
-        )),
-        WorkgroupReduceOp::Max => out.push_str(&format!(
-            "{loop_pad}    _goldy_red = max(_goldy_red, {scratch}[_goldy_lid.x + (1u << _goldy_s)]);\n"
-        )),
-    }
+    out.push_str(&format!(
+        "{loop_pad}    _goldy_red = {};\n",
+        reduce_combine(op, "_goldy_red", &format!("{scratch}[_goldy_lid.x + (1u << _goldy_s)]"))
+    ));
     out.push_str(&format!("{loop_pad}GroupMemoryBarrierWithGroupSync();\n"));
     out.push_str(&format!("{loop_pad}{scratch}[_goldy_lid.x] = _goldy_red;\n"));
+    out.push_str(&format!("{body}}}\n"));
+    out.push_str(&format!("{body}GroupMemoryBarrierWithGroupSync();\n"));
+    out.push_str(&format!("{body}_goldy_red = {scratch}[0];\n"));
     out.push_str(&format!("{inner}}}\n"));
-    out.push_str(&format!("{inner}GroupMemoryBarrierWithGroupSync();\n"));
+
     out.push_str(&format!(
-        "{inner}{} = {scratch}[0];\n",
+        "{inner}{} = _goldy_red;\n",
         emit_expr(dest, builtins, tensor_slots)
     ));
     out.push_str(&format!("{pad}}}\n"));
@@ -808,9 +878,65 @@ mod tests {
         let slang = emit_canonical_compute_source(&kernel).source.canonical_slang;
         assert!(slang.contains("GroupThreadId _goldy_lid"));
         assert!(slang.contains("_goldy_red = _goldy_red + scratch[_goldy_lid.x + (1u << _goldy_s)]"));
-        assert!(slang.contains("ss = scratch[0];"));
+        assert!(slang.contains("_goldy_red = scratch[0];\n"));
+        assert!(slang.contains("ss = _goldy_red;\n"));
         assert!(slang.contains("exp(att[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
         assert!(slang.contains("_goldy_red = max(_goldy_red, scratch[_goldy_lid.x + (1u << _goldy_s)])"));
+    }
+
+    #[test]
+    fn workgroup_reduce_has_a_subgroup_form_behind_the_width_define() {
+        let reduce = |op| {
+            let mut out = String::new();
+            emit_stmt(
+                &mut out,
+                &Stmt::WorkgroupReduce {
+                    op,
+                    n: 256,
+                    val: Expr::Var("v".into()),
+                    scratch: "scratch".into(),
+                    dest: Expr::Var("v".into()),
+                },
+                0,
+                &BuiltinMask {
+                    local_id: true,
+                    ..BuiltinMask::NONE
+                },
+                &HashMap::new(),
+            );
+            out
+        };
+        let sum = reduce(WorkgroupReduceOp::Sum);
+        let hierarchical = sum
+            .split("#if defined(GOLDY_SUBGROUP_WIDTH)\n")
+            .nth(1)
+            .and_then(|rest| rest.split("#endif\n").next())
+            .expect("guarded subgroup form");
+        assert!(hierarchical.starts_with(
+            "    if (GOLDY_SUBGROUP_WIDTH <= 256 && 256 <= GOLDY_SUBGROUP_WIDTH * GOLDY_SUBGROUP_WIDTH) {\n"
+        ));
+        assert!(hierarchical.ends_with("    } else\n"));
+        assert_eq!(hierarchical.matches("GroupMemoryBarrierWithGroupSync();").count(), 2);
+        assert_eq!(
+            hierarchical
+                .matches("WaveMaskReadLaneAt(0xFFFFFFFFu, _goldy_red, int(_goldy_lane ^ _goldy_s))")
+                .count(),
+            2
+        );
+        assert!(!hierarchical.contains("WaveReadLaneAt"));
+        assert!(hierarchical.contains("scratch[_goldy_lid.x / uint(GOLDY_SUBGROUP_WIDTH)] = _goldy_red;"));
+        assert!(hierarchical.contains("_goldy_red = scratch[_goldy_lane & (_goldy_parts - 1u)];"));
+        assert!(hierarchical.contains(
+            "_goldy_red = (_goldy_upper ? _goldy_other : _goldy_red) + (_goldy_upper ? _goldy_red : _goldy_other);"
+        ));
+        let portable = sum.split("#endif\n").nth(1).expect("portable form");
+        assert!(!portable.contains("Wave"));
+        assert_eq!(portable.matches("GroupMemoryBarrierWithGroupSync();").count(), 3);
+        assert!(portable.ends_with("        _goldy_red = scratch[0];\n    }\n    v = _goldy_red;\n}\n"));
+
+        assert!(reduce(WorkgroupReduceOp::Max).contains(
+            "_goldy_red = max((_goldy_upper ? _goldy_other : _goldy_red), (_goldy_upper ? _goldy_red : _goldy_other));"
+        ));
     }
 
     #[test]

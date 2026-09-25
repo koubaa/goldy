@@ -76,9 +76,14 @@ Workgroup arrays are a **fixed** size known at compile time (not dynamic shared
 memory). Declare them at the kernel top level, then index them like a buffer.
 
 `workgroup_sum` / `workgroup_max` / `workgroup_softmax_in_place` are 1D
-collectives. `N` must be a power of two (typically `workgroup_size.x`). They
+collectives. `N` must be a power of two and the workgroup `[N, 1, 1]`. They
 return the reduced value to **every** lane and include a trailing barrier, so
-the result is immediately usable. Softmax writes `buf[base + t]` for
+the result is immediately usable. Reductions combine lane `l` with lane
+`l + 2^s` for `s = 0, 1, …`, a pairwise tree over adjacent local ids, so the
+result is bit-identical on every device. When the device reports a fixed
+`RuntimeCapabilities::subgroup_width`, the steps within a subgroup use subgroup
+reads, and the subgroup partials meet through `scratch` with two barriers in
+total. Softmax writes `buf[base + t]` for
 `t < count`; unused lanes contribute identity (`-1e30` / `0`). All threads in
 the workgroup must execute the call (no divergent branches around it).
 `workgroup_sum`/`workgroup_max` must be a `let` or simple assignment, not nested

@@ -158,6 +158,21 @@ impl ShaderProvenance {
     }
 }
 
+/// `defines` plus the facts of `device` that generated kernels test at compile time,
+/// unless the caller already set them.
+fn with_device_defines(device: &Runtime, defines: Arc<[(String, String)]>) -> Arc<[(String, String)]> {
+    let width_define = goldy_shader_ir::SUBGROUP_WIDTH_DEFINE;
+    let Some(width) = device.capabilities().subgroup_width else {
+        return defines;
+    };
+    if defines.iter().any(|(k, _)| k == width_define) {
+        return defines;
+    }
+    let mut merged = defines.to_vec();
+    merged.push((width_define.to_string(), width.to_string()));
+    merged.into()
+}
+
 /// A compiled shader module.
 pub struct ShaderModule {
     _device: Runtime,
@@ -467,6 +482,7 @@ impl ShaderModule {
         layout_checks: Arc<[OwnedLayoutCheck]>,
         yielding: Option<Arc<YieldScript>>,
     ) -> Result<Self> {
+        let defines = with_device_defines(device, defines);
         let path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
         let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
@@ -661,6 +677,35 @@ mod tests {
         );
         assert_eq!(variant.source(), base.source());
         assert_eq!(variant.search_paths(), base.search_paths());
+    }
+
+    #[test]
+    fn modules_carry_the_device_subgroup_width() {
+        let width = |defines: &[(String, String)]| {
+            defines
+                .iter()
+                .filter(|(k, _)| k == goldy_shader_ir::SUBGROUP_WIDTH_DEFINE)
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>()
+        };
+        let base = ShaderModule::from_slang(&mock_runtime(), "void main() {}").expect("shader");
+        assert!(width(base.defines()).is_empty());
+
+        let mut backend = MockBackend::new();
+        backend.subgroup_width = Some(32);
+        let device = Runtime::from_backend(Box::new(backend)).expect("mock device");
+        let base = ShaderModule::from_slang(&device, "void main() {}").expect("shader");
+        assert_eq!(width(base.defines()), ["32"]);
+        let variant = base.variant(&[("A", "1")]).expect("variant");
+        assert_eq!(width(variant.defines()), ["32"]);
+        let pinned = ShaderModule::from_slang_with_paths_and_defines(
+            &device,
+            "void main() {}",
+            &[],
+            &[("GOLDY_SUBGROUP_WIDTH", "16")],
+        )
+        .expect("shader");
+        assert_eq!(width(pinned.defines()), ["16"]);
     }
 
     #[test]

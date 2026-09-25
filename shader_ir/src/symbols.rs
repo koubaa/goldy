@@ -425,7 +425,8 @@ mod tests {
             .canonical_slang;
         assert!(slang.contains("groupshared float _goldy_k1_scratch[64];"), "{slang}");
         assert!(!slang.contains(" scratch["), "{slang}");
-        assert!(slang.contains("_goldy_k1_total = _goldy_k1_scratch[0];"), "{slang}");
+        assert!(slang.contains("_goldy_red = _goldy_k1_scratch[0];"), "{slang}");
+        assert!(slang.contains("_goldy_k1_total = _goldy_red;"), "{slang}");
         assert!(
             slang.contains("exp(att[(0u) + _goldy_sm_t] - _goldy_sm_max)"),
             "{slang}"
