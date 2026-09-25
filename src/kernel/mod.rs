@@ -332,9 +332,14 @@ pub mod gpu {
 
     /// Tree-reduce `val` across the workgroup; every lane receives the sum.
     ///
-    /// `N` must be a power of two (typically `workgroup_size.x`). `scratch` is a
+    /// `N` must be a power of two and the workgroup must be `[N, 1, 1]`. `scratch` is a
     /// `gpu::workgroup_array::<f32, N>()`. Includes a trailing barrier.
     /// All workgroup threads must execute the call (convergent).
+    ///
+    /// The association is the pairwise tree over adjacent local ids: lane `l` is combined
+    /// with lane `l + 2^s` for `s = 0, 1, …`, so the result is bit-identical on every
+    /// device. Devices with a fixed [`subgroup_width`](crate::RuntimeCapabilities::subgroup_width)
+    /// realize it with subgroup reads and two barriers.
     pub fn workgroup_sum<const N: usize>(_val: f32, _scratch: &mut [f32; N]) -> f32 {
         unimplemented!("gpu::workgroup_sum is only valid inside #[goldy::compute] bodies")
     }
