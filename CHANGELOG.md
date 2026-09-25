@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fusion_fallbacks` and `fusion_compile_failures`. `test_support` gains `FusionCompileFault`
   and `wait_for_fusion_compiles`.
 
+- **`Scheme::compiles_pending`** — whether a specialized variant or fused kernel is still
+  compiling, or compiled and not yet swapped in. Submits never wait for these compiles; a
+  benchmark that wants the steady state keeps submitting until it returns `false`.
+
 - **Scheme-local temporaries** — `Scheme::temporary_buffer::<T>(len)` declares a `Temporary`,
   a buffer whose contents exist only within one submission of that scheme. It binds like a
   buffer (`SchemeNodeBuilder::with_temporary`, or a buffer argument of a generated kernel's
@@ -106,6 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Runtime::acquire_texture(..., init)`.
 
 ### Changed
+
+- **CUDA compiles compute pipelines off the backend lock** — Slang lowering, the PTX
+  compile and the module load run before `ComputePipeline::new` takes the backend mutex, as
+  the Vulkan and DX12 compiles already did. A specialization or fusion compile on a worker
+  thread no longer stalls submits for the length of the compile.
+
+- The child `Scheme::group` records onto reports its parent's `automatic_fusion`, so a
+  recorder that picks a composable form for fusing schemes (such as Ammon's SwiGLU) sees
+  `set_automatic_fusion`, not only `GOLDY_FUSION`.
 
 - CUDA GPU API validation no longer sets `CUDA_LAUNCH_BLOCKING=1` for the process. A
   validated CUDA backend skips graph capture and synchronizes after every op itself, so

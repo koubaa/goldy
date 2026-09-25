@@ -337,6 +337,11 @@ fresh site against the universal fused pipeline. Other sites move to their execu
 with their history. Returning to the recorded graph reverses this, and the constituents
 start fresh.
 
+No submit waits for a compile, and on Vulkan, DX12 and CUDA the compile runs without the
+backend lock, so a submit on another thread is not stuck behind one. The flip side is that a
+short run measures the recorded dispatches. A benchmark that wants the steady state keeps
+submitting until `Scheme::compiles_pending` reports nothing outstanding.
+
 ### Stages
 
 Compilation is expensive and uncancellable once started, so promotion is staged. Compiling

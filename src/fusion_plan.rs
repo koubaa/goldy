@@ -501,6 +501,11 @@ impl FusionPlanner {
     }
 
     /// Join every in-flight fused compile (tests).
+    /// Whether planned regions are compiling and not yet promoted.
+    pub(crate) fn is_compiling(&self) -> bool {
+        self.phase == Phase::Compiling
+    }
+
     pub(crate) fn wait_for_compiles(&mut self) {
         for worker in self.workers.drain(..) {
             let _ = worker.join();

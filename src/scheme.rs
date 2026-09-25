@@ -1089,12 +1089,16 @@ impl Scheme {
     }
 
     /// Record `f` onto a temporary child on this context and [`Self::include`] it.
+    ///
+    /// The child reports this scheme's [`Self::automatic_fusion`], so a recorder that
+    /// picks a composable form when the scheme fuses sees the scheme it records for.
     pub fn group(
         &mut self,
         label: impl Into<crate::SchemeLabel>,
         f: impl FnOnce(&mut Scheme) -> Result<(), GoldyError>,
     ) -> Result<GroupId, GoldyError> {
         let mut child = Scheme::new(&self.ctx);
+        child.automatic_fusion = self.automatic_fusion;
         f(&mut child)?;
         Ok(self.include(label, &child)?.finish())
     }
@@ -2280,6 +2284,16 @@ impl Scheme {
     /// Block until every in-flight fused compile has finished (test support).
     pub(crate) fn wait_for_fusion_compiles(&mut self) {
         self.fusion.wait_for_compiles();
+    }
+
+    /// Whether this scheme has background compiles outstanding: a specialized variant or
+    /// fused kernel still compiling, or one compiled that later submits have yet to swap in.
+    ///
+    /// Submits never wait for these compiles, so a short run measures the recorded
+    /// dispatches. A benchmark that wants the steady state keeps submitting until this
+    /// returns `false`.
+    pub fn compiles_pending(&self) -> bool {
+        self.specialization.has_pending() || self.fusion.is_compiling()
     }
 
     /// Turn automatic fusion on or off for this scheme, whatever `GOLDY_FUSION` says.
@@ -9767,6 +9781,34 @@ mod fusion_plan_tests {
     }
 
     #[test]
+    fn submitting_until_no_compiles_are_pending_reaches_the_steady_state() {
+        let _pins = pins(true);
+        let device = mock_runtime();
+        let k = kernels(&device);
+        let p = parcels(&device, 3);
+        let ctx = device.create_context().unwrap();
+        let mut scheme = fusing(&ctx);
+        let (a, b) = record_chain(&mut scheme, &k, &p);
+
+        let mut submits = 0;
+        loop {
+            frame(&mut scheme);
+            submits += 1;
+            if !scheme.compiles_pending() {
+                break;
+            }
+            assert!(submits < 64, "background compiles never settled");
+        }
+        assert_eq!(statuses(&scheme), vec![FusionRegionStatus::Promoted]);
+        assert!(scheme.node_is_specialized(a) && scheme.node_is_specialized(b));
+
+        let records = scheme.replay_stats().records;
+        frames(&mut scheme, 3);
+        assert!(!scheme.compiles_pending());
+        assert_eq!(scheme.replay_stats().records, records, "settled submits only replay");
+    }
+
+    #[test]
     fn turning_fusion_off_runs_the_recorded_ir() {
         let _pins = pins(false);
         let device = mock_runtime();
@@ -9787,6 +9829,24 @@ mod fusion_plan_tests {
         assert_eq!(stats.fusion_fallbacks, 1);
         assert_eq!(stats.records, records + 1);
         assert!(statuses(&scheme).is_empty());
+    }
+
+    #[test]
+    fn a_group_records_with_its_parents_fusion_setting() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        for enabled in [true, false] {
+            let mut scheme = Scheme::new(&ctx);
+            scheme.set_automatic_fusion(enabled);
+            let mut seen = None;
+            scheme
+                .group("g", |child| {
+                    seen = Some(child.automatic_fusion());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(seen, Some(enabled));
+        }
     }
 
     #[test]

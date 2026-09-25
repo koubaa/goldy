@@ -1131,6 +1131,11 @@ pub(crate) trait GpuBackendTimelineWait {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 }
 
+/// Work a backend hands out to prepare a compute pipeline off the backend lock.
+///
+/// See [`GpuBackend::unlocked_compute_prepare`].
+pub(crate) type UnlockedComputePrepare = Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>> + Send>;
+
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
 pub(crate) trait GpuBackend:
@@ -1773,6 +1778,21 @@ pub(crate) trait GpuBackend:
         _bytecode: &[u8],
         _reflection: crate::slang::ShaderReflection,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Backend-specific work that prepares `shader`'s compute pipeline without the lock.
+    ///
+    /// For backends whose compile does not fit [`Self::compute_shader_target`]. The caller
+    /// runs the job with the backend mutex released and hands its output to
+    /// [`Self::seed_compute_pipeline`] before [`Self::create_compute_pipeline`]. `None`
+    /// (the default) leaves all the work to `create_compute_pipeline`.
+    fn unlocked_compute_prepare(&self, _shader: ShaderHandle) -> Option<UnlockedComputePrepare> {
+        None
+    }
+
+    /// Install the output of an [`Self::unlocked_compute_prepare`] job.
+    fn seed_compute_pipeline(&mut self, _shader: ShaderHandle, _prepared: Box<dyn std::any::Any + Send>) -> Result<()> {
         Ok(())
     }
 
