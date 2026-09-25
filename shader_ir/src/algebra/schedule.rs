@@ -1210,6 +1210,15 @@ impl Emit<'_> {
                     let b = self.term(rhs, out)?;
                     call(BuiltinFn::ExactMul, vec![a, b])
                 }
+                Term::Binary {
+                    op: BinaryOp::Div,
+                    lhs,
+                    rhs,
+                } => {
+                    let a = self.term(lhs, out)?;
+                    let b = self.term(rhs, out)?;
+                    call(BuiltinFn::ExactDiv, vec![a, b])
+                }
                 other => self.term(other, out)?,
             },
             Term::Unary { op, arg } => {

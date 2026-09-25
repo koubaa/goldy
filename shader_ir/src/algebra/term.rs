@@ -30,7 +30,8 @@ pub enum UnaryOp {
     Sin,
     Cos,
     /// The argument's value, rounded to f32 on its own: a product here does not
-    /// contract with the operation that reads it, as when it was stored between them.
+    /// contract with the operation that reads it, as when it was stored between them,
+    /// and a quotient stays a division, as when its divisor was only known at run time.
     Round,
 }
 

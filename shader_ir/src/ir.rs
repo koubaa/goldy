@@ -67,6 +67,9 @@ pub enum BuiltinFn {
     /// `(a, b)`: the f32 product `a * b`, rounded on its own, so the device does not
     /// contract it with the operation that reads it.
     ExactMul,
+    /// `(a, b)`: the f32 quotient `a / b`, rounded on its own, so the device does not
+    /// rewrite it (a constant divisor into a multiply by its reciprocal, say).
+    ExactDiv,
 }
 
 /// Rows, columns and summed extent of every [`Stmt::Matrix`] tile.
