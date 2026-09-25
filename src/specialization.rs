@@ -694,6 +694,11 @@ impl SchemePredictor {
         self.retiring.push_back(Vec::new());
     }
 
+    /// Whether a site has a compile in flight or a compiled variant awaiting promotion.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.sites.values().any(|s| s.job.is_some() || s.ready.is_some())
+    }
+
     /// Join every in-flight compile (tests).
     pub(crate) fn wait_for_compiles(&mut self) {
         for site in self.sites.values_mut() {

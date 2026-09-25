@@ -93,10 +93,25 @@ impl ComputePipeline {
             let _st = crate::shader_timing::scope("compute.slang_unlocked", label.unwrap_or(""));
             compile_compute_stage_unlocked(device, compute_shader)?
         };
+        let prepared = match seeded {
+            Some(_) => None,
+            None => {
+                let job = device
+                    .inner
+                    .backend
+                    .lock()
+                    .unwrap()
+                    .unlocked_compute_prepare(compute_shader.handle);
+                job.map(|job| job()).transpose()?
+            }
+        };
 
         let mut backend = device.inner.backend.lock().unwrap();
         if let Some((bytecode, reflection)) = seeded {
             backend.seed_compute_stage(compute_shader.handle, &bytecode, reflection)?;
+        }
+        if let Some(prepared) = prepared {
+            backend.seed_compute_pipeline(compute_shader.handle, prepared)?;
         }
 
         let handle = {

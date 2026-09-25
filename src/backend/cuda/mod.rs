@@ -165,6 +165,8 @@ pub(crate) struct CudaBackend {
     samplers: HashMap<SamplerHandle, CudaSampler>,
     sampler_slots: HashMap<u32, SamplerHandle>,
     shaders: HashMap<ShaderHandle, CudaShader>,
+    /// Compute stages compiled and loaded off the backend lock, awaiting their pipeline.
+    prepared_compute: HashMap<ShaderHandle, PreparedCompute>,
     compute_pipelines: HashMap<ComputePipelineHandle, CudaComputePipeline>,
     retained: HashMap<(ContextHandle, u64), RetainedEntry>,
     graph_stats: Arc<CudaGraphStats>,
@@ -182,7 +184,7 @@ pub(crate) struct CudaBackend {
     /// CUDA external-memory imports that must outlive [`Self::textures`] views.
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     texture_imports: HashMap<TextureHandle, dx12_interop::CudaImportedTexture>,
-    slang_compiler: crate::slang::SlangCompiler,
+    slang_compiler: Arc<crate::slang::SlangCompiler>,
     next_device: DeviceHandle,
     next_context: ContextHandle,
     next_buffer: BufferHandle,
@@ -532,6 +534,15 @@ struct CudaComputeKernel {
     max_threads_per_block: u32,
 }
 
+/// A compute stage's PTX, slot access, workgroup size and launch layout.
+type CompiledCompute = (String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>);
+
+/// Output of [`CudaBackend::unlocked_compute_prepare`].
+struct PreparedCompute {
+    compiled: CompiledCompute,
+    identity: CudaComputeKernel,
+}
+
 struct CudaComputePipeline {
     device: DeviceHandle,
     shader_handle: ShaderHandle,
@@ -606,6 +617,100 @@ fn write_dump_file(dir: &std::path::Path, name: &str, contents: &str) {
         }
         Err(error) => tracing::warn!("CUDA: GOLDY_DUMP_SHADERS create {} failed: {error}", path.display()),
     }
+}
+
+/// Lower `shader` for CUDA and compile it to PTX. Needs no backend state.
+fn compile_compute_ptx(
+    compiler: &crate::slang::SlangCompiler,
+    shader: &CudaShader,
+    shader_handle: ShaderHandle,
+    storage_specs: &[CudaStorageTextureSpec],
+) -> Result<CompiledCompute> {
+    ensure_cuda_toolkit_on_path();
+    let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
+    let defines: Vec<(&str, &str)> = shader
+        .defines
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source, &defines)
+        .map_err(|error| anyhow::anyhow!("CUDA launch layout failed: {error}"))?;
+    let cuda_source = if storage_specs.is_empty()
+        || storage_specs
+            .iter()
+            .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity))
+    {
+        crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source, &defines)
+            .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?
+    } else {
+        crate::slang::virtual_main::transform_virtual_main_cuda_compute_specialized(
+            &shader.source,
+            &defines,
+            storage_specs,
+        )
+        .map_err(|error| anyhow::anyhow!("CUDA shader specialization failed: {error}"))?
+    };
+    let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
+    let compiled = compiler.compile_bindless_with_reflection_and_defines(
+        &cuda_source,
+        crate::slang::ShaderTarget::Ptx,
+        &[("cs_main", crate::slang::SlangStage::Compute)],
+        &paths,
+        &defines,
+        &[],
+        shader.optimization_level,
+    )?;
+    let mut ptx = compiled
+        .shader
+        .as_str()
+        .context("CUDA: Slang returned non-text PTX output")?
+        .to_owned();
+    while ptx.ends_with('\0') {
+        ptx.pop();
+    }
+    maybe_dump_cuda_shaders(
+        compiler,
+        shader,
+        shader_handle,
+        storage_specs,
+        &cuda_source,
+        &ptx,
+        &paths,
+        &defines,
+    );
+    let access = crate::slang::virtual_main::extract_push_constant_categories(&shader.source)
+        .iter()
+        .map(|category| {
+            category.map(|category| match category {
+                crate::types::ResourceCategory::Broadcast
+                | crate::types::ResourceCategory::Texture
+                | crate::types::ResourceCategory::Sampler
+                | crate::types::ResourceCategory::Accel => ResourceAccess::Read,
+                crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
+                    ResourceAccess::ReadWrite
+                }
+            })
+        })
+        .collect();
+    Ok((ptx, access, workgroup_size, launch_layout))
+}
+
+/// Load `ptx` as a module and resolve its `cs_main`.
+fn load_compute_kernel(ctx: &Arc<CudaContext>, ptx: &str, validate: bool) -> Result<CudaComputeKernel> {
+    let _gate = capture_gate::lock_capture_alloc_gate();
+    let module = load_ptx_module(ctx, ptx, validate)?;
+    let function = module
+        .load_function("cs_main")
+        .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
+    let max_threads_per_block = function
+        .max_threads_per_block()
+        .context("CUDA: query CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK failed")?
+        .max(0) as u32;
+    Ok(CudaComputeKernel {
+        module,
+        function,
+        max_threads_per_block,
+    })
 }
 
 fn maybe_dump_cuda_shaders(
@@ -726,7 +831,7 @@ impl CudaBackend {
             driver_version = driver_version,
             success = true
         );
-        let slang_compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
+        let slang_compiler = Arc::new(crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?);
         Ok(Self {
             validation,
             adapter_info,
@@ -740,6 +845,7 @@ impl CudaBackend {
             samplers: HashMap::new(),
             sampler_slots: HashMap::new(),
             shaders: HashMap::new(),
+            prepared_compute: HashMap::new(),
             compute_pipelines: HashMap::new(),
             retained: HashMap::new(),
             graph_stats: Arc::new(CudaGraphStats::default()),
@@ -895,12 +1001,8 @@ impl CudaBackend {
         Ok(handle)
     }
 
-    fn compile_compute_ptx(
-        &self,
-        shader: &CudaShader,
-        shader_handle: ShaderHandle,
-    ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
-        self.compile_compute_ptx_with_specs(shader, shader_handle, &[])
+    fn compile_compute_ptx(&self, shader: &CudaShader, shader_handle: ShaderHandle) -> Result<CompiledCompute> {
+        compile_compute_ptx(&self.slang_compiler, shader, shader_handle, &[])
     }
 
     fn compile_compute_ptx_with_specs(
@@ -908,92 +1010,12 @@ impl CudaBackend {
         shader: &CudaShader,
         shader_handle: ShaderHandle,
         storage_specs: &[CudaStorageTextureSpec],
-    ) -> Result<(String, Vec<Option<ResourceAccess>>, [u32; 3], Vec<CudaLaunchArgKind>)> {
-        ensure_cuda_toolkit_on_path();
-        let paths: Vec<&str> = shader.search_paths.iter().map(String::as_str).collect();
-        let defines: Vec<(&str, &str)> = shader
-            .defines
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let launch_layout = crate::slang::virtual_main::extract_cuda_compute_launch_layout(&shader.source, &defines)
-            .map_err(|error| anyhow::anyhow!("CUDA launch layout failed: {error}"))?;
-        let cuda_source = if storage_specs.is_empty()
-            || storage_specs
-                .iter()
-                .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity))
-        {
-            crate::slang::virtual_main::transform_virtual_main_cuda_compute(&shader.source, &defines)
-                .map_err(|error| anyhow::anyhow!("CUDA shader lowering failed: {error}"))?
-        } else {
-            crate::slang::virtual_main::transform_virtual_main_cuda_compute_specialized(
-                &shader.source,
-                &defines,
-                storage_specs,
-            )
-            .map_err(|error| anyhow::anyhow!("CUDA shader specialization failed: {error}"))?
-        };
-        let workgroup_size = crate::slang::parse_numthreads(&shader.source).unwrap_or([1, 1, 1]);
-        let compiled = self.slang_compiler.compile_bindless_with_reflection_and_defines(
-            &cuda_source,
-            crate::slang::ShaderTarget::Ptx,
-            &[("cs_main", crate::slang::SlangStage::Compute)],
-            &paths,
-            &defines,
-            &[],
-            shader.optimization_level,
-        )?;
-        let mut ptx = compiled
-            .shader
-            .as_str()
-            .context("CUDA: Slang returned non-text PTX output")?
-            .to_owned();
-        while ptx.ends_with('\0') {
-            ptx.pop();
-        }
-        maybe_dump_cuda_shaders(
-            &self.slang_compiler,
-            shader,
-            shader_handle,
-            storage_specs,
-            &cuda_source,
-            &ptx,
-            &paths,
-            &defines,
-        );
-        let access = crate::slang::virtual_main::extract_push_constant_categories(&shader.source)
-            .iter()
-            .map(|category| {
-                category.map(|category| match category {
-                    crate::types::ResourceCategory::Broadcast
-                    | crate::types::ResourceCategory::Texture
-                    | crate::types::ResourceCategory::Sampler
-                    | crate::types::ResourceCategory::Accel => ResourceAccess::Read,
-                    crate::types::ResourceCategory::Scattered | crate::types::ResourceCategory::StorageImage => {
-                        ResourceAccess::ReadWrite
-                    }
-                })
-            })
-            .collect();
-        Ok((ptx, access, workgroup_size, launch_layout))
+    ) -> Result<CompiledCompute> {
+        compile_compute_ptx(&self.slang_compiler, shader, shader_handle, storage_specs)
     }
 
     fn load_compute_kernel(&self, device: DeviceHandle, ptx: &str) -> Result<CudaComputeKernel> {
-        let gpu = self.device(device)?;
-        let _gate = capture_gate::lock_capture_alloc_gate();
-        let module = load_ptx_module(&gpu.ctx, ptx, self.validation.gpu_api)?;
-        let function = module
-            .load_function("cs_main")
-            .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
-        let max_threads_per_block = function
-            .max_threads_per_block()
-            .context("CUDA: query CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK failed")?
-            .max(0) as u32;
-        Ok(CudaComputeKernel {
-            module,
-            function,
-            max_threads_per_block,
-        })
+        load_compute_kernel(&self.device(device)?.ctx, ptx, self.validation.gpu_api)
     }
 
     /// Resolve per-`DirectSpatial` format specs from bound textures for this launch.
@@ -4714,6 +4736,7 @@ impl GpuBackend for CudaBackend {
 
     fn destroy_shader(&mut self, shader: ShaderHandle) {
         self.shaders.remove(&shader);
+        self.prepared_compute.remove(&shader);
     }
 
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -5507,6 +5530,7 @@ impl GpuBackend for CudaBackend {
         compute_shader: ShaderHandle,
         _debug_name: Option<&str>,
     ) -> Result<ComputePipelineHandle> {
+        let prepared = self.prepared_compute.remove(&compute_shader);
         let shader = self
             .shaders
             .get(&compute_shader)
@@ -5515,8 +5539,14 @@ impl GpuBackend for CudaBackend {
             anyhow::bail!("CUDA: shader belongs to another device");
         }
         let shader_snapshot = shader.clone();
-        let (ptx, slot_access, workgroup_size, launch_layout) = self.compile_compute_ptx(shader, compute_shader)?;
-        let identity = self.load_compute_kernel(device, &ptx)?;
+        let ((_, slot_access, workgroup_size, launch_layout), identity) = match prepared {
+            Some(prepared) => (prepared.compiled, prepared.identity),
+            None => {
+                let compiled = self.compile_compute_ptx(shader, compute_shader)?;
+                let identity = self.load_compute_kernel(device, &compiled.0)?;
+                (compiled, identity)
+            }
+        };
 
         // Preload float4↔Rgba8Unorm specialization when every DirectSpatial slot is float4.
         // Lazy cuModuleLoad on first specialized launch can deadlock / fault under CUDA's
@@ -5552,6 +5582,26 @@ impl GpuBackend for CudaBackend {
             },
         );
         Ok(handle)
+    }
+
+    fn unlocked_compute_prepare(&self, shader: ShaderHandle) -> Option<super::UnlockedComputePrepare> {
+        let record = self.shaders.get(&shader)?.clone();
+        let ctx = Arc::clone(&self.device(record.device).ok()?.ctx);
+        let compiler = Arc::clone(&self.slang_compiler);
+        let validate = self.validation.gpu_api;
+        Some(Box::new(move || {
+            let compiled = compile_compute_ptx(&compiler, &record, shader, &[])?;
+            let identity = load_compute_kernel(&ctx, &compiled.0, validate)?;
+            Ok(Box::new(PreparedCompute { compiled, identity }) as Box<dyn std::any::Any + Send>)
+        }))
+    }
+
+    fn seed_compute_pipeline(&mut self, shader: ShaderHandle, prepared: Box<dyn std::any::Any + Send>) -> Result<()> {
+        let prepared = prepared
+            .downcast::<PreparedCompute>()
+            .map_err(|_| anyhow::anyhow!("CUDA: foreign prepared compute stage"))?;
+        self.prepared_compute.insert(shader, *prepared);
+        Ok(())
     }
 
     fn destroy_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
