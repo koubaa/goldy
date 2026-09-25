@@ -600,5 +600,8 @@ fn main() {
         }),
     ];
 
-    libtest_mimic::run(&args, tests).exit();
+    let conclusion = libtest_mimic::run(&args, tests);
+    drop(device);
+    drop(instance);
+    conclusion.exit_if_failed();
 }
