@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `wait_for_fusion_compiles`. A semantic region rounds the product each operation ends in
   before another reads it (`goldy_exact_mul`: SPIR-V `NoContraction`, HLSL `precise`, CUDA
   `__fmul_rn`), so no device contracts across a boundary the separate dispatches stored at.
+  A fused mean divides by its length through `goldy_exact_div` (`__fdiv_rn` on CUDA), as the
+  unfused kernel divides by a length it reads at run time, so the constant divisor is not
+  folded into a multiply by its reciprocal.
 
 - **`Scheme::compiles_pending`** — whether a specialized variant or fused kernel is still
   compiling, or compiled and not yet swapped in. Submits never wait for these compiles; a
