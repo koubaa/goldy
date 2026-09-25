@@ -5,7 +5,7 @@
 //! plans, such as a fusion planner choosing between a fused kernel and the dispatches
 //! it replaces, turns [`Estimate`]s into time with its own device model.
 
-use super::term::Term;
+use super::term::{Term, UnaryOp};
 
 /// Device-independent counts for one kernel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -34,6 +34,10 @@ pub(super) fn ops(term: &Term, known: &[&Term]) -> u64 {
     match term {
         Term::Lit(_) | Term::Scalar(_) | Term::IndexValue(_) => 0,
         Term::Read { .. } => 1,
+        Term::Unary {
+            op: UnaryOp::Round,
+            arg,
+        } => ops(arg, known),
         Term::Unary { arg, .. } => 1 + ops(arg, known),
         Term::Binary { lhs, rhs, .. } => 1 + ops(lhs, known) + ops(rhs, known),
         Term::Select { then, otherwise, .. } => 1 + ops(then, known).max(ops(otherwise, known)),
@@ -50,6 +54,10 @@ pub(super) fn serial(term: &Term, known: &[&Term]) -> u64 {
     match term {
         Term::Lit(_) | Term::Scalar(_) | Term::IndexValue(_) => 0,
         Term::Read { .. } => 1,
+        Term::Unary {
+            op: UnaryOp::Round,
+            arg,
+        } => serial(arg, known),
         Term::Unary { arg, .. } => 1 + serial(arg, known),
         Term::Binary { lhs, rhs, .. } => 1 + serial(lhs, known).max(serial(rhs, known)),
         Term::Select { then, otherwise, .. } => 1 + serial(then, known).max(serial(otherwise, known)),

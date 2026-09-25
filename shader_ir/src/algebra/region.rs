@@ -575,6 +575,13 @@ fn write_affine(region: &Region, a: &Affine, f: &mut fmt::Formatter<'_>) -> fmt:
 /// the tree exactly: `a + (b + c)` keeps its parentheses.
 fn write_term(region: &Region, term: &Term, min: u8, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     const ATOM: u8 = 4;
+    if let Term::Unary {
+        op: UnaryOp::Round,
+        arg,
+    } = term
+    {
+        return write_term(region, arg, min, f);
+    }
     let precedence = match term {
         Term::Binary {
             op: BinaryOp::Add | BinaryOp::Sub,
@@ -619,7 +626,7 @@ fn write_term(region: &Region, term: &Term, min: u8, f: &mut fmt::Formatter<'_>)
         }
         Term::Unary { op, arg } => {
             let name = match op {
-                UnaryOp::Neg => unreachable!(),
+                UnaryOp::Neg | UnaryOp::Round => unreachable!(),
                 UnaryOp::Abs => "abs",
                 UnaryOp::Exp => "exp",
                 UnaryOp::Log => "log",

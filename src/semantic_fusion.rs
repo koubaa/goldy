@@ -457,6 +457,10 @@ impl<'a> Lift<'a> {
             Expr::Call { func, args } => match (func, args.as_slice()) {
                 (BuiltinFn::Min, [a, b]) => Term::binary(BinaryOp::Min, self.expr(a)?, self.expr(b)?),
                 (BuiltinFn::Max, [a, b]) => Term::binary(BinaryOp::Max, self.expr(a)?, self.expr(b)?),
+                (BuiltinFn::ExactMul, [a, b]) => Term::unary(
+                    UnaryOp::Round,
+                    Term::binary(BinaryOp::Mul, self.expr(a)?, self.expr(b)?),
+                ),
                 (f, [a]) => {
                     let op = match f {
                         BuiltinFn::Abs => UnaryOp::Abs,

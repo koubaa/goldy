@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fused dispatch. `Scheme::fusion_report` lists the regions (with their status) and the
   rejected runs (with their `FusionRejection`). `ReplayStats` counts `fusion_promotions`,
   `fusion_fallbacks` and `fusion_compile_failures`. `test_support` gains `FusionCompileFault`
-  and `wait_for_fusion_compiles`.
+  and `wait_for_fusion_compiles`. A semantic region rounds the product each operation ends in
+  before another reads it (`goldy_exact_mul`: SPIR-V `NoContraction`, HLSL `precise`, CUDA
+  `__fmul_rn`), so no device contracts across a boundary the separate dispatches stored at.
 
 - **`Scheme::compiles_pending`** — whether a specialized variant or fused kernel is still
   compiling, or compiled and not yet swapped in. Submits never wait for these compiles; a

@@ -198,7 +198,7 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
 /// one element per thread.
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
-    let prepared = Prepared::new(region)?;
+    let prepared = Prepared::rounded(region)?;
     let mut lanes = None;
     for (_, body) in &prepared.bodies {
         for r in top_reductions(body) {
@@ -255,7 +255,7 @@ pub fn lower_graph(
 /// Lowers `region` with `schedule`. [`Schedule::Matrix`] needs the contractions of a
 /// [`Graph`]; see [`lower_graph`].
 pub fn lower_with(region: &Region, schedule: Schedule, sources: &[IndexSource]) -> Result<Lowered, LowerError> {
-    let prepared = Prepared::new(region)?;
+    let prepared = Prepared::rounded(region)?;
     match schedule {
         Schedule::Matrix { .. } => Err(prepared.order_error()),
         _ => prepared.lower(schedule, sources),
@@ -373,6 +373,14 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    /// [`Self::new`] after [`Region::round_products`], so the kernel rounds every
+    /// operation's result as the separate dispatches would.
+    fn rounded(region: &Region) -> Result<Self, LowerError> {
+        let mut region = region.clone();
+        region.round_products();
+        Self::new(&region)
+    }
+
     pub(super) fn new(region: &Region) -> Result<Self, LowerError> {
         region.validate().map_err(LowerError::Invalid)?;
         let mut region = region.clone();
@@ -1189,9 +1197,25 @@ impl Emit<'_> {
                 self.loads.as_mut().expect("checked above").1.push((load, name.clone()));
                 var(&name)
             }
+            Term::Unary {
+                op: UnaryOp::Round,
+                arg,
+            } => match &**arg {
+                Term::Binary {
+                    op: BinaryOp::Mul,
+                    lhs,
+                    rhs,
+                } => {
+                    let a = self.term(lhs, out)?;
+                    let b = self.term(rhs, out)?;
+                    call(BuiltinFn::ExactMul, vec![a, b])
+                }
+                other => self.term(other, out)?,
+            },
             Term::Unary { op, arg } => {
                 let x = self.term(arg, out)?;
                 match op {
+                    UnaryOp::Round => x,
                     UnaryOp::Neg => Expr::Unary {
                         op: IrUnaryOp::Neg,
                         expr: Box::new(x),

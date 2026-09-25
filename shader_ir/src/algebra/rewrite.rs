@@ -2,7 +2,7 @@
 
 use super::affine::{Affine, IndexVar, Sym};
 use super::region::{Definition, Region, Role};
-use super::term::{Term, ValueId};
+use super::term::{BinaryOp, Term, UnaryOp, ValueId};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -126,6 +126,37 @@ impl Region {
             .sum();
         self.eliminate_dead();
         replaced
+    }
+
+    /// Rounds the product each definition ends in, through selects, and returns how
+    /// many it rounded. [`Exactness::Exact`].
+    ///
+    /// Run separately, an operation stores its result before the next reads it, so a
+    /// device cannot contract one operation's final product into the operation that
+    /// reads it. Rounding keeps that true once [`Self::substitute`] joins them.
+    pub fn round_products(&mut self) -> usize {
+        fn round(term: Term, rounded: &mut usize) -> Term {
+            match term {
+                Term::Binary { op: BinaryOp::Mul, .. } => {
+                    *rounded += 1;
+                    Term::unary(UnaryOp::Round, term)
+                }
+                Term::Select {
+                    lhs,
+                    cmp,
+                    rhs,
+                    then,
+                    otherwise,
+                } => Term::select(lhs, cmp, rhs, round(*then, rounded), round(*otherwise, rounded)),
+                other => other,
+            }
+        }
+        let mut rounded = 0;
+        for def in self.values.iter_mut().flatten().filter_map(|v| v.definition.as_mut()) {
+            let body = std::mem::replace(&mut def.body, Term::Lit(0.0));
+            def.body = round(body, &mut rounded);
+        }
+        rounded
     }
 
     /// Applies `law` throughout `value`'s definition, and returns how many times it

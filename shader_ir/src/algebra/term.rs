@@ -29,6 +29,9 @@ pub enum UnaryOp {
     Recip,
     Sin,
     Cos,
+    /// The argument's value, rounded to f32 on its own: a product here does not
+    /// contract with the operation that reads it, as when it was stored between them.
+    Round,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
