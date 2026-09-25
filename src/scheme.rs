@@ -5178,6 +5178,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 specialization_warms: 0,
                 specialization_promotions: 0,
                 specialization_demotions: 0,
+                ..Default::default()
             }
         );
         #[cfg(feature = "metal")]
@@ -5206,6 +5207,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 specialization_warms: 0,
                 specialization_promotions: 0,
                 specialization_demotions: 0,
+                ..Default::default()
             }
         );
         #[cfg(feature = "metal")]
@@ -5239,6 +5241,7 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 specialization_warms: 0,
                 specialization_promotions: 0,
                 specialization_demotions: 0,
+                ..Default::default()
             }
         );
         #[cfg(feature = "metal")]

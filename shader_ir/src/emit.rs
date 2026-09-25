@@ -542,6 +542,7 @@ fn emit_workgroup_reduce(
     out.push_str(&format!("{body}}}\n"));
     out.push_str(&format!("{body}GroupMemoryBarrierWithGroupSync();\n"));
     out.push_str(&format!("{body}_goldy_red = {scratch}[0];\n"));
+    out.push_str(&format!("{body}GroupMemoryBarrierWithGroupSync();\n"));
     out.push_str(&format!("{inner}}}\n"));
 
     out.push_str(&format!(
@@ -1044,8 +1045,10 @@ mod tests {
         ));
         let portable = sum.split("#endif\n").nth(1).expect("portable form");
         assert!(!portable.contains("Wave"));
-        assert_eq!(portable.matches("GroupMemoryBarrierWithGroupSync();").count(), 3);
-        assert!(portable.ends_with("        _goldy_red = scratch[0];\n    }\n    v = _goldy_red;\n}\n"));
+        assert_eq!(portable.matches("GroupMemoryBarrierWithGroupSync();").count(), 4);
+        assert!(portable.ends_with(
+            "        _goldy_red = scratch[0];\n        GroupMemoryBarrierWithGroupSync();\n    }\n    v = _goldy_red;\n}\n"
+        ));
 
         assert!(reduce(WorkgroupReduceOp::Max).contains(
             "_goldy_red = max((_goldy_upper ? _goldy_other : _goldy_red), (_goldy_upper ? _goldy_red : _goldy_other));"

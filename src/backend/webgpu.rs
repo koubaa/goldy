@@ -1159,6 +1159,7 @@ struct WebGpuComputePipeline {
 }
 
 impl WebGpuBackend {
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self> {
         Self::with_validation(crate::Validation::from_env())
     }
