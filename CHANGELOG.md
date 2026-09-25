@@ -113,6 +113,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no contiguity test, and ranks 2 and 3 delinearize only their own axes. On CUDA,
   Ammon's RMSNorm falls from 2.75 µs to 2.24 µs.
 
+- **Tensor layouts as launch facts** — each tensor's element offset travels as a launch
+  word (`PushLayout` region C on DX12 / Vulkan / Metal, a trailing kernel argument on
+  CUDA; first 13 tensors), and its shape facts bake through the specializer as certain
+  facts: they skip the streak, so a tensor node warms at its first submit and its promoted
+  variant loads no `GoldyTensorLayout`. Sites that differ only in offsets share a variant.
+  The tensor recorder's portable kernels are now ordinary `#[tensor]` kernels over views,
+  with op codes and axes as `#[fact]` scalars; the private `TensorOpMeta` parcel is gone.
+  Identical warms in flight share one compile. `KERNEL_ABI_VERSION` is now 4. On CUDA,
+  Ammon's RMSNorm falls from 2.24 µs to 1.70 µs and its residual add from 1.50 µs to
+  0.86 µs; stories15M decode rises from about 1,990 to about 2,160 tokens/s, and warmup
+  rises from 0.42 s to 1.45 s because variants compile at the first submit.
+
+- **`#[fact]` scalar parameters** — a `#[goldy::compute]` scalar marked `#[fact]` is fixed at
+  record time. Its site bakes it at the first submit instead of waiting for a streak.
+  `set_node_param` on it demotes as usual.
+
 - **Breaking:** `KernelDef` gains a `definition` field and no longer implements `Eq`
   (`PartialEq` remains). Hand-authored and parsed Slang set it to `None`.
 

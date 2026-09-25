@@ -1204,6 +1204,7 @@ impl Scheme {
                 &site.provenance,
                 recorded.label.clone(),
                 user_slots,
+                &[],
             );
         }
     }
@@ -1253,6 +1254,7 @@ impl Scheme {
                     &pipeline.provenance,
                     node.label.clone(),
                     user_slots,
+                    &[],
                 );
             }
         }
@@ -1923,6 +1925,7 @@ impl Scheme {
             provenance,
             label.clone(),
             &user_slots,
+            &[],
         );
         self.desc.ir.nodes.push(TaskNode {
             group: None,
@@ -1932,6 +1935,7 @@ impl Scheme {
                 pipeline,
                 resource_slots,
                 user_slots,
+                launch_words: Vec::new(),
                 dispatch,
             },
         });
@@ -2040,6 +2044,8 @@ impl Scheme {
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
+            launch_words: Vec::new(),
+            certain_facts: Vec::new(),
             slot_access: parts.slot_access.clone(),
             provenance: Some(std::sync::Arc::clone(&parts.provenance)),
             yielding: None,
@@ -2069,6 +2075,8 @@ impl Scheme {
             bindings: Vec::new(),
             resource_slots: Vec::new(),
             user_slots: Vec::new(),
+            launch_words: Vec::new(),
+            certain_facts: Vec::new(),
             slot_access: pipeline.slot_access.clone(),
             provenance: None,
             yielding: None,
@@ -2233,8 +2241,16 @@ impl Scheme {
             }
         }
         let label = self.desc.ir.nodes[node.index()].label.clone();
-        self.specialization
-            .register_site(exec as u32, pipeline.handle, &pipeline.provenance, label, &slots);
+        // The node's layouts outlive the swap, so its shape facts stay certain.
+        let certain = self.specialization.certain_facts(exec as u32);
+        self.specialization.register_site(
+            exec as u32,
+            pipeline.handle,
+            &pipeline.provenance,
+            label,
+            &slots,
+            &certain,
+        );
         if changed {
             self.mark_params_dirty();
         }
@@ -3845,6 +3861,10 @@ pub struct SchemeNodeBuilder<'a> {
     bindings: Vec<ResourceBinding>,
     resource_slots: Vec<u32>,
     user_slots: Vec<u32>,
+    /// See [`NodeKind::Dispatch`]'s `launch_words`.
+    launch_words: Vec<u32>,
+    /// Specialization facts that hold for the node's lifetime, as `(slot, word)`.
+    certain_facts: crate::specialization::BakedSlots,
     /// Per-slot descriptor access required by the shader signature (from pipeline
     /// reflection), in shader-signature order. Lets [`Self::with_parcel`] pick the
     /// correct SRV/UAV descriptor independent of the graph [`NodeAccess`].
@@ -3983,6 +4003,21 @@ impl<'a> SchemeNodeBuilder<'a> {
     #[cfg(feature = "tensor")]
     pub(crate) fn scheme_runtime(&self) -> crate::runtime::Runtime {
         self.scheme.context().runtime().clone()
+    }
+
+    /// Send tensor element offsets as launch words.
+    #[cfg(feature = "tensor")]
+    pub(crate) fn with_launch_words(mut self, offsets: Vec<u32>) -> Self {
+        debug_assert!(offsets.len() <= crate::backend::shared::MAX_LAUNCH_WORDS);
+        self.launch_words = offsets;
+        self
+    }
+
+    /// Hand the specialization predictor facts that hold for the node's lifetime:
+    /// `#[fact]` scalars and tensor shape facts, in ascending slot order.
+    pub(crate) fn with_certain_facts(mut self, facts: crate::specialization::BakedSlots) -> Self {
+        self.certain_facts = facts;
+        self
     }
 
     /// Bind the handler for continuation `name` of a yielding script.
@@ -4149,6 +4184,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                         pipeline: self.pipeline,
                         resource_slots: Vec::new(),
                         user_slots: Vec::new(),
+                        launch_words: Vec::new(),
                         dispatch: DispatchDim::Direct { x: 0, y: 0, z: 0 },
                     },
                 });
@@ -4194,6 +4230,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 pipeline: self.pipeline,
                 resource_slots: self.resource_slots,
                 user_slots: self.user_slots,
+                launch_words: self.launch_words,
                 dispatch: DispatchDim::Indirect { buffer, offset },
             },
         });
@@ -4210,6 +4247,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                 provenance,
                 self.label.clone(),
                 &self.user_slots,
+                &self.certain_facts,
             );
         }
     }
@@ -4281,6 +4319,7 @@ impl<'a> SchemeNodeBuilder<'a> {
                     pipeline: self.pipeline,
                     resource_slots: self.resource_slots,
                     user_slots: self.user_slots,
+                    launch_words: self.launch_words,
                     dispatch,
                 }
             },

@@ -189,6 +189,35 @@ fingerprint, so flipping one re-records. That is not a cost of this mechanism, i
 signal that drives it: a param that changes every frame re-records anyway and will never
 earn promotion, and a param that is stable is both free to retain and profitable to bake.
 
+### Certain facts: tensor layouts and `#[fact]`
+
+Some words need no streak, because the host already knows they cannot change for the life
+of the node. The runtime hands these to the site as **certain facts**. They skip the
+streak, join every bake target and count as proven for promotion, so a site whose only
+facts are certain warms at its first submit and promotes as soon as the compile lands.
+
+Tensor layouts are the main source. A `GoldyTensorLayout` in the metadata parcel is exactly
+the invisible bound-buffer fact described above, and every tensor kernel used to load it
+before its first data access. The layout is now split by how widely it is shared:
+
+- **The element offset** differs per site, because each site binds a different placement of
+  its parcel. It travels as a launch word: the words after the frame table in `PushLayout`
+  region C on DX12, Vulkan and Metal (13 of them), or trailing kernel arguments on CUDA.
+  WebGPU and the CPU backend keep reading the parcel, as does a kernel with more than 13
+  tensors. Offsets never bake, so sites that differ only in placement share one variant.
+- **The shape facts** are rank, element count, four extents, four strides and flags. Each
+  one reads through a macro like `_GOLDY_SPEC_RMSNORM_T0_D0`, which defaults to the
+  parcel, so the universal program is unchanged. A node's shape facts are certain. A
+  promoted variant has no layout load and indexes with literal extents and strides.
+
+A `#[goldy::compute]` scalar marked `#[fact]` is certain in the same way: the recording site
+states that it is fixed at record time. The tensor recorder marks its op codes, axes and
+reduction lengths this way. `set_node_param` on a `#[fact]` scalar still works. It
+demotes as usual, and the slot becomes an ordinary streak slot.
+
+Tensor shape facts are never compared at submit and never reach the wire; they exist only
+as bake inputs. A `#[fact]` scalar is still an ordinary push word.
+
 ## Two caches, deliberately separate
 
 | Cache | Keyed by | Holds | Evicting it costs |
@@ -289,9 +318,14 @@ inside the runtime rather than in a caller's hands.
 
 ### Cancellation is best-effort
 
+Sites that warm the same program with the same baked words at the same time share one
+compile: a site whose job would duplicate one still in flight takes a hold on that job
+instead of spawning its own. Certain facts make this common, because every site of a
+kernel over one shape warms at the same first submit.
+
 A baked word changing while a compile is in flight — in `set_node_param`, or observed at
-the next submit — drops the job and raises its cancel flag. The flag is honoured before the
-compile starts; it cannot interrupt work already running, because Slang compilation runs
+the next submit — drops the site's hold. A job no site holds any more is skipped if it has
+not started; it cannot interrupt work already running, because Slang compilation runs
 behind a process-global lock and the driver's pipeline creation is not interruptible, so a
 cancelled compile may still run to completion.
 
@@ -443,11 +477,14 @@ usually still holds it after that.
 
 `ReplayStats` gains `specialization_warms`, `specialization_promotions`, and
 `specialization_demotions`; `Scheme::node_is_specialized(NodeId)` answers for one site.
+`specialization_warms` counts compiles started, so sites that join an in-flight compile
+do not add to it.
 Demotions are visible in the stats immediately after the `set_node_param` that caused
 them. Each transition also emits a `tracing` event under the `goldy` target (`debug` for
 warm / promote / demote, `warn` for a failed compile or a pinned site). Events carry the
 site's `kernel` id (`-` without one) and its baked slots as `name=word`. Unnamed slots
 appear as `slot0=0x7`; fused slots are named by origin, as in `1:damp.enabled=0x1`.
+Tensor shape facts appear as `t{tensor}.{field}`, as in `t0.d0=0x120`.
 
 ### Backend differences
 

@@ -52,7 +52,8 @@ pub const DISPATCH_BATCH_STRIDE: usize = TOTAL_PUSH_BYTES + 3 * 4;
 ///
 /// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, …
 /// - Region B: per-dispatch scalar user params (`uint`, `float`, `int` …).
-/// - Region C: zero-filled, reserved for future extension.
+/// - Region C: words 0–2 route the frame table; words from [`LAUNCH_WORD_BASE`] carry
+///   launch words (tensor element offsets); the rest are zero.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct PushLayout {
@@ -84,13 +85,53 @@ impl PushLayout {
 // Push-layout fill helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// First `PushLayout._reserved` word carrying a launch word (`_rs3` in generated wrappers).
+pub const LAUNCH_WORD_BASE: usize = 3;
+/// Launch words a dispatch can carry in region C.
+pub const MAX_LAUNCH_WORDS: usize = 16 - LAUNCH_WORD_BASE;
+
+const _: () = assert!(MAX_LAUNCH_WORDS == goldy_shader_ir::TENSOR_LAUNCH_WORDS);
+
+/// `BindResourcesRaw.user` for a dispatch's scalar words and launch words.
+///
+/// Without launch words this is `user` unchanged. With them, the scalars are padded to
+/// [`MAX_USER_SLOTS`] and the launch words follow, so word `MAX_USER_SLOTS + k` is launch
+/// word `k`. [`split_bind_words`] reverses it.
+pub fn pack_bind_words(user: &[u32], launch: &[u32]) -> Vec<u32> {
+    debug_assert!(user.len() <= MAX_USER_SLOTS && launch.len() <= MAX_LAUNCH_WORDS);
+    if launch.is_empty() {
+        return user.to_vec();
+    }
+    let mut words = vec![0u32; MAX_USER_SLOTS + launch.len()];
+    words[..user.len()].copy_from_slice(user);
+    words[MAX_USER_SLOTS..].copy_from_slice(launch);
+    words
+}
+
+/// `(region B words, launch words)` of a [`pack_bind_words`] encoding.
+///
+/// When launch words are present the region B slice is padded to [`MAX_USER_SLOTS`].
+pub fn split_bind_words(words: &[u32]) -> (&[u32], &[u32]) {
+    if words.len() > MAX_USER_SLOTS {
+        words.split_at(MAX_USER_SLOTS)
+    } else {
+        (words, &[])
+    }
+}
+
 /// Fill push layout for frame-table routing: indices live in the staging/table;
 /// `_reserved[0]` carries the dispatch base offset within the row.
+///
+/// `user` is a [`pack_bind_words`] encoding; its launch words land in region C.
 #[inline]
 pub fn fill_frame_table_dispatch(layout: &mut PushLayout, dispatch_base: u32, user: &[u32]) {
     layout._reserved[crate::frame_table::dispatch_table_base_word_index()] = dispatch_base;
-    for (i, &val) in user.iter().enumerate().take(MAX_USER_SLOTS) {
+    let (scalars, launch) = split_bind_words(user);
+    for (i, &val) in scalars.iter().enumerate() {
         layout.user[i] = val;
+    }
+    for (i, &val) in launch.iter().enumerate().take(MAX_LAUNCH_WORDS) {
+        layout._reserved[LAUNCH_WORD_BASE + i] = val;
     }
 }
 

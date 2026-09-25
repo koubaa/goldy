@@ -63,7 +63,9 @@ mod raster;
 mod surface;
 
 use super::*;
-use crate::backend::shared::{PushLayout, DISPATCH_BATCH_STRIDE, MAX_USER_SLOTS, TOTAL_PUSH_BYTES};
+use crate::backend::shared::{
+    PushLayout, DISPATCH_BATCH_STRIDE, LAUNCH_WORD_BASE, MAX_LAUNCH_WORDS, MAX_USER_SLOTS, TOTAL_PUSH_BYTES,
+};
 use crate::backend::submission_worker::{self, SubmissionWorker};
 use crate::frame_table::dispatch_table_base_word_index;
 use crate::slang::virtual_main::{CudaLaunchArgKind, CudaStorageTextureSpec};
@@ -1000,7 +1002,7 @@ impl CudaBackend {
                 CudaLaunchArgKind::Buffer | CudaLaunchArgKind::SampledTexture { .. } | CudaLaunchArgKind::Sampler => {
                     index_i += 1;
                 }
-                CudaLaunchArgKind::Scalar => {}
+                CudaLaunchArgKind::Scalar | CudaLaunchArgKind::LaunchWord { .. } => {}
             }
         }
         crate::slang::virtual_main::derive_cuda_storage_texture_specs(launch_layout, &formats)
@@ -1090,7 +1092,7 @@ impl CudaBackend {
     /// Build launch args in shader parameter order.
     ///
     /// Empty `launch_layout` means plain (non-`[goldy_compute]`) Slang: one buffer arg
-    /// per registry index and no scalars.
+    /// per registry index and no scalars. `user` is a `pack_bind_words` encoding.
     fn build_launch_args(
         &self,
         stream: &Arc<CudaStream>,
@@ -1098,6 +1100,7 @@ impl CudaBackend {
         indices: &[u32],
         user: &[u32],
     ) -> Result<Vec<CudaLaunchArg>> {
+        let (user, launch) = crate::backend::shared::split_bind_words(user);
         if launch_layout.is_empty() {
             if !user.is_empty() {
                 anyhow::bail!(
@@ -1126,7 +1129,13 @@ impl CudaBackend {
                 indices.len()
             );
         }
-        if user.len() != expected_scalars {
+        // Launch words pad the scalars to the full region.
+        let scalars_ok = if launch.is_empty() {
+            user.len() == expected_scalars
+        } else {
+            expected_scalars <= user.len()
+        };
+        if !scalars_ok {
             anyhow::bail!(
                 "CUDA: dispatch provided {} scalar user word(s) but shader expects {expected_scalars}",
                 user.len()
@@ -1151,7 +1160,7 @@ impl CudaBackend {
                         .with_context(|| format!("CUDA: registry key {index} references a destroyed sampler"))?;
                     sampler_keys.push(sampler.key);
                 }
-                CudaLaunchArgKind::Scalar => {}
+                CudaLaunchArgKind::Scalar | CudaLaunchArgKind::LaunchWord { .. } => {}
                 CudaLaunchArgKind::Buffer
                 | CudaLaunchArgKind::SampledTexture { .. }
                 | CudaLaunchArgKind::StorageTexture { .. } => {
@@ -1215,6 +1224,9 @@ impl CudaBackend {
                 CudaLaunchArgKind::Scalar => {
                     args.push(CudaLaunchArg::Scalar(user[user_i]));
                     user_i += 1;
+                }
+                CudaLaunchArgKind::LaunchWord { index } => {
+                    args.push(CudaLaunchArg::Scalar(launch.get(*index).copied().unwrap_or(0)));
                 }
             }
         }
@@ -1585,6 +1597,11 @@ impl CudaBackend {
             }
         };
         let n_scalars = Self::launch_layout_scalar_count(&pipeline.launch_layout);
+        let n_launch = pipeline
+            .launch_layout
+            .iter()
+            .filter(|kind| matches!(kind, CudaLaunchArgKind::LaunchWord { .. }))
+            .count();
 
         if n_buffers > 0 {
             let table =
@@ -1618,15 +1635,17 @@ impl CudaBackend {
                 let start = bases[i] as usize;
                 table[start..start + n_buffers].to_vec()
             };
-            let user = if n_scalars == 0 {
-                Vec::new()
+            let scalars = if n_scalars == 0 {
+                &[][..]
             } else {
                 anyhow::ensure!(
                     n_scalars <= MAX_USER_SLOTS,
                     "CUDA: DispatchBatch entry {i} expects {n_scalars} scalars (max {MAX_USER_SLOTS})"
                 );
-                layout.user[..n_scalars].to_vec()
+                &layout.user[..n_scalars]
             };
+            let launch = &layout._reserved[LAUNCH_WORD_BASE..LAUNCH_WORD_BASE + n_launch];
+            let user = crate::backend::shared::pack_bind_words(scalars, launch);
 
             ops.push(
                 self.materialize_launch(
@@ -2120,9 +2139,10 @@ impl CudaBackend {
             match command {
                 GpuCommand::SetPipeline(pipeline) => current_pipeline = Some(*pipeline),
                 GpuCommand::BindResourcesRaw { indices, user, .. } => {
-                    if user.len() > MAX_USER_SLOTS {
+                    if user.len() > MAX_USER_SLOTS + MAX_LAUNCH_WORDS {
                         anyhow::bail!(
-                            "CUDA: at most {MAX_USER_SLOTS} scalar user params per dispatch, got {}",
+                            "CUDA: at most {MAX_USER_SLOTS} scalar user params and {MAX_LAUNCH_WORDS} launch words \
+                             per dispatch, got {} words",
                             user.len()
                         );
                     }

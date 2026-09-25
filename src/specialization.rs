@@ -23,7 +23,7 @@ use crate::shader::{ShaderModule, ShaderProvenance};
 use crate::slang::virtual_main::scalar_specialization_macro;
 use crate::task_graph::{GraphIR, NodeKind};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Thresholds the predictor runs on.
@@ -58,7 +58,39 @@ impl Default for SpecializationPolicy {
 }
 
 /// `(slot, wire word)` pairs in ascending slot order — the identity of one variant.
+///
+/// Slots below [`TENSOR_FACT_SLOT_BASE`] are scalar params; the rest are tensor layout facts.
 pub(crate) type BakedSlots = Vec<(u32, u32)>;
+
+/// First slot id of a tensor layout fact; see [`tensor_fact_slot`].
+pub(crate) const TENSOR_FACT_SLOT_BASE: u32 = 1 << 16;
+const TENSOR_FACT_STRIDE: u32 = 16;
+const _: () = assert!(goldy_shader_ir::TENSOR_FACTS.len() <= TENSOR_FACT_STRIDE as usize);
+
+/// Slot id of layout field `TENSOR_FACTS[fact]` of tensor slot `tensor`.
+pub(crate) fn tensor_fact_slot(tensor: u32, fact: usize) -> u32 {
+    TENSOR_FACT_SLOT_BASE + tensor * TENSOR_FACT_STRIDE + fact as u32
+}
+
+fn is_fact_slot(slot: u32) -> bool {
+    slot >= TENSOR_FACT_SLOT_BASE
+}
+
+/// `(tensor slot, fact index)` of a fact slot id.
+fn split_fact_slot(slot: u32) -> (u32, usize) {
+    let rel = slot - TENSOR_FACT_SLOT_BASE;
+    (rel / TENSOR_FACT_STRIDE, (rel % TENSOR_FACT_STRIDE) as usize)
+}
+
+/// Preprocessor macro that bakes `slot` of `entry`.
+fn bake_macro(entry: &str, slot: u32) -> String {
+    if is_fact_slot(slot) {
+        let (tensor, fact) = split_fact_slot(slot);
+        goldy_shader_ir::tensor_fact_macro(entry, tensor, fact)
+    } else {
+        scalar_specialization_macro(entry, slot)
+    }
+}
 
 /// The program a variant specializes.
 ///
@@ -126,30 +158,46 @@ impl VariantCache {
     }
 }
 
-/// One in-flight variant compile.
+/// One variant compile, shared by every site of the scheme that wants the same variant.
+struct CompileJob {
+    key: VariantKey,
+    baked: BakedSlots,
+    /// Sites holding a [`WarmJob`] on this compile. The worker skips the compile when none
+    /// are left by the time it starts.
+    holders: AtomicUsize,
+    /// `None` while running; `Some(Ok)` once the variant is in the cache.
+    outcome: Mutex<Option<Result<(), String>>>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// A site's hold on a [`CompileJob`].
 struct WarmJob {
     baked: BakedSlots,
-    cancel: Arc<AtomicBool>,
-    /// `None` while running; `Some(Ok)` once the variant is in the cache.
-    outcome: Arc<Mutex<Option<Result<(), String>>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    job: Arc<CompileJob>,
 }
 
 impl WarmJob {
-    fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+    /// Hold `job` too, unless every holder has already let it go.
+    fn attach(job: &Arc<CompileJob>) -> Option<Self> {
+        job.holders
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n > 0).then_some(n + 1))
+            .ok()?;
+        Some(Self {
+            baked: job.baked.clone(),
+            job: Arc::clone(job),
+        })
     }
 
     fn poll(&self) -> Option<Result<(), String>> {
-        self.outcome.lock().unwrap().clone()
+        self.job.outcome.lock().unwrap().clone()
     }
 }
 
 impl Drop for WarmJob {
     fn drop(&mut self) {
-        // A job that is dropped without being joined is detached; the worker keeps its own
-        // clones of everything it needs and still files the result in the shared cache.
-        self.cancel();
+        // The worker keeps its own reference and still files a compile that already started
+        // in the shared cache.
+        self.job.holders.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -167,6 +215,9 @@ pub(crate) struct SitePredictor {
     /// `[goldy_compute]` function name the bake macros are scoped to.
     entry: String,
     label: crate::SchemeLabel,
+    /// Facts that hold for the node's lifetime: `#[fact]` scalars and tensor layout facts.
+    /// They skip the streak and join every bake target.
+    certain: BakedSlots,
     /// Scalar words seen at the previous submit.
     last: Vec<u32>,
     /// Per slot: consecutive clean submits the word has held its current value.
@@ -189,13 +240,19 @@ impl SitePredictor {
         entry: String,
         label: crate::SchemeLabel,
         slots: &[u32],
+        certain: &[(u32, u32)],
         policy: &SpecializationPolicy,
     ) -> Self {
+        debug_assert!(certain
+            .iter()
+            .all(|&(s, _)| is_fact_slot(s) || (s as usize) < slots.len()));
+        debug_assert!(certain.windows(2).all(|w| w[0].0 < w[1].0));
         Self {
             universal,
             provenance,
             entry,
             label,
+            certain: certain.to_vec(),
             last: slots.to_vec(),
             streak: vec![0; slots.len()],
             bake_threshold: vec![policy.warm_after; slots.len()],
@@ -222,35 +279,54 @@ impl SitePredictor {
             .map_or_else(|| "-".into(), |k| k.id.to_string())
     }
 
-    /// `baked` as `name=word` pairs, naming slots by their kernel's scalar origins.
+    /// `baked` as `name=word` pairs, naming scalar slots by their kernel's scalar origins
+    /// and facts as `t{tensor}.{field}`.
     fn describe(&self, baked: &[(u32, u32)]) -> String {
         let names = self.provenance.kernel().map(|k| k.scalars.as_slice()).unwrap_or(&[]);
         baked
             .iter()
-            .map(|&(slot, word)| match names.get(slot as usize) {
-                Some(name) => format!("{name}={word:#x}"),
-                None => format!("slot{slot}={word:#x}"),
+            .map(|&(slot, word)| {
+                if is_fact_slot(slot) {
+                    let (tensor, fact) = split_fact_slot(slot);
+                    return format!("t{tensor}.{}={word:#x}", goldy_shader_ir::TENSOR_FACTS[fact]);
+                }
+                match names.get(slot as usize) {
+                    Some(name) => format!("{name}={word:#x}"),
+                    None => format!("slot{slot}={word:#x}"),
+                }
             })
             .collect::<Vec<_>>()
             .join(", ")
     }
 
-    /// Slots that have held their value long enough to be baked, with those values.
+    fn is_certain(&self, slot: u32) -> bool {
+        self.certain.iter().any(|&(s, _)| s == slot)
+    }
+
+    /// The certain facts, and the slots that have held their value long enough to be
+    /// baked, with those values.
     fn bake_target(&self, slots: &[u32]) -> BakedSlots {
-        slots
+        let mut target: BakedSlots = slots
             .iter()
             .enumerate()
-            .filter(|&(s, _)| self.streak[s] >= self.bake_threshold[s])
+            .filter(|&(s, _)| self.streak[s] >= self.bake_threshold[s] && !self.is_certain(s as u32))
             .map(|(s, &word)| (s as u32, word))
-            .collect()
+            .collect();
+        target.extend_from_slice(&self.certain);
+        target.sort_unstable_by_key(|&(s, _)| s);
+        target
     }
 
     fn all_baked_still_hold(&self, baked: &[(u32, u32)], slots: &[u32]) -> bool {
-        baked.iter().all(|&(s, word)| slots[s as usize] == word)
+        baked
+            .iter()
+            .all(|&(s, word)| is_fact_slot(s) || slots[s as usize] == word)
     }
 
     fn all_baked_at_least(&self, baked: &[(u32, u32)], threshold: u32) -> bool {
-        baked.iter().all(|&(s, _)| self.streak[s as usize] >= threshold)
+        baked
+            .iter()
+            .all(|&(s, _)| is_fact_slot(s) || self.is_certain(s) || self.streak[s as usize] >= threshold)
     }
 
     fn burn_slot(&mut self, slot: usize, policy: &SpecializationPolicy) {
@@ -299,6 +375,9 @@ pub(crate) struct SchemePredictor {
     /// `GpuBackend::compute_pipeline_layout_follows_signature`, queried once.
     backend_supported: Option<bool>,
     events: SpecializationEvents,
+    /// Compiles started by this scheme's sites. A site warming a variant that is already
+    /// compiling joins that compile instead of starting its own.
+    inflight: Vec<std::sync::Weak<CompileJob>>,
 }
 
 impl SchemePredictor {
@@ -317,6 +396,7 @@ impl SchemePredictor {
             retiring: VecDeque::from(vec![Vec::new(), Vec::new()]),
             backend_supported: None,
             events: SpecializationEvents::default(),
+            inflight: Vec::new(),
         }
     }
 
@@ -327,8 +407,10 @@ impl SchemePredictor {
 
     /// Register (or re-register, after a caller-side pipeline swap) a dispatch site.
     ///
-    /// Sites without scalar params, or whose shader has no single `[goldy_compute]`
-    /// entry to scope bake macros to, are not tracked.
+    /// `certain` are facts that hold for the node's lifetime, in ascending slot order:
+    /// `#[fact]` scalar slots and tensor layout facts (see [`tensor_fact_slot`]). Sites
+    /// with neither scalar params nor certain facts, or whose shader has no single
+    /// `[goldy_compute]` entry to scope bake macros to, are not tracked.
     pub(crate) fn register_site(
         &mut self,
         node: u32,
@@ -336,11 +418,12 @@ impl SchemePredictor {
         provenance: &Arc<ShaderProvenance>,
         label: crate::SchemeLabel,
         slots: &[u32],
+        certain: &[(u32, u32)],
     ) {
         if let Some(old) = self.sites.remove(&node) {
             self.retire_site(old);
         }
-        if slots.is_empty() {
+        if slots.is_empty() && certain.is_empty() {
             return;
         }
         let Some(entry) = provenance.compute_entry() else {
@@ -352,9 +435,15 @@ impl SchemePredictor {
             entry.to_string(),
             label,
             slots,
+            certain,
             &self.policy,
         );
         self.sites.insert(node, site);
+    }
+
+    /// The certain facts `node` was registered with.
+    pub(crate) fn certain_facts(&self, node: u32) -> BakedSlots {
+        self.sites.get(&node).map(|s| s.certain.clone()).unwrap_or_default()
     }
 
     /// Re-register child's tracked dispatch sites at `map(child node)` in the parent IR;
@@ -370,11 +459,12 @@ impl SchemePredictor {
                     Arc::clone(&site.provenance),
                     site.label.clone(),
                     site.last.clone(),
+                    site.certain.clone(),
                 ))
             })
             .collect();
-        for (idx, universal, provenance, label, slots) in snapshot {
-            self.register_site(idx, universal, &provenance, label, &slots);
+        for (idx, universal, provenance, label, slots, certain) in snapshot {
+            self.register_site(idx, universal, &provenance, label, &slots, &certain);
         }
     }
 
@@ -413,6 +503,8 @@ impl SchemePredictor {
             return None;
         }
         let slot_id = slot as u32;
+        // A declared fact the caller changes is an ordinary param from now on.
+        site.certain.retain(|&(s, _)| s != slot_id);
         let mut burned = false;
         if site
             .job
@@ -482,6 +574,8 @@ impl SchemePredictor {
         }
         let policy = self.policy;
         let mut rebound = false;
+        self.inflight
+            .retain(|j| j.upgrade().is_some_and(|j| j.holders.load(Ordering::Acquire) > 0));
         let mut node_indices: Vec<u32> = self.sites.keys().copied().collect();
         node_indices.sort_unstable();
         for node in node_indices {
@@ -507,6 +601,7 @@ impl SchemePredictor {
                 device,
                 &self.variants,
                 &mut self.retiring,
+                &mut self.inflight,
                 &mut self.events,
                 &policy,
                 node,
@@ -531,7 +626,8 @@ impl SchemePredictor {
     pub(crate) fn wait_for_compiles(&mut self) {
         for site in self.sites.values_mut() {
             if let Some(job) = site.job.as_mut() {
-                if let Some(thread) = job.thread.take() {
+                let thread = job.job.thread.lock().unwrap().take();
+                if let Some(thread) = thread {
                     let _ = thread.join();
                 }
             }
@@ -612,6 +708,7 @@ impl SchemePredictor {
         device: &Runtime,
         variants: &Arc<Mutex<VariantCache>>,
         retiring: &mut VecDeque<Vec<Arc<ComputePipeline>>>,
+        inflight: &mut Vec<std::sync::Weak<CompileJob>>,
         events: &mut SpecializationEvents,
         policy: &SpecializationPolicy,
         node: u32,
@@ -626,7 +723,7 @@ impl SchemePredictor {
                 let baked = job.baked.clone();
                 site.job.take();
                 // `observe` already ran: a baked slot whose word moved has streak 0.
-                for (s, _) in baked {
+                for (s, _) in baked.into_iter().filter(|&(s, _)| !is_fact_slot(s)) {
                     if site.streak[s as usize] == 0 {
                         site.burn_slot(s as usize, policy);
                     }
@@ -720,30 +817,34 @@ impl SchemePredictor {
                         });
                     }
                     None => {
-                        events.warms += 1;
+                        let key = site.variant_key();
+                        let joined = inflight
+                            .iter()
+                            .filter_map(std::sync::Weak::upgrade)
+                            .find(|j| j.key == key && j.baked == target && j.outcome.lock().unwrap().is_none())
+                            .and_then(|j| WarmJob::attach(&j));
+                        let (job, action) = match joined {
+                            Some(job) => (job, "specialization: joining in-flight compile"),
+                            None => {
+                                events.warms += 1;
+                                let job = spawn_compile(device, site, target, variants);
+                                inflight.push(Arc::downgrade(&job.job));
+                                (job, "specialization: warming")
+                            }
+                        };
                         tracing::debug!(
                             node,
                             label = %site.label,
                             kernel = %site.kernel(),
-                            baked = %site.describe(&target),
-                            "specialization: warming"
+                            baked = %site.describe(&job.baked),
+                            "{action}"
                         );
-                        site.job = Some(spawn_compile(device, site, target, variants));
+                        site.job = Some(job);
                     }
                 }
             }
         }
         NodeChange::None
-    }
-}
-
-impl Drop for SchemePredictor {
-    fn drop(&mut self) {
-        for site in self.sites.values() {
-            if let Some(job) = site.job.as_ref() {
-                job.cancel();
-            }
-        }
     }
 }
 
@@ -754,70 +855,68 @@ fn spawn_compile(
     baked: BakedSlots,
     variants: &Arc<Mutex<VariantCache>>,
 ) -> WarmJob {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let outcome: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+    let job = Arc::new(CompileJob {
+        key: site.variant_key(),
+        baked: baked.clone(),
+        holders: AtomicUsize::new(1),
+        outcome: Mutex::new(None),
+        thread: Mutex::new(None),
+    });
 
     let device = device.clone();
     let provenance = Arc::clone(&site.provenance);
-    let key = site.variant_key();
     let entry = site.entry.clone();
     let label = site.label.clone();
     let variants = Arc::clone(variants);
-    let worker_cancel = Arc::clone(&cancel);
-    let worker_outcome = Arc::clone(&outcome);
-    let worker_baked = baked.clone();
+    let worker_job = Arc::clone(&job);
 
     let thread = std::thread::Builder::new()
         .name("goldy-specialize".into())
         .spawn(move || {
-            let result = compile_variant(&device, &provenance, &entry, &label, &worker_baked, &worker_cancel);
+            let job = worker_job;
+            let result = compile_variant(&device, &provenance, &entry, &label, &job.baked, &job.holders);
             let filed = match result {
                 Ok(Some(pipeline)) => {
-                    variants.lock().unwrap().insert(key, worker_baked, Arc::new(pipeline));
+                    variants
+                        .lock()
+                        .unwrap()
+                        .insert(job.key, job.baked.clone(), Arc::new(pipeline));
                     Ok(())
                 }
-                // Cancelled before it did any work: nothing to report, nothing to cache.
+                // Abandoned before it did any work: nothing to report, nothing to cache.
                 Ok(None) => return,
                 Err(err) => Err(err),
             };
-            *worker_outcome.lock().unwrap() = Some(filed);
+            *job.outcome.lock().unwrap() = Some(filed);
         });
 
-    let thread = match thread {
-        Ok(handle) => Some(handle),
-        Err(err) => {
-            *outcome.lock().unwrap() = Some(Err(format!("spawn specialization worker: {err}")));
-            None
-        }
-    };
-
-    WarmJob {
-        baked,
-        cancel,
-        outcome,
-        thread,
+    match thread {
+        Ok(handle) => *job.thread.lock().unwrap() = Some(handle),
+        Err(err) => *job.outcome.lock().unwrap() = Some(Err(format!("spawn specialization worker: {err}"))),
     }
+
+    WarmJob { baked, job }
 }
 
-/// `Ok(None)` when `cancel` was raised before the compile started.
+/// `Ok(None)` when every holder let go before the compile started.
 fn compile_variant(
     device: &Runtime,
     provenance: &ShaderProvenance,
     entry: &str,
     label: &crate::SchemeLabel,
     baked: &[(u32, u32)],
-    cancel: &AtomicBool,
+    holders: &AtomicUsize,
 ) -> Result<Option<ComputePipeline>, String> {
-    if cancel.load(Ordering::Relaxed) {
+    if holders.load(Ordering::Acquire) == 0 {
         return Ok(None);
     }
     let defines: Vec<(String, String)> = baked
         .iter()
-        .map(|&(slot, word)| (scalar_specialization_macro(entry, slot), format!("{word}u")))
+        .map(|&(slot, word)| (bake_macro(entry, slot), format!("{word}u")))
         .collect();
     let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    // Once Slang is running the cancel flag is advisory: the module compile cannot be
-    // aborted, but a result that arrives after cancellation is still worth caching.
+    // Once Slang is running, abandonment is advisory: the module compile cannot be
+    // aborted, but a result that arrives after every holder let go is still worth caching.
     let module = ShaderModule::from_provenance(device, provenance, &define_refs).map_err(|e| format!("{e:#}"))?;
     let pipeline =
         ComputePipeline::new_with_label(device, &module, Some(label.as_str())).map_err(|e| format!("{e:#}"))?;
@@ -871,6 +970,7 @@ mod tests {
             "k".into(),
             "t".into(),
             &[7, 9],
+            &[],
             &policy,
         );
         for _ in 0..2 {
@@ -887,5 +987,77 @@ mod tests {
         // Not-clean submits keep but do not advance a held slot.
         site.observe(&[7, 4], false);
         assert_eq!(site.streak, vec![3, 0]);
+    }
+
+    #[test]
+    fn certain_facts_skip_the_streak() {
+        let dev = crate::test_support::mock_runtime();
+        let shader = ShaderModule::from_slang(
+            &dev,
+            "[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(Scattered<uint> d, ThreadId id, uint a) { d[id.x] = a; }",
+        )
+        .unwrap();
+        let pipeline = ComputePipeline::new(&dev, &shader).unwrap();
+        let policy = SpecializationPolicy::default();
+        let numel = tensor_fact_slot(1, 1);
+        // A `#[fact]` scalar in slot 0, and two tensor layout facts.
+        let certain = vec![(0, 7), (tensor_fact_slot(0, 0), 1), (numel, 4096)];
+        let site = SitePredictor::new(
+            pipeline.handle,
+            Arc::clone(&pipeline.provenance),
+            "k".into(),
+            "t".into(),
+            &[7],
+            &certain,
+            &policy,
+        );
+        // Before any submit only the facts are bakeable, and they already count as proven.
+        assert_eq!(site.bake_target(&[7]), certain);
+        assert!(site.all_baked_at_least(&certain, policy.promote_after));
+        assert!(site.all_baked_still_hold(&certain, &[7]));
+        assert!(
+            !site.all_baked_still_hold(&certain, &[8]),
+            "a scalar fact is still checked"
+        );
+        assert_eq!(bake_macro("k", numel), goldy_shader_ir::tensor_fact_macro("k", 1, 1));
+        assert_eq!(site.describe(&[(numel, 16)]), "t1.numel=0x10");
+    }
+
+    #[test]
+    fn identical_warms_share_one_compile() {
+        let dev = crate::test_support::mock_runtime();
+        let shader = ShaderModule::from_slang(
+            &dev,
+            "[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(Scattered<uint> d, ThreadId id, uint a) { d[id.x] = a; }",
+        )
+        .unwrap();
+        let pipeline = ComputePipeline::new(&dev, &shader).unwrap();
+        let policy = SpecializationPolicy::default();
+        let site = SitePredictor::new(
+            pipeline.handle,
+            Arc::clone(&pipeline.provenance),
+            "k".into(),
+            "t".into(),
+            &[7],
+            &[],
+            &policy,
+        );
+        let variants = Arc::new(Mutex::new(VariantCache {
+            entries: VecDeque::new(),
+            capacity: 4,
+        }));
+        let first = spawn_compile(&dev, &site, vec![(0, 7)], &variants);
+        let second = WarmJob::attach(&first.job).expect("first still holds the compile");
+        assert!(Arc::ptr_eq(&first.job, &second.job));
+        assert_eq!(first.job.holders.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(second.job.holders.load(Ordering::Acquire), 1);
+        let thread = second.job.thread.lock().unwrap().take();
+        thread.expect("worker spawned").join().unwrap();
+        assert_eq!(second.poll(), Some(Ok(())));
+        assert_eq!(variants.lock().unwrap().len(), 1);
+        let job = Arc::clone(&second.job);
+        drop(second);
+        assert!(WarmJob::attach(&job).is_none(), "nobody holds it any more");
     }
 }

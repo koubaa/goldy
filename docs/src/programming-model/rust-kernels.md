@@ -55,6 +55,12 @@ Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`
 | `gpu::Uniform<T>` | broadcast resource, `NodeAccess::Read` |
 | `gpu::DirectSpatial<gpu::Float4>` | `DirectSpatial<float4>`, `NodeAccess::Write` (swapchain lease or texture) |
 | `u32` / `i32` / `f32` / `bool` | typed scalar push words (no manual `to_bits`) |
+| `#[fact] u32` (any scalar) | the same push word, fixed at record time and baked at the first submit |
+
+Mark a scalar `#[fact]` when the recording site fixes it for the node's lifetime, such as
+an op code or an axis. Its site then skips the specializer's streak and bakes the value at
+the first submit (see [shader specialization](../design/shader-specialization.md)).
+`set_node_param` still works on it; the site demotes and treats the slot as ordinary.
 
 Hidden builtins (appended to the Slang signature when used):
 
@@ -139,9 +145,14 @@ Relationships that are not dimension equality — for example query-head /
 KV-head divisibility — stay explicit kernel or domain checks, not part of this
 DSL.
 
-Goldy only has eight user scalar words, so layouts are **not** push constants.
 The metadata parcel is interned on the scheme, read-only in GraphIR, and does
-not need an external `TensorKernels` keepalive.
+not need an external `TensorKernels` keepalive. It is the universal program's
+source of layouts. Each tensor's element offset also travels as a launch word
+beyond the eight user scalars: `PushLayout` region C on DX12, Vulkan and Metal,
+or a trailing kernel argument on CUDA, for the first 13 tensors. The shape facts
+(rank, extents, strides, contiguity) are certain specialization facts. A node's
+first submit warms a variant with them baked, and the promoted program loads no
+layout at all. Sites that differ only in offsets share that variant.
 
 ## Architecture
 

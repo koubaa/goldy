@@ -9,8 +9,8 @@
 use goldy::types::BackendType;
 use goldy::{
     test_support, BufferKind, Color, ComputePipeline, DepositTarget, Instance, MemoryExchange, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule,
-    TargetLoad, TextureFlags, TextureFormat, TextureKind, Vertex2D,
+    RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, RuntimeDescriptor, Scheme, ShaderModule, TargetLoad,
+    TextureFlags, TextureFormat, TextureKind, Vertex2D,
 };
 use std::sync::Arc;
 

@@ -453,7 +453,7 @@ mod tests {
         let renamed = k.rename_symbols(|name, _| format!("p_{name}"));
         let slang = emit_canonical_compute_source(&renamed).source.canonical_slang;
         assert!(
-            slang.contains("p_dst[goldy_tensor_offset(_goldy_tensor_meta[1u], 0u)] = _goldy_tensor_meta[0u].numel;"),
+            slang.contains("p_dst[goldy_tensor_offset(_goldy_t1, 0u)] = _goldy_t0.numel;"),
             "{slang}"
         );
     }

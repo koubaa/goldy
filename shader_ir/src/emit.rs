@@ -1,8 +1,9 @@
 //! Emit canonical `[goldy_compute]` Slang from a lowered [`ShaderKernel`].
 
 use crate::{
-    BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam, MatrixOp, ShaderKernel, SourceMap, Stmt, UnaryOp,
-    WorkgroupReduceOp, MATRIX_TILE, TENSOR_LAYOUT_SLANG, TENSOR_META_PARAM,
+    tensor_fact_macro, tensor_offset_macro, BinOp, BuiltinFn, BuiltinMask, Expr, KernelDef, KernelParam, MatrixOp,
+    ShaderKernel, SourceMap, Stmt, UnaryOp, WorkgroupReduceOp, MATRIX_TILE, TENSOR_FACTS, TENSOR_LAYOUT_SLANG,
+    TENSOR_META_PARAM,
 };
 use std::collections::HashMap;
 
@@ -60,6 +61,24 @@ uint goldy_tensor_dim(GoldyTensorLayout L, uint axis) {
     return L.d3;
 }
 
+GoldyTensorLayout goldy_tensor_layout(uint off, uint rank, uint numel, uint d0, uint d1, uint d2, uint d3,
+                                      uint s0, uint s1, uint s2, uint s3, uint flags) {
+    GoldyTensorLayout L;
+    L.off = off;
+    L.rank = rank;
+    L.numel = numel;
+    L.d0 = d0;
+    L.d1 = d1;
+    L.d2 = d2;
+    L.d3 = d3;
+    L.s0 = s0;
+    L.s1 = s1;
+    L.s2 = s2;
+    L.s3 = s3;
+    L.flags = flags;
+    return L;
+}
+
 "#;
 
 /// Entry-point name of every generated virtual compute entry.
@@ -81,8 +100,9 @@ pub struct TensorSlot {
 }
 
 impl TensorSlot {
+    /// Entry-scope local holding the slot's layout, declared by [`assemble_virtual_entry`].
     fn layout(self) -> String {
-        format!("{TENSOR_META_PARAM}[{}u]", self.slot)
+        format!("_goldy_t{}", self.slot)
     }
 
     /// Parent-buffer element of logical index `index`.
@@ -229,7 +249,15 @@ pub fn assemble_virtual_entry(sig: &VirtualEntrySignature, body: &LoweredBody) -
         types.push_str(decl);
         types.push('\n');
     }
-    let layout = if has_tensors { TENSOR_LAYOUT_SLANG_PREAMBLE } else { "" };
+    let tensor_count = sig.params.iter().filter(|p| p.is_tensor).count() as u32;
+    let mut layout = String::new();
+    let mut stmts = String::new();
+    if has_tensors {
+        layout.push_str(TENSOR_LAYOUT_SLANG_PREAMBLE);
+        layout.push_str(&tensor_layout_macros(entry, tensor_count));
+        stmts.push_str(&tensor_layout_locals(entry, tensor_count));
+    }
+    stmts.push_str(&body.stmts);
     let mut shared = body.workgroup_decls.clone();
     if !shared.is_empty() {
         shared.push('\n');
@@ -237,7 +265,6 @@ pub fn assemble_virtual_entry(sig: &VirtualEntrySignature, body: &LoweredBody) -
     let functions = &body.functions;
     let [wx, wy, wz] = sig.workgroup_size;
     let sig_text = sig_parts.join(", ");
-    let stmts = &body.stmts;
     let canonical = format!(
         "{types}\
          import goldy_exp;\n\n\
@@ -258,6 +285,42 @@ pub fn assemble_virtual_entry(sig: &VirtualEntrySignature, body: &LoweredBody) -
         sig.builtins,
         sig.source_map.clone(),
     )
+}
+
+/// Default every layout field of `count` tensor slots to the metadata parcel.
+///
+/// A virtual-main wrapper may define the offset macros first, and a specialized
+/// variant defines the fact macros to literals.
+fn tensor_layout_macros(entry: &str, count: u32) -> String {
+    let mut out = String::new();
+    let mut default = |name: String, field: &str, slot: u32| {
+        out.push_str(&format!(
+            "#ifndef {name}\n#define {name} {TENSOR_META_PARAM}[{slot}u].{field}\n#endif\n"
+        ));
+    };
+    for slot in 0..count {
+        default(tensor_offset_macro(slot), "off", slot);
+        for (fact, field) in TENSOR_FACTS.iter().enumerate() {
+            default(tensor_fact_macro(entry, slot, fact), field, slot);
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// Entry-scope layout locals that [`TensorSlot`] indexing reads.
+fn tensor_layout_locals(entry: &str, count: u32) -> String {
+    let mut out = String::new();
+    for slot in 0..count {
+        let mut fields = vec![tensor_offset_macro(slot)];
+        fields.extend((0..TENSOR_FACTS.len()).map(|fact| tensor_fact_macro(entry, slot, fact)));
+        out.push_str(&format!(
+            "    {TENSOR_LAYOUT_SLANG} {} = goldy_tensor_layout({});\n",
+            TensorSlot { slot, rank: None }.layout(),
+            fields.join(", ")
+        ));
+    }
+    out
 }
 
 /// Lower one definition to its standalone canonical compute source (still marked `[goldy_compute]`).
@@ -1053,10 +1116,27 @@ mod tests {
         let slang = &def.source.canonical_slang;
         assert!(slang.contains("struct GoldyTensorLayout"));
         assert!(slang.contains("BufRO<GoldyTensorLayout> _goldy_tensor_meta"));
-        assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
-        assert!(slang.contains("goldy_tensor_offset(_goldy_tensor_meta[1u]"));
-        assert!(slang.contains("_goldy_tensor_meta[1u].numel"));
-        assert!(slang.contains("goldy_tensor_dim(_goldy_tensor_meta[0u], 1u)"));
+        assert!(slang
+            .contains("#ifndef _GOLDY_TENSOR_OFF1\n#define _GOLDY_TENSOR_OFF1 _goldy_tensor_meta[1u].off\n#endif\n"));
+        assert!(slang.contains(
+            "#ifndef _GOLDY_SPEC_CS_MAIN_T0_D1\n#define _GOLDY_SPEC_CS_MAIN_T0_D1 _goldy_tensor_meta[0u].d1\n#endif\n"
+        ));
+        assert!(slang.contains(
+            "    GoldyTensorLayout _goldy_t0 = goldy_tensor_layout(_GOLDY_TENSOR_OFF0, _GOLDY_SPEC_CS_MAIN_T0_RANK, \
+             _GOLDY_SPEC_CS_MAIN_T0_NUMEL, _GOLDY_SPEC_CS_MAIN_T0_D0, _GOLDY_SPEC_CS_MAIN_T0_D1, \
+             _GOLDY_SPEC_CS_MAIN_T0_D2, _GOLDY_SPEC_CS_MAIN_T0_D3, _GOLDY_SPEC_CS_MAIN_T0_S0, \
+             _GOLDY_SPEC_CS_MAIN_T0_S1, _GOLDY_SPEC_CS_MAIN_T0_S2, _GOLDY_SPEC_CS_MAIN_T0_S3, \
+             _GOLDY_SPEC_CS_MAIN_T0_FLAGS);\n    GoldyTensorLayout _goldy_t1 = "
+        ));
+        assert!(slang.contains("goldy_tensor_offset(_goldy_t0, "));
+        assert!(slang.contains("y[goldy_tensor_offset(_goldy_t1, i)]"));
+        assert!(slang.contains("(i < _goldy_t1.numel)"));
+        assert!(slang.contains("goldy_tensor_dim(_goldy_t0, 1u)"));
+        let body = slang.split("void cs_main(").nth(1).expect("entry");
+        assert!(
+            !body.contains("_goldy_tensor_meta["),
+            "the body reads the parcel only through the macros"
+        );
         assert_eq!(def.params.len(), 3);
         assert!(def.params[0].is_tensor);
         assert!(def.params[1].is_tensor);
@@ -1071,9 +1151,9 @@ mod tests {
         contracted.params[0].shape_spec = Some(spec(2));
         contracted.params[1].shape_spec = Some(spec(1));
         let slang = emit_canonical_compute_source(&contracted).source.canonical_slang;
-        assert!(slang.contains("x[goldy_tensor_offset2(_goldy_tensor_meta[0u], "));
-        assert!(slang.contains("y[goldy_tensor_offset1(_goldy_tensor_meta[1u], i)]"));
-        assert!(!slang.contains("goldy_tensor_offset(_goldy_tensor_meta"));
+        assert!(slang.contains("x[goldy_tensor_offset2(_goldy_t0, "));
+        assert!(slang.contains("y[goldy_tensor_offset1(_goldy_t1, i)]"));
+        assert!(!slang.contains("goldy_tensor_offset(_goldy_t"));
     }
 
     /// `fn name(input: &[f32], output: Scattered<f32>, count: u32) { let i = gid.x; if i < count { output[i] = input[i] <op> k; } }`
