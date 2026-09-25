@@ -172,7 +172,6 @@ struct CompileJob {
     holders: AtomicUsize,
     /// `None` while running; `Some(Ok)` once the variant is in the cache.
     outcome: Mutex<Option<Result<(), String>>>,
-    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// A site's hold on a [`CompileJob`].
@@ -420,6 +419,9 @@ pub(crate) struct SchemePredictor {
     /// Compiles started by this scheme's sites. A site warming a variant that is already
     /// compiling joins that compile instead of starting its own.
     inflight: Vec<std::sync::Weak<CompileJob>>,
+    /// Every compile thread this scheme started that may still be running, whether or
+    /// not a site still holds its job.
+    workers: Vec<std::thread::JoinHandle<()>>,
     /// Submits begun so far.
     now: u64,
     /// Sites the next submit must step: new, changed, or due.
@@ -429,6 +431,14 @@ pub(crate) struct SchemePredictor {
     wake: BinaryHeap<Reverse<(u64, u32)>>,
     /// Whether the previous submit ran with prediction enabled.
     was_enabled: bool,
+}
+
+impl Drop for SchemePredictor {
+    /// A compile outliving its scheme can still be inside Slang when the process exits,
+    /// racing the library's static destructors.
+    fn drop(&mut self) {
+        self.wait_for_compiles();
+    }
 }
 
 impl SchemePredictor {
@@ -448,6 +458,7 @@ impl SchemePredictor {
             backend_supported: None,
             events: SpecializationEvents::default(),
             inflight: Vec::new(),
+            workers: Vec::new(),
             now: 0,
             awake: BTreeSet::new(),
             wake: BinaryHeap::new(),
@@ -651,6 +662,7 @@ impl SchemePredictor {
         let mut rebound = false;
         self.inflight
             .retain(|j| j.upgrade().is_some_and(|j| j.holders.load(Ordering::Acquire) > 0));
+        self.workers.retain(|w| !w.is_finished());
         for node in std::mem::take(&mut self.awake) {
             let Some(site) = self.sites.get_mut(&node) else {
                 continue;
@@ -673,6 +685,7 @@ impl SchemePredictor {
                 &self.variants,
                 &mut self.retiring,
                 &mut self.inflight,
+                &mut self.workers,
                 &mut self.events,
                 &policy,
                 node,
@@ -700,15 +713,10 @@ impl SchemePredictor {
         self.sites.values().any(|s| s.job.is_some() || s.ready.is_some())
     }
 
-    /// Join every in-flight compile (tests).
+    /// Join every compile this scheme started.
     pub(crate) fn wait_for_compiles(&mut self) {
-        for site in self.sites.values_mut() {
-            if let Some(job) = site.job.as_mut() {
-                let thread = job.job.thread.lock().unwrap().take();
-                if let Some(thread) = thread {
-                    let _ = thread.join();
-                }
-            }
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
         }
     }
 
@@ -798,6 +806,7 @@ impl SchemePredictor {
         variants: &Arc<Mutex<VariantCache>>,
         retiring: &mut VecDeque<Vec<Arc<ComputePipeline>>>,
         inflight: &mut Vec<std::sync::Weak<CompileJob>>,
+        workers: &mut Vec<std::thread::JoinHandle<()>>,
         events: &mut SpecializationEvents,
         policy: &SpecializationPolicy,
         node: u32,
@@ -929,7 +938,7 @@ impl SchemePredictor {
                             Some(job) => (job, "specialization: joining in-flight compile"),
                             None => {
                                 events.warms += 1;
-                                let job = spawn_compile(device, site, target, variants);
+                                let job = spawn_compile(device, site, target, variants, workers);
                                 inflight.push(Arc::downgrade(&job.job));
                                 (job, "specialization: warming")
                             }
@@ -956,13 +965,13 @@ fn spawn_compile(
     site: &SitePredictor,
     baked: BakedSlots,
     variants: &Arc<Mutex<VariantCache>>,
+    workers: &mut Vec<std::thread::JoinHandle<()>>,
 ) -> WarmJob {
     let job = Arc::new(CompileJob {
         key: site.variant_key(),
         baked: baked.clone(),
         holders: AtomicUsize::new(1),
         outcome: Mutex::new(None),
-        thread: Mutex::new(None),
     });
 
     let device = device.clone();
@@ -993,7 +1002,7 @@ fn spawn_compile(
         });
 
     match thread {
-        Ok(handle) => *job.thread.lock().unwrap() = Some(handle),
+        Ok(handle) => workers.push(handle),
         Err(err) => *job.outcome.lock().unwrap() = Some(Err(format!("spawn specialization worker: {err}"))),
     }
 
@@ -1142,14 +1151,14 @@ mod tests {
             entries: VecDeque::new(),
             capacity: 4,
         }));
-        let first = spawn_compile(&dev, &site, vec![(0, 7)], &variants);
+        let mut workers = Vec::new();
+        let first = spawn_compile(&dev, &site, vec![(0, 7)], &variants, &mut workers);
         let second = WarmJob::attach(&first.job).expect("first still holds the compile");
         assert!(Arc::ptr_eq(&first.job, &second.job));
         assert_eq!(first.job.holders.load(Ordering::Acquire), 2);
         drop(first);
         assert_eq!(second.job.holders.load(Ordering::Acquire), 1);
-        let thread = second.job.thread.lock().unwrap().take();
-        thread.expect("worker spawned").join().unwrap();
+        workers.pop().expect("worker spawned").join().unwrap();
         assert_eq!(second.poll(), Some(Ok(())));
         assert_eq!(variants.lock().unwrap().len(), 1);
         let job = Arc::clone(&second.job);
