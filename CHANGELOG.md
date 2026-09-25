@@ -108,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   views set `FLAG_CONTIGUOUS`, and `goldy_tensor_offset` returns `offset + i`
   without per-axis div/mod.
 
+- **Rank-specialized tensor indexing** — a tensor parameter whose shape contract fixes
+  rank 1, 2 or 3 indexes through a helper for that rank. Rank 1 is `offset + i * stride`
+  with no contiguity test, and ranks 2 and 3 delinearize only their own axes. On CUDA,
+  Ammon's RMSNorm falls from 2.75 µs to 2.24 µs.
+
 - **Breaking:** `KernelDef` gains a `definition` field and no longer implements `Eq`
   (`PartialEq` remains). Hand-authored and parsed Slang set it to `None`.
 

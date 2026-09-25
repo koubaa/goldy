@@ -185,7 +185,8 @@ impl fmt::Display for TensorDimSpec {
 
 /// Rank-fixing tensor shape contract (`[vocab, dim]`, `[4, _]`, …).
 ///
-/// Host-only: shader parameter order and the 48-byte GPU layout are unchanged.
+/// Shader parameter order and the 48-byte GPU layout are unchanged. The emitter uses
+/// the fixed rank to pick a rank-specialized indexing helper.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TensorShapeSpec {
     pub dims: Vec<TensorDimSpec>,

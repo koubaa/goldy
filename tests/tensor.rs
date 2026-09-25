@@ -7,7 +7,7 @@ mod submission;
 
 use goldy::{
     BufferKind, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorDType,
-    TensorKernels, TensorScalar, TensorShape, TensorView,
+    TensorKernels, TensorLayout, TensorScalar, TensorShape, TensorView,
 };
 use std::sync::Mutex;
 
@@ -61,6 +61,17 @@ fn copy_exact4(
 fn copy_wildcard_cols(
     #[tensor(shape = [_, n])] src: goldy::gpu::Tensor<f32>,
     #[tensor(shape = [_, n])] dst: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn copy_rank3(
+    #[tensor(shape = [a, b, c])] src: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [a, b, c])] dst: goldy::gpu::TensorWrite<f32>,
 ) {
     let i = goldy::gpu::global_id().x;
     if i < dst.len() {
@@ -423,6 +434,81 @@ fn tensor_shape_contract_accepts_matching_and_strided_views() {
         "contracted tensor kernel should retain, stats={:?}",
         scheme.replay_stats()
     );
+}
+
+#[test]
+fn tensor_shape_contract_lowers_each_rank() {
+    assert!(copy_eq::CANONICAL_SOURCE.contains("goldy_tensor_offset1(_goldy_tensor_meta[0u]"));
+    assert!(copy_wildcard_cols::CANONICAL_SOURCE.contains("goldy_tensor_offset2(_goldy_tensor_meta[0u]"));
+    assert!(copy_rank3::CANONICAL_SOURCE.contains("goldy_tensor_offset3(_goldy_tensor_meta[0u]"));
+    assert!(copy_view::CANONICAL_SOURCE.contains("goldy_tensor_offset(_goldy_tensor_meta[0u]"));
+}
+
+/// Each contracted rank reads non-contiguous views: a strided column and a broadcast at
+/// rank 1, a transpose at rank 2, and a permutation at rank 3.
+#[test]
+fn tensor_shape_contract_reads_strided_views_at_each_rank() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let values: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let parent = Tensor::from_f32(&device, TensorShape::from_dims(&[2, 3, 4]).unwrap(), &values).unwrap();
+
+    let rank1 = copy_eq::Kernel::prepare(&device).unwrap();
+    let column = TensorLayout::strided(TensorDType::F32, TensorShape::vector(3), 1, &[4]).unwrap();
+    let column = TensorView::new(parent.buffer(), column).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    rank1
+        .record(&mut scheme, "column", column, dst.view())
+        .unwrap()
+        .over_1d(3);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![1.0, 5.0, 9.0]);
+
+    let one = TensorLayout::packed(TensorDType::F32, TensorShape::vector(1), 15).unwrap();
+    let bcast = TensorView::new(parent.buffer(), one)
+        .unwrap()
+        .broadcast_to(TensorShape::vector(3))
+        .unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    rank1
+        .record(&mut scheme, "bcast", bcast, dst.view())
+        .unwrap()
+        .over_1d(3);
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), vec![15.0, 15.0, 15.0]);
+
+    let rank2 = copy_wildcard_cols::Kernel::prepare(&device).unwrap();
+    let plane = parent
+        .view()
+        .narrow(0, 1, 1)
+        .unwrap()
+        .reshape(&[3, 4])
+        .unwrap()
+        .transpose()
+        .unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::matrix(4, 3), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    rank2
+        .record(&mut scheme, "transpose", plane, dst.view())
+        .unwrap()
+        .over_1d(12);
+    let expected: Vec<f32> = (0..4)
+        .flat_map(|c| (0..3).map(move |r| (12 + r * 4 + c) as f32))
+        .collect();
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), expected);
+
+    let rank3 = copy_rank3::Kernel::prepare(&device).unwrap();
+    let permuted = parent.view().permute(&[2, 0, 1]).unwrap();
+    let dst = Tensor::zeros(&device, TensorShape::from_dims(&[4, 2, 3]).unwrap(), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    rank3
+        .record(&mut scheme, "permute", permuted, dst.view())
+        .unwrap()
+        .over_1d(24);
+    let expected: Vec<f32> = (0..4)
+        .flat_map(|k| (0..2).flat_map(move |i| (0..3).map(move |j| (i * 12 + j * 4 + k) as f32)))
+        .collect();
+    assert_eq!(read_f32(&mut scheme, dst.buffer()), expected);
 }
 
 #[test]

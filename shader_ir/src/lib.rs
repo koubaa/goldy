@@ -23,7 +23,7 @@ mod symbols;
 pub use abi::*;
 pub use emit::{
     assemble_virtual_entry, emit_canonical_compute_source, emit_user_helper_body, lower_body, tensor_slot_map, BodyEnv,
-    LoweredBody, VirtualEntrySignature, SUBGROUP_WIDTH_DEFINE, VIRTUAL_ENTRY_NAME,
+    LoweredBody, TensorSlot, TensorSlots, VirtualEntrySignature, SUBGROUP_WIDTH_DEFINE, VIRTUAL_ENTRY_NAME,
 };
 pub use fuse::{
     compose, FusedDefinition, FusedStage, FusionLimits, FusionRejection, FusionStage, ScalarOrigin, FUSION_ABI_VERSION,
