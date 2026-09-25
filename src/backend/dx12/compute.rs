@@ -1015,6 +1015,9 @@ struct CmdCtx<'a> {
     current_compute_pipeline: Option<ComputePipelineHandle>,
     current_rt: Option<RayTracingPipelineHandle>,
     pending_deletions: Vec<super::types::PendingDeletion>,
+    /// The list is retained for replay, so it may not reference a resource in
+    /// `pending_deletions`: those are freed once its first execution completes.
+    retained: bool,
     /// Frame table row chosen at prologue record time (stable under concurrent submits).
     frame_table_row: Option<u32>,
     /// CPU `pGeometryDescs` must remain valid until `Close()` (DXR spec).
@@ -1265,7 +1268,12 @@ fn record_gpu_command(
             };
             let arg_data = &arg_data;
 
-            if let Some(batch_sig) = logical_device.compute_batch_dispatch_signature.clone() {
+            // The argument buffer is a pending deletion, which a retained list outlives.
+            let batch_sig = logical_device
+                .compute_batch_dispatch_signature
+                .clone()
+                .filter(|_| !ctx.retained);
+            if let Some(batch_sig) = batch_sig {
                 let buf_size = arg_data.len() as u64;
                 let arg_buf_desc = D3D12_RESOURCE_DESC {
                     Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -2550,6 +2558,7 @@ pub(super) fn submit_with_scope(
             current_compute_pipeline: None,
             current_rt: None,
             pending_deletions: Vec::new(),
+            retained: false,
             frame_table_row: None,
             rt_geom_descs: Vec::new(),
         };
@@ -2851,6 +2860,7 @@ pub(super) fn submit_graph_with_scope(
             current_compute_pipeline: None,
             current_rt: None,
             pending_deletions: Vec::new(),
+            retained: retain_key.is_some(),
             frame_table_row: None,
             rt_geom_descs: Vec::new(),
         };
