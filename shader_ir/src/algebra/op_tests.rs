@@ -375,6 +375,34 @@ fn an_operation_ending_in_a_product_rounds_it_for_its_readers() {
 }
 
 #[test]
+fn a_rounded_quotient_stays_a_division() {
+    let m = 9;
+    let mut graph = Graph::new();
+    graph
+        .push(map(
+            &[("x", 0)],
+            ("mean", 1),
+            m,
+            Term::unary(UnaryOp::Round, Term::arg(0) / Term::lit(3.0)),
+        ))
+        .unwrap();
+    graph
+        .push(map(&[("mean", 1)], ("out", 2), m, Term::arg(0) / Term::lit(7.0)))
+        .unwrap();
+    assert_sequential(
+        &graph,
+        &env(&[(0, data(1, m)), (1, vec![0.0; m as usize]), (2, vec![0.0; m as usize])]),
+    );
+    let slang = source(&lower(graph.region(), &[]).unwrap());
+    // Only the rounded quotient is protected from becoming a multiply by 1/3; a
+    // division the source wrote with a constant divisor lowers as written.
+    assert!(
+        slang.contains("(goldy_exact_div(p0[((uint)c3)], 3.0) / 7.0)"),
+        "{slang}"
+    );
+}
+
+#[test]
 fn sequential_siblings_share_a_loop() {
     let (m, k) = (6, 50);
     let sequential = |names, parcels| {

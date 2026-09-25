@@ -461,6 +461,10 @@ impl<'a> Lift<'a> {
                     UnaryOp::Round,
                     Term::binary(BinaryOp::Mul, self.expr(a)?, self.expr(b)?),
                 ),
+                (BuiltinFn::ExactDiv, [a, b]) => Term::unary(
+                    UnaryOp::Round,
+                    Term::binary(BinaryOp::Div, self.expr(a)?, self.expr(b)?),
+                ),
                 (f, [a]) => {
                     let op = match f {
                         BuiltinFn::Abs => UnaryOp::Abs,

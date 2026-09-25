@@ -115,9 +115,14 @@ pub(crate) fn binary(op: u32, a: TensorView<'_>, b: TensorView<'_>, out: TensorV
 pub(crate) fn reduce(op: u32, src: TensorView<'_>, axis: usize, out: TensorView<'_>) -> Option<SemanticSite> {
     let len = *dims(src)?.get(axis)?;
     // The kernel folds from its own starting accumulator, which bounds the reduction.
+    // It divides a mean by the length it reads at run time, which the device cannot
+    // turn into a multiply by the reciprocal; rounding keeps the constant a divisor.
     let (op, finish) = match op {
         OP_SUM => (ReduceOp::Sum, Term::arg(0)),
-        OP_MEAN => (ReduceOp::Sum, Term::arg(0) / Term::lit(len as f32)),
+        OP_MEAN => (
+            ReduceOp::Sum,
+            Term::unary(UnaryOp::Round, Term::arg(0) / Term::lit(len as f32)),
+        ),
         OP_RMAX => (ReduceOp::Max, Term::lit(REDUCE_MAX_START).max(Term::arg(0))),
         OP_RMIN => (ReduceOp::Min, Term::lit(-REDUCE_MAX_START).min(Term::arg(0))),
         _ => return None,
