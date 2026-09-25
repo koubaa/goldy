@@ -72,6 +72,7 @@ const TENSOR_FACT_STRIDE: u32 = 16;
 const _: () = assert!(goldy_shader_ir::TENSOR_FACTS.len() <= TENSOR_FACT_STRIDE as usize);
 
 /// Slot id of layout field `TENSOR_FACTS[fact]` of tensor slot `tensor`.
+#[cfg(any(feature = "tensor", test))]
 pub(crate) fn tensor_fact_slot(tensor: u32, fact: usize) -> u32 {
     TENSOR_FACT_SLOT_BASE + tensor * TENSOR_FACT_STRIDE + fact as u32
 }
