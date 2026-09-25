@@ -413,6 +413,14 @@ pub(crate) struct FusionPlanner {
     cost: FusionCostModel,
 }
 
+impl Drop for FusionPlanner {
+    /// A compile outliving its scheme can still be inside Slang when the process exits,
+    /// racing the library's static destructors.
+    fn drop(&mut self) {
+        self.wait_for_compiles();
+    }
+}
+
 impl FusionPlanner {
     pub(crate) fn new() -> Self {
         Self {
@@ -500,12 +508,12 @@ impl FusionPlanner {
         }
     }
 
-    /// Join every in-flight fused compile (tests).
     /// Whether planned regions are compiling and not yet promoted.
     pub(crate) fn is_compiling(&self) -> bool {
         self.phase == Phase::Compiling
     }
 
+    /// Join every in-flight fused compile.
     pub(crate) fn wait_for_compiles(&mut self) {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
