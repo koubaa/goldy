@@ -530,8 +530,10 @@ impl FusionPlanner {
                 self.phase = Phase::Settled;
                 return None;
             }
-            self.request_compiles(device);
             self.phase = Phase::Compiling;
+            if self.request_compiles(device) {
+                return None;
+            }
         }
         if self.phase != Phase::Compiling {
             return None;
@@ -779,8 +781,11 @@ impl FusionPlanner {
         taken
     }
 
-    fn request_compiles(&mut self, device: &Runtime) {
+    /// Starts a compile for each region without a cached outcome; returns whether it
+    /// started any. The submit that starts one runs unfused however fast it finishes.
+    fn request_compiles(&mut self, device: &Runtime) -> bool {
         let fault = crate::validation_env::fusion_compile_fault();
+        let mut started = false;
         for region in &self.regions {
             {
                 let mut compiles = self.compiles.lock().unwrap();
@@ -788,6 +793,7 @@ impl FusionPlanner {
                     continue;
                 }
             }
+            started = true;
             let (forwarded, elided) = region.program.locality();
             tracing::debug!(
                 kernel = %region.program.name(),
@@ -821,6 +827,7 @@ impl FusionPlanner {
                 }
             }
         }
+        started
     }
 
     pub(crate) fn report(&self, ir: &GraphIR, node_id: impl Fn(usize) -> NodeId) -> FusionReport {
