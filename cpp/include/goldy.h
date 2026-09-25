@@ -258,7 +258,7 @@ typedef struct GoldySurfaceExchange GoldySurfaceExchange;
 // Opaque owned tensor.
 typedef struct GoldyTensor GoldyTensor;
 
-// Prepared portable tensor kernels for one runtime.
+// Prepared tensor kernels. Layout parcels intern onto recorded schemes.
 typedef struct GoldyTensorKernels GoldyTensorKernels;
 
 // Opaque handle to an acquired [`goldy::Texture`].
@@ -1069,10 +1069,6 @@ struct GoldyTensor *goldy_tensor_add(struct GoldyTensorKernels *ctx,
                                      const struct GoldyTensor *a,
                                      const struct GoldyTensor *b);
 
-struct GoldyTensorKernels *goldy_tensor_kernels_create(struct GoldyRuntime *runtime);
-
-void goldy_tensor_kernels_destroy(struct GoldyTensorKernels *ctx);
-
 void goldy_tensor_destroy(struct GoldyTensor *tensor);
 
 enum GoldyTensorDType goldy_tensor_dtype(const struct GoldyTensor *tensor);
@@ -1082,6 +1078,10 @@ enum GoldyResult goldy_tensor_fill_f32(struct GoldyTensorKernels *ctx,
                                        const char *label,
                                        struct GoldyTensor *tensor,
                                        float value);
+
+struct GoldyTensorKernels *goldy_tensor_kernels_create(struct GoldyRuntime *runtime);
+
+void goldy_tensor_kernels_destroy(struct GoldyTensorKernels *ctx);
 
 struct GoldyTensor *goldy_tensor_matmul(struct GoldyTensorKernels *ctx,
                                         struct GoldyScheme *scheme,

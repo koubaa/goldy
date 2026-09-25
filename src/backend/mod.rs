@@ -76,28 +76,6 @@ use crate::types::{DepthFormat, DepthStencilState, PresentMode, PrimitiveTopolog
 use anyhow::Result;
 use std::sync::Arc;
 
-/// When set via `GOLDY_VALIDATION` (e.g. `api` or `all` in the token list), or loader
-/// `VK_INSTANCE_LAYERS`, enables backend-specific GPU validation where supported:
-/// Vulkan enables `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` at instance creation;
-/// Metal sets `MTL_SHADER_VALIDATION=1` before the first device is created if that variable is unset;
-/// CUDA enables Driver diagnostics (PTX JIT logs, eager sync, launch-limit checks) and may set
-/// `CUDA_LAUNCH_BLOCKING=1` when unset;
-/// WebGPU enables wgpu validation error scopes (shader/PSO create, and bind groups) when this is set.
-///
-/// See the `validation_env` module for the full `GOLDY_VALIDATION` list syntax (`layout`, `api`, `all`, …).
-///
-/// For Vulkan, validation is also enabled when `VK_INSTANCE_LAYERS` includes
-/// `VK_LAYER_KHRONOS_validation` (loader-driven workflow; see Vulkan backend `new()`).
-#[cfg(any(
-    feature = "vulkan",
-    feature = "cuda",
-    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
-))]
-#[must_use]
-pub(crate) fn goldy_validation_enabled() -> bool {
-    crate::validation_env::gpu_api_validation_enabled()
-}
-
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -109,11 +87,11 @@ use crate::types::ResourceCategory;
 #[cfg(all(feature = "dx12", target_os = "windows"))]
 use crate::types::BindlessSlotKind;
 
-/// Gate for dispatch paths: run `f` only when layout validation is enabled.
+/// Gate for dispatch paths: run `f` only when `validation` enables layout checks.
 ///
-/// Pure validators ([`validate_raw_binding_strides`], etc.) contain the check logic
-/// and never read env vars. Unit tests call those directly; backends call them
-/// through this wrapper.
+/// Pure validators ([`validate_raw_binding_strides`], etc.) contain the check logic.
+/// Unit tests call those directly; backends call them through this wrapper with the
+/// [`crate::Validation`] they were created with.
 #[cfg(any(
     test,
     feature = "vulkan",
@@ -121,11 +99,11 @@ use crate::types::BindlessSlotKind;
     all(feature = "metal", any(target_os = "macos", target_os = "ios")),
 ))]
 #[inline]
-pub(crate) fn with_layout_validation<F>(f: F) -> Result<()>
+pub(crate) fn with_layout_validation<F>(validation: crate::Validation, f: F) -> Result<()>
 where
     F: FnOnce() -> Result<()>,
 {
-    if crate::slang::layout_validation_enabled() {
+    if validation.layout {
         f()
     } else {
         Ok(())
@@ -866,10 +844,12 @@ pub(crate) fn destroy_context_mut(backend: &mut dyn GpuBackend, ctx: ContextHand
 }
 /// Destroy `ctx` without holding the global backend lock across blocking GPU work.
 pub(crate) fn destroy_context(backend: &std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>, ctx: ContextHandle) {
-    if let Some(handle) = {
-        let mut guard = backend.lock().unwrap();
-        guard.detach_context_for_destroy(ctx)
-    } {
+    let Ok(mut guard) = backend.lock() else {
+        return;
+    };
+    let detached = guard.detach_context_for_destroy(ctx);
+    drop(guard);
+    if let Some(handle) = detached {
         run_context_destroy(handle);
     }
 }
@@ -1151,6 +1131,11 @@ pub(crate) trait GpuBackendTimelineWait {
     fn finish_timeline_wait(&mut self, ctx: ContextHandle, value: crate::timeline::TimelineValue) -> Result<()>;
 }
 
+/// Work a backend hands out to prepare a compute pipeline off the backend lock.
+///
+/// See [`GpuBackend::unlocked_compute_prepare`].
+pub(crate) type UnlockedComputePrepare = Box<dyn FnOnce() -> Result<Box<dyn std::any::Any + Send>> + Send>;
+
 /// GPU backend trait - implemented by Vulkan, Metal, DX12.
 #[allow(private_bounds)]
 pub(crate) trait GpuBackend:
@@ -1162,6 +1147,9 @@ pub(crate) trait GpuBackend:
 
     /// Get the backend type.
     fn backend_type(&self) -> BackendType;
+
+    /// The validation this backend was created with.
+    fn validation(&self) -> crate::Validation;
 
     /// Enumerate available adapters.
     fn enumerate_adapters(&self) -> Vec<AdapterInfo>;
@@ -1793,6 +1781,21 @@ pub(crate) trait GpuBackend:
         Ok(())
     }
 
+    /// Backend-specific work that prepares `shader`'s compute pipeline without the lock.
+    ///
+    /// For backends whose compile does not fit [`Self::compute_shader_target`]. The caller
+    /// runs the job with the backend mutex released and hands its output to
+    /// [`Self::seed_compute_pipeline`] before [`Self::create_compute_pipeline`]. `None`
+    /// (the default) leaves all the work to `create_compute_pipeline`.
+    fn unlocked_compute_prepare(&self, _shader: ShaderHandle) -> Option<UnlockedComputePrepare> {
+        None
+    }
+
+    /// Install the output of an [`Self::unlocked_compute_prepare`] job.
+    fn seed_compute_pipeline(&mut self, _shader: ShaderHandle, _prepared: Box<dyn std::any::Any + Send>) -> Result<()> {
+        Ok(())
+    }
+
     /// Per push-constant resource slot (in shader-signature order), the descriptor
     /// access the shader *signature* requires — independent of the graph access used
     /// for barriers.
@@ -1982,7 +1985,7 @@ pub(crate) trait GpuBackend:
 /// backend (`vulkan`, `dx12`, `metal`) is compiled in — e.g.
 /// `--no-default-features --features cuda`. In a normal default build, use
 /// `GOLDY_BACKEND=cuda`, `GOLDY_BACKEND=webgpu`, or `GOLDY_BACKEND=cpu` to opt in.
-pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
+pub(crate) fn create_default_backend(validation: crate::Validation) -> Result<Box<dyn GpuBackend>> {
     // Check for runtime override via environment variable
     if let Ok(backend_str) = std::env::var("GOLDY_BACKEND") {
         let backend_type = match backend_str.to_lowercase().as_str() {
@@ -1998,14 +2001,14 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
             ),
         };
         tracing::info!("Using backend from GOLDY_BACKEND env var: {:?}", backend_type);
-        return create_backend(backend_type);
+        return create_backend(backend_type, validation);
     }
 
     // On macOS / iOS with metal feature, prefer Metal
     #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
     {
         tracing::info!("Creating Metal backend");
-        Ok(Box::new(metal::MetalBackend::new()?))
+        Ok(Box::new(metal::MetalBackend::with_validation(validation)?))
     }
 
     // On Windows with dx12 feature, prefer DX12
@@ -2016,7 +2019,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     ))]
     {
         tracing::info!("Creating DX12 backend");
-        Ok(Box::new(dx12::Dx12Backend::new()?))
+        Ok(Box::new(dx12::Dx12Backend::with_validation(validation)?))
     }
 
     // Vulkan fallback on non-DX12/non-Metal platforms
@@ -2027,7 +2030,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     ))]
     {
         tracing::info!("Creating Vulkan backend");
-        Ok(Box::new(vulkan::VulkanBackend::new()?))
+        Ok(Box::new(vulkan::VulkanBackend::with_validation(validation)?))
     }
 
     // Compute-only prototypes: only when no native graphics backend is compiled in.
@@ -2039,7 +2042,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     ))]
     {
         tracing::info!("Creating CUDA backend (compute-only build, no native backend compiled in)");
-        Ok(Box::new(cuda::CudaBackend::new()?))
+        Ok(Box::new(cuda::CudaBackend::with_validation(validation)?))
     }
 
     #[cfg(all(
@@ -2051,7 +2054,7 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
     ))]
     {
         tracing::info!("Creating WebGPU backend (no native backend compiled in)");
-        Ok(Box::new(webgpu::WebGpuBackend::new()?))
+        Ok(Box::new(webgpu::WebGpuBackend::with_validation(validation)?))
     }
 
     // No backend available
@@ -2071,7 +2074,9 @@ pub(crate) fn create_default_backend() -> Result<Box<dyn GpuBackend>> {
 ///
 /// For DX12, each [`crate::Instance`] gets its own backend with independent mutable state;
 /// DXGI factory/adapters are shared process-wide. Other backends create a fresh instance.
-pub(crate) fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
+pub(crate) fn create_shared_backend(
+    validation: crate::Validation,
+) -> Result<std::sync::Arc<std::sync::Mutex<Box<dyn GpuBackend>>>> {
     use std::sync::{Arc, Mutex};
 
     #[cfg(all(feature = "dx12", target_os = "windows"))]
@@ -2081,45 +2086,45 @@ pub(crate) fn create_shared_backend() -> Result<std::sync::Arc<std::sync::Mutex<
             Err(_) => true, // DX12 is the Windows default
         };
         if wants_dx12 {
-            return dx12::shared_backend();
+            return dx12::shared_backend(validation);
         }
     }
 
-    let backend = create_default_backend()?;
+    let backend = create_default_backend(validation)?;
     Ok(Arc::new(Mutex::new(backend)))
 }
 
 /// Create a specific backend by type.
-pub(crate) fn create_backend(backend_type: BackendType) -> Result<Box<dyn GpuBackend>> {
+pub(crate) fn create_backend(backend_type: BackendType, validation: crate::Validation) -> Result<Box<dyn GpuBackend>> {
     match backend_type {
         #[cfg(feature = "vulkan")]
         BackendType::Vulkan => {
             tracing::info!("Creating Vulkan backend");
-            Ok(Box::new(vulkan::VulkanBackend::new()?))
+            Ok(Box::new(vulkan::VulkanBackend::with_validation(validation)?))
         }
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         BackendType::Dx12 => {
             tracing::info!("Creating DX12 backend");
-            Ok(Box::new(dx12::Dx12Backend::new()?))
+            Ok(Box::new(dx12::Dx12Backend::with_validation(validation)?))
         }
         #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
         BackendType::Metal => {
             tracing::info!("Creating Metal backend");
-            Ok(Box::new(metal::MetalBackend::new()?))
+            Ok(Box::new(metal::MetalBackend::with_validation(validation)?))
         }
         #[cfg(feature = "webgpu")]
         BackendType::WebGpu => {
             tracing::info!("Creating WebGPU backend");
-            Ok(Box::new(webgpu::WebGpuBackend::new()?))
+            Ok(Box::new(webgpu::WebGpuBackend::with_validation(validation)?))
         }
         #[cfg(feature = "cuda")]
         BackendType::Cuda => {
             tracing::info!("Creating CUDA backend");
-            Ok(Box::new(cuda::CudaBackend::new()?))
+            Ok(Box::new(cuda::CudaBackend::with_validation(validation)?))
         }
         BackendType::Cpu => {
             tracing::info!("Creating CPU host-callable backend");
-            Ok(Box::new(cpu::CpuBackend::new()?))
+            Ok(Box::new(cpu::CpuBackend::with_validation(validation)?))
         }
         _ => anyhow::bail!("Backend {:?} not available on this platform", backend_type),
     }

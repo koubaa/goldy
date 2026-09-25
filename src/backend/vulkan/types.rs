@@ -838,6 +838,8 @@ pub(crate) struct PhysicalDeviceInfo {
     pub mesh_shaders: bool,
     /// `VK_EXT_mesh_shader` `taskShader` feature.
     pub amplification_shaders: bool,
+    /// See [`crate::runtime::RuntimeCapabilities::subgroup_width`].
+    pub subgroup_width: Option<u32>,
 }
 
 /// Per-context async submission stream (timeline, poller, command pool).
@@ -2056,6 +2058,8 @@ handle_table!(
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
+    /// The validation this backend was created with.
+    pub validation: crate::Validation,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_devices: Vec<PhysicalDeviceInfo>,

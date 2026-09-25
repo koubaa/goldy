@@ -48,4 +48,68 @@ fn matmul_f32(
     }
 }
 
+/// Rows reduced by one [`gemv_f32`] workgroup: 128 threads, 32 lanes per row.
+pub const GEMV_ROWS_PER_GROUP: u32 = 4;
+
+/// The association in which [`gemv_f32`] sums a row: 32 lanes with two strided
+/// accumulators each, then a tree over the lanes.
+pub(crate) const GEMV_ORDER: goldy_shader_ir::algebra::ReduceOrder = goldy_shader_ir::algebra::ReduceOrder::Lanes {
+    lanes: 32,
+    accumulators: 2,
+};
+
+/// Row-major `y[i] = sum_j A[i, j] * x[j]` with explicit leading dimension and strides.
+///
+/// Each row is reduced by 32 lanes reading consecutive columns, so loads coalesce and
+/// there is no split-K pass. Four rows share a workgroup.
+#[goldy::compute(workgroup_size = [128, 1, 1])]
+fn gemv_f32(
+    a: &[f32],
+    x: &[f32],
+    y: goldy::gpu::Scattered<f32>,
+    m: u32,
+    k: u32,
+    lda: u32,
+    x_stride: u32,
+    y_stride: u32,
+    a_off: u32,
+    x_off: u32,
+    y_off: u32,
+) {
+    let mut partial = goldy::gpu::workgroup_array::<f32, 128>();
+    let local = goldy::gpu::local_id().x;
+    let lane = local % 32;
+    let row = goldy::gpu::workgroup_id().x * 4 + local / 32;
+    let mut acc0 = 0.0;
+    let mut acc1 = 0.0;
+    if row < m {
+        let a_row = a_off + row * lda;
+        let mut j = lane;
+        while j + 32 < k {
+            acc0 = acc0 + a[a_row + j] * x[x_off + j * x_stride];
+            acc1 = acc1 + a[a_row + j + 32] * x[x_off + (j + 32) * x_stride];
+            j = j + 64;
+        }
+        if j < k {
+            acc0 = acc0 + a[a_row + j] * x[x_off + j * x_stride];
+        }
+    }
+    partial[local] = acc0 + acc1;
+    goldy::gpu::workgroup_barrier();
+    let mut s = 16;
+    while s > 0 {
+        if lane < s {
+            partial[local] = partial[local] + partial[local + s];
+        }
+        goldy::gpu::workgroup_barrier();
+        s = s / 2;
+    }
+    if lane == 0 {
+        if row < m {
+            y[y_off + row * y_stride] = partial[local];
+        }
+    }
+}
+
+pub use gemv_f32::Kernel as GemvF32Kernel;
 pub use matmul_f32::Kernel as MatMulF32Kernel;

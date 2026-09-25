@@ -32,6 +32,48 @@ public float2 to_polar(float2 uv) {
     return float2(dist, angle);
 }
 
+/// `a * b` rounded to float on its own: the device must not contract it into a
+/// multiply-add with the operation that reads it.
+public float goldy_exact_mul(float a, float b) {
+    __target_switch
+    {
+    case spirv:
+        return spirv_asm
+        {
+            %r:$$float = OpFMul $a $b;
+            OpDecorate %r NoContraction;
+            result:$$float = OpCopyObject %r
+        };
+    case cuda: __intrinsic_asm "__fmul_rn";
+    case hlsl:
+        precise float r = a * b;
+        return r;
+    default:
+        return a * b;
+    }
+}
+
+/// `a / b` rounded to float on its own: the device must not rewrite it, as into a
+/// multiply by the reciprocal of a constant divisor.
+public float goldy_exact_div(float a, float b) {
+    __target_switch
+    {
+    case spirv:
+        return spirv_asm
+        {
+            %r:$$float = OpFDiv $a $b;
+            OpDecorate %r NoContraction;
+            result:$$float = OpCopyObject %r
+        };
+    case cuda: __intrinsic_asm "__fdiv_rn";
+    case hlsl:
+        precise float r = a / b;
+        return r;
+    default:
+        return a / b;
+    }
+}
+
 // Positive modulo — HLSL fmod returns negative for negative inputs
 public float positive_mod(float x, float m) {
     return fmod(fmod(x, m) + m, m);

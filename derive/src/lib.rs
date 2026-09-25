@@ -4,12 +4,13 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 mod compute;
 mod gpu_type;
+mod ir_tokens;
 
 /// Attribute macro for Goldy compute kernels written in a restricted Rust GPU dialect.
 ///
 /// Expands to a module named after the function containing `Kernel::prepare` /
-/// typed `record`, plus canonical `[goldy_compute]` Slang and structured ABI
-/// metadata. See `goldy::kernel` and the programming-model docs.
+/// typed `record`, canonical `[goldy_compute]` Slang, structured ABI metadata,
+/// and the retained `definition()`. See `goldy::kernel` and the programming-model docs.
 ///
 /// # Example
 ///

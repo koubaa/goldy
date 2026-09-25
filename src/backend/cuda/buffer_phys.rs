@@ -100,6 +100,9 @@ impl CudaBackend {
         if req.is_empty() {
             return Ok(());
         }
+        if self.buffers.get(&buffer).is_some_and(|b| b.readback) {
+            return Ok(());
+        }
         // Views share the parent allocation — materialize the parent, then refresh the view.
         if let Some(parent) = self.buffers.get(&buffer).and_then(|b| b.parent) {
             self.fold_view_pending_into_parent(buffer)?;
@@ -606,7 +609,7 @@ impl CudaBackend {
         let device = self.buffers.get(&buffer).unwrap().device;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let buffer_ref = self.buffers.get(&buffer).unwrap();
-        Self::write_buffer_region(&stream, buffer_ref, offset, data)?;
+        Self::write_buffer_region(&stream, buffer_ref, offset, data, self.validation.gpu_api)?;
         Ok(())
     }
 

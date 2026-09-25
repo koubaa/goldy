@@ -20,21 +20,6 @@ use super::virtual_main::effective_slang_source_for_compile;
 use crate::types::{OptimizationLevel, ResourceCategory};
 use crate::{goldy_event, goldy_span};
 
-/// Returns `true` when layout validation is enabled.
-///
-/// This is on when:
-/// - `GOLDY_VALIDATE_LAYOUTS` is `1`, `true`, or `yes` (unchanged), or
-/// - `GOLDY_VALIDATION` lists `layout` / `layouts` / `all` (see `validation_env`).
-///
-/// Note: `GOLDY_VALIDATION=1|true|yes` enables **GPU API** validation only, not layout checks.
-///
-/// Controls both struct layout checks (at compile time) and buffer element-stride
-/// checks (at dispatch time). Reads the environment on every call so that tests
-/// can toggle the flag without restarting the process.
-pub fn layout_validation_enabled() -> bool {
-    crate::validation_env::layout_validation_enabled()
-}
-
 // ============================================================================
 // Reflection data structures
 // ============================================================================
@@ -706,7 +691,6 @@ impl SlangCompiler {
                 (self.library.set_target_floating_point_mode)(request, target_index, SLANG_FLOATING_POINT_MODE_PRECISE);
             }
         }
-
         let unit_name = CString::new("shader").unwrap();
         let translation_unit = unsafe {
             (self.library.add_translation_unit)(request, SlangSourceLanguage::Slang as i32, unit_name.as_ptr())

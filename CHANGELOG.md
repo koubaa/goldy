@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`goldy::Validation`** — the validation checks an instance runs (`layout`, `gpu_api`,
+  `timeline`, `scheme`, `host_access`, `fatal`). `Instance::with_validation(v)` chooses them
+  per instance and `Runtime::validation()` reports them. `Instance::new()` uses
+  `Validation::from_env()`, so `GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS` and
+  `GOLDY_VALIDATION_FATAL` now only set the default. Tests that need a check off (or on) no
+  longer depend on the process environment.
+
 - **Deposit `<<`** — `(&deposit << &data)?` tenders a per-submission memory-exchange occurrence (`Shl` on `&DepositTransaction`, offset 0). `write` / `write_data` remain for offsets and partial fills. Mirrored in Python (`deposit << bytes`), C++ (`deposit << vector`), C# (`deposit << byte[]`), and ffi-client (`&deposit << &[u8]`).
 
 - **Host claims** — `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`) realizes a public CPU read of a parcel after the submission gate. Host-coherent media map in place; others copy through a context staging pool. `BufferFlags::CPU_READABLE` is a placement hint that backends may honor with a mapped pointer (`RuntimeCapabilities::has_zero_copy_storage_readback`).
@@ -21,11 +28,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acquire, add, matmul, and fill; NumPy conversion copies through memory exchanges.
 
 - **Semantic MatMul** — `scheme.matmul(label, MatMulDesc)` records a backend-neutral
-  GEMM/GEMV node. CUDA realizes it with cuBLAS (`cublasSgemv` / `cublasSgemm`) by
-  default; Metal uses MPS; every other backend (and `GOLDY_MATMUL=fallback`) runs
-  Goldy's portable stdlib kernel. Realization happens on first submit and is retained.
+  GEMM/GEMV node. CUDA realizes GEMM with cuBLAS and GEMV with Goldy's single-pass
+  `gemv_f32` (cuBLAS `sgemv` splits K into two kernels for decode-sized matrices);
+  Metal uses MPS; every other backend runs Goldy's portable stdlib kernels.
+  `GOLDY_MATMUL=library` forces cuBLAS / MPS and `GOLDY_MATMUL=fallback` forces the
+  stdlib kernels. Realization happens on first submit and is retained.
+
+- **Retained kernel definitions** — `#[goldy::compute]` kernels keep their structured
+  `ShaderKernel` beside the canonical Slang: `KernelDef::definition` after `prepare`, and
+  `<kernel>::definition()` without a device. `goldy::kernel::ir` splits lowering into
+  `lower_body` and `assemble_virtual_entry` so definitions can be composed before
+  physical entry-point generation, and `ShaderKernel::rename_symbols` / `namespaced`
+  give composed locals and workgroup arrays collision-free names. Groundwork for kernel fusion.
+
+- **Explicit kernel fusion** — generated kernels gain `invoke(args..)`, which returns an
+  `Invocation` (a dispatch as a value) once a grid is given. `FusedKernel::prepare` composes a
+  sequence of invocations into one compute pipeline, and `FusedKernel::record` records it
+  as one dispatch node. Every intermediate parcel is still stored, and fused results match
+  the unfused sequence byte for byte. Composition is conservative: stages
+  must share workgroup size and grid, and a parcel shared between stages with a write must
+  be accessed at the thread's own index. Otherwise `FusionError::Rejected` names the reason
+  (`FusionRejection`). Tensor-bound kernels are not yet fusable. `goldy::kernel::ir::compose`
+  exposes the device-free composition.
+
+- **Fused specialization** — a fused dispatch is one specialization site. Its stable scalars
+  are baked into the fused program, and a changed baked scalar demotes the site to the
+  universal fused pipeline, never to the constituents. `FusedKernel::id` is a stable `KernelId`
+  derived from the constituents' `KernelDef::id`, the argument map and the workgroup size.
+  Fused kernels with one id share specialized variants within a scheme.
+  `FusedKernel::scalar_slot(stage, formal)` and `FusedDefinition::scalar_origins` map fused
+  scalar slots to constituent scalars, and specialization trace events name baked slots that
+  way (`1:damp.enabled=0x1`). `RecordedDispatch::node` returns the recorded `NodeId`.
+
+- **Value forwarding** — a fused dispatch keeps a parcel element that crosses stages at the
+  thread's own index in a register. A consumer reads the producer's value instead of
+  reloading it, and every store still reaches the parcel. This applies to scalar buffer
+  elements and is on for every fused definition (`FusedDefinition::forwarded`).
+  `FusedKernel::prepare_conservative` and `FusedDefinition::conservative` keep every load.
+
+- **Automatic fusion of retained schemes** (off by default; `Scheme::set_automatic_fusion(true)`
+  turns it on for one scheme, `GOLDY_FUSION=1` for every scheme that does not call it) — a retained
+  scheme fuses each maximal run of adjacent generated-kernel dispatches that `FusedKernel`
+  admission accepts. It derives an execution plan once its structure has survived a submit,
+  and compiles the fused pipelines on worker threads while the recorded dispatches keep
+  running. It then switches to the plan in one structural re-record. The recorded graph is
+  never rewritten: recording, `include`, or re-pipelining or re-gridding a constituent
+  returns to it. The regions then re-promote from the scheme's fused-pipeline cache, and a
+  failed compile leaves its region unfused. `set_node_param` on a constituent reaches the
+  fused dispatch. `Scheme::fusion_report` lists the regions (with their status) and the
+  rejected runs (with their `FusionRejection`). `ReplayStats` counts `fusion_promotions`,
+  `fusion_fallbacks` and `fusion_compile_failures`. `test_support` gains `FusionCompileFault`
+  and `wait_for_fusion_compiles`. A semantic region rounds the product each operation ends in
+  before another reads it (`goldy_exact_mul`: SPIR-V `NoContraction`, HLSL `precise`, CUDA
+  `__fmul_rn`), so no device contracts across a boundary the separate dispatches stored at.
+  A fused mean divides by its length through `goldy_exact_div` (`__fdiv_rn` on CUDA), as the
+  unfused kernel divides by a length it reads at run time, so the constant divisor is not
+  folded into a multiply by its reciprocal.
+
+- **`Scheme::compiles_pending`** — whether a specialized variant or fused kernel is still
+  compiling, or compiled and not yet swapped in. Submits never wait for these compiles; a
+  benchmark that wants the steady state keeps submitting until it returns `false`.
+
+- **Scheme-local temporaries** — `Scheme::temporary_buffer::<T>(len)` declares a `Temporary`,
+  a buffer whose contents exist only within one submission of that scheme. It binds like a
+  buffer (`SchemeNodeBuilder::with_temporary`, or a buffer argument of a generated kernel's
+  `record` / `invoke`). At structural submits the scheme places temporaries on buffers from
+  the context transient pool, and temporaries with the same shape and non-overlapping
+  lifetimes share one buffer. When automatic fusion forwards a temporary that only one fused
+  region binds, the temporary lives in registers and gets no storage
+  (`FusedDefinition::elided`, `FusionRegion::elided`). `FUSION_ABI_VERSION` is 3.
 
 ### Removed
+
+- **Breaking:** `goldy::layout_validation_enabled()` (read `Runtime::validation().layout`)
+  and `test_support::HostAccessOverride` (build the instance with
+  `Instance::with_validation(Validation { host_access: true, .. })`).
 
 - **Breaking:** `WithdrawTransaction`, `WithdrawClaim`, `WithdrawBytes`, `MemoryExchange::bind_withdraw` / `bind_withdraw_texture`, task-graph `WithdrawRead`, and the matching C / C++ / Python / .NET / ffi-client symbols (`goldy_memory_exchange_bind_withdraw*`, `goldy_withdraw_*`). Host reads use host claims instead.
 
@@ -39,11 +116,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CUDA compiles compute pipelines off the backend lock** — Slang lowering, the PTX
+  compile and the module load run before `ComputePipeline::new` takes the backend mutex, as
+  the Vulkan and DX12 compiles already did. A specialization or fusion compile on a worker
+  thread no longer stalls submits for the length of the compile.
+
+- The child `Scheme::group` records onto reports its parent's `automatic_fusion`, so a
+  recorder that picks a composable form for fusing schemes (such as Ammon's SwiGLU) sees
+  `set_automatic_fusion`, not only `GOLDY_FUSION`.
+
+- CUDA GPU API validation no longer sets `CUDA_LAUNCH_BLOCKING=1` for the process. A
+  validated CUDA backend skips graph capture and synchronizes after every op itself, so
+  unvalidated backends in the same process still capture graphs. A `CUDA_LAUNCH_BLOCKING`
+  you set yourself still disables capture.
+
 - **Breaking:** `TensorContext` is now `TensorKernels` (C `GoldyTensorKernels` /
   `goldy_tensor_kernels_*`, C++ / Python / ffi-client same name). It is prepared portable
   tensor pipelines for a runtime, not a Goldy `Context`.
 
 - **Breaking:** GPU-to-host reads are host claims via `(&mut submission >> &parcel).take::<T>()`, not an exchange. `MemoryExchange` is deposit-only. `BufferFlags::CPU_READABLE` is a placement hint (identical staged semantics without the flag). C ABI: `goldy_scheme_submission_take` / `take_texture` → `GoldyHostView`. C++ `SchemeSubmission::take`; Python `SchemeSubmission.take` / `>>`; .NET `SchemeSubmission.Take`; ffi-client `SchemeSubmission::take`.
+
+- **CUDA host-claim readback** — withdraw staging is cacheable pinned host memory filled by one context-stream DtoH. `take()` no longer does a device-wide stream drain and second DtoH. Eager `CPU_READABLE` placement and streaming identities are not in this change.
+
+- **Contiguous tensor indexing** — `GoldyTensorLayout` gains a `flags` word. Packed
+  views set `FLAG_CONTIGUOUS`, and `goldy_tensor_offset` returns `offset + i`
+  without per-axis div/mod.
+
+- **Rank-specialized tensor indexing** — a tensor parameter whose shape contract fixes
+  rank 1, 2 or 3 indexes through a helper for that rank. Rank 1 is `offset + i * stride`
+  with no contiguity test, and ranks 2 and 3 delinearize only their own axes. On CUDA,
+  Ammon's RMSNorm falls from 2.75 µs to 2.24 µs.
+
+- **Tensor layouts as launch facts** — each tensor's element offset travels as a launch
+  word (`PushLayout` region C on DX12 / Vulkan / Metal, a trailing kernel argument on
+  CUDA; first 13 tensors), and its shape facts bake through the specializer as certain
+  words, so a tensor node warms at its first submit and its promoted variant loads no
+  `GoldyTensorLayout`. Sites that differ only in offsets share a variant.
+  The tensor recorder's portable kernels are now ordinary `#[tensor]` kernels over views,
+  with op codes and axes as scalar params; the private `TensorOpMeta` parcel is gone.
+  Identical warms in flight share one compile. `KERNEL_ABI_VERSION` is now 4. On CUDA,
+  Ammon's RMSNorm falls from 2.24 µs to 1.70 µs and its residual add from 1.50 µs to
+  0.86 µs; stories15M decode rises from about 1,990 to about 2,160 tokens/s, and warmup
+  rises from 0.42 s to 1.45 s because variants compile at the first submit.
+
+- **Specialization stability is per node and event-driven** — a scalar word the caller
+  has not changed with `set_node_param` since the node's first submit is a constant of
+  the recorded program, so it bakes at the first submit with no streak. Only words that
+  have changed must hold for the warm and promote thresholds, and they count submits
+  whether or not the rest of the scheme was clean; topology dirtiness no longer resets
+  history. The predictor steps only sites that were just declared, had a word changed,
+  have a compile in flight, or reach a threshold on this submit, so settled schemes do no
+  predictor work per submit. A word that changes every frame costs one compile, dropped on
+  its first change. Promotions land as their compiles do, so a scheme may re-record over
+  two or three submits while it settles.
+
+- **Breaking:** `KernelDef` gains a `definition` field and no longer implements `Eq`
+  (`PartialEq` remains). Hand-authored and parsed Slang set it to `None`.
+
+- **Breaking:** `ReplayStats` gains `fusion_promotions`, `fusion_fallbacks` and
+  `fusion_compile_failures`, so struct literals need the new fields or `..Default::default()`.
+  `FusedDefinition` gains `forwarded`. `FUSION_ABI_VERSION` is now 2 because forwarding is
+  part of the fused identity.
+
+### Fixed
+
+- **Background compiles at exit** — dropping a `Scheme` joins its specialization and
+  fusion compile threads. They were detached, so a compile still inside Slang when the
+  process exited could crash in the library's static destructors.
+
+- **CUDA strided GEMV** — native `n = 1` MatMul passes `ldb` / `ldc` as the cuBLAS
+  `incx` / `incy`. It previously assumed unit strides for `x` and `y`.
+
+- **Odd-length deposits** — deposit staging rounds its backing up to whole words. A
+  deposit whose length was not a multiple of 4 tripped DX12's structured-stride
+  assertion.
+
+- **Teardown after a backend panic** — buffer, pipeline, shader, surface, host-sink,
+  context, and runtime teardown skip backend cleanup when the backend lock is
+  poisoned. Previously they panicked again while unwinding, which aborted the
+  process and hid the original error.
 
 ## [0.3.0] - 2026-09-19
 

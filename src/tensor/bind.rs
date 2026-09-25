@@ -11,8 +11,27 @@ impl SchemeBindable for TensorView<'_> {
         let parcel = self.buffer().whole();
         let slot = parcel.resource_index(access);
         let stamp = parcel.stamp_handle();
-        let parent = parcel.buffer_handle().expect("tensor view parent is a buffer");
-        let resource = match self.byte_envelope() {
+        (Some((self.envelope_id(), Some(stamp))), slot)
+    }
+
+    fn buffer_parcel(&self) -> Option<crate::parcel::Parcel> {
+        Some(self.buffer().whole().clone())
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.envelope_id())
+    }
+}
+
+impl TensorView<'_> {
+    /// The parent buffer, or the byte range of it this view can touch.
+    fn envelope_id(&self) -> ResourceId {
+        let parent = self
+            .buffer()
+            .whole()
+            .buffer_handle()
+            .expect("tensor view parent is a buffer");
+        match self.byte_envelope() {
             Ok((offset, len))
                 if len == 0 || (offset == 0 && offset.saturating_add(len) >= self.buffer().byte_size()) =>
             {
@@ -20,12 +39,7 @@ impl SchemeBindable for TensorView<'_> {
             }
             Ok((offset, len)) => ResourceId::BufferRange { parent, offset, len },
             Err(_) => ResourceId::Buffer(parent),
-        };
-        (Some((resource, Some(stamp))), slot)
-    }
-
-    fn buffer_parcel(&self) -> Option<crate::parcel::Parcel> {
-        Some(self.buffer().whole().clone())
+        }
     }
 }
 
@@ -37,6 +51,10 @@ impl SchemeBindable for Tensor {
     fn buffer_parcel(&self) -> Option<crate::parcel::Parcel> {
         Some(self.buffer().whole().clone())
     }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        self.view().resource_identity()
+    }
 }
 
 impl crate::kernel::KernelBindable for TensorView<'_> {
@@ -47,6 +65,10 @@ impl crate::kernel::KernelBindable for TensorView<'_> {
     ) -> crate::kernel::SchemeNodeStart<'a> {
         start.bind_resource(self, access)
     }
+
+    fn __goldy_kernel_identity(&self) -> crate::kernel::KernelArgIdentity {
+        crate::kernel::KernelArgIdentity(self.resource_identity())
+    }
 }
 
 impl crate::kernel::KernelBindable for Tensor {
@@ -56,5 +78,9 @@ impl crate::kernel::KernelBindable for Tensor {
         access: crate::task_graph::NodeAccess,
     ) -> crate::kernel::SchemeNodeStart<'a> {
         start.bind_resource(&self.view(), access)
+    }
+
+    fn __goldy_kernel_identity(&self) -> crate::kernel::KernelArgIdentity {
+        crate::kernel::KernelArgIdentity(self.resource_identity())
     }
 }

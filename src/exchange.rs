@@ -18,9 +18,9 @@ use crate::context::Context;
 use crate::deposit_pool::DepositExchangePool;
 use crate::error::GoldyError;
 use crate::parcel::Parcel;
-use crate::scheme::Scheme;
 #[cfg(feature = "graphics")]
-use crate::scheme::{Lease, LeaseRenderTarget, Submission, Transaction};
+use crate::scheme::{Lease, LeaseRenderTarget, Transaction};
+use crate::scheme::{Scheme, Submission};
 #[cfg(feature = "graphics")]
 use crate::surface::Frame as SurfaceFrame;
 #[cfg(feature = "graphics")]
@@ -32,9 +32,7 @@ use crate::Buffer;
 use crate::Texture;
 #[cfg(feature = "graphics")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::ops::Shl;
-#[cfg(feature = "graphics")]
-use std::ops::Shr;
+use std::ops::{Shl, Shr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -389,11 +387,86 @@ impl MemoryExchange {
         let _ = &self.ctx;
         scheme.register_deposit(target)
     }
+
+    /// Bind a device buffer parcel to an eager host-readable sink.
+    ///
+    /// The device-to-host copy is recorded in `scheme`, after prior writes to
+    /// `source` according to normal graph and ledger ordering. Each successful
+    /// submission therefore includes the copy; claiming the sink only waits for
+    /// that submission and reads the already-populated host staging.
+    pub fn bind_host_sink(&self, scheme: &mut Scheme, source: &Parcel) -> Result<HostSink, GoldyError> {
+        if !std::sync::Arc::ptr_eq(&self.ctx.inner, &scheme.context().inner) {
+            return Err(GoldyError::Validation(
+                "MemoryExchange and Scheme belong to different contexts".into(),
+            ));
+        }
+        scheme.register_host_sink(source)
+    }
 }
 
 impl std::fmt::Debug for MemoryExchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryExchange").finish_non_exhaustive()
+    }
+}
+
+/// Stable GPU-to-host memory exchange recorded in one [`Scheme`].
+///
+/// Unlike a direct parcel withdrawal, the readback copy is part of the recorded
+/// graph. The sink has its own ledger stamp: a live [`crate::HostView`] prevents
+/// a later submission from overwriting its staging, while dropping the view
+/// permits replay immediately.
+#[derive(Clone)]
+pub struct HostSink {
+    pub(crate) inner: Arc<HostSinkInner>,
+}
+
+pub(crate) struct HostSinkInner {
+    pub(crate) scheme_id: u64,
+    pub(crate) ctx: Context,
+    pub(crate) handle: BufferHandle,
+    pub(crate) byte_size: u64,
+    pub(crate) stamp: Arc<crate::parcel::ParcelStamp>,
+}
+
+impl Drop for HostSinkInner {
+    fn drop(&mut self) {
+        self.stamp.mark_dead();
+        if let Ok(mut backend) = self.ctx.runtime().inner.backend.lock() {
+            backend.free_readback_buffer(self.handle);
+        }
+    }
+}
+
+impl HostSink {
+    /// Select this sink's occurrence from `submission`.
+    ///
+    /// Selection is non-blocking. [`crate::PendingHostSinkRead::take`] performs
+    /// the completion wait and returns the staged bytes.
+    pub fn claim(&self, submission: &Submission) -> crate::PendingHostSinkRead {
+        crate::PendingHostSinkRead::from_submission(submission, self)
+    }
+
+    /// Number of bytes copied into this sink on each submission.
+    pub fn byte_size(&self) -> u64 {
+        self.inner.byte_size
+    }
+}
+
+impl std::fmt::Debug for HostSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostSink")
+            .field("scheme_id", &self.inner.scheme_id)
+            .field("byte_size", &self.inner.byte_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Shr<&HostSink> for &mut Submission {
+    type Output = crate::PendingHostSinkRead;
+
+    fn shr(self, sink: &HostSink) -> Self::Output {
+        sink.claim(self)
     }
 }
 

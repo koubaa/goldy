@@ -147,6 +147,8 @@ let mut submission = scheme.submit()?;
 let bytes = (&mut submission >> buffer.whole()).take::<u8>()?.to_vec();
 ```
 
+On CUDA, the staged path is one DtoH from the parcel into cacheable pinned host memory on the producing stream, then a CPU copy into the `HostView`. It does not change parcel medium and does not intern the copy on the scheme. Eager copies for sink parcels and independently settled streaming identities are follow-up work.
+
 ## Clearing
 
 Zero-fill a region of the buffer:

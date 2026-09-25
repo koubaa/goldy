@@ -133,7 +133,7 @@ let mut submission = scheme.submit()?;
 - `Claim::consume` / `Claim::discard` remain the canonical settlement verbs
 - The program never passes raw GPU addresses to the compositor
 
-**Shipped** CPU readback: host claims via `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`). See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
+**Shipped** CPU readback: host claims via `(&mut submission >> &parcel).take::<T>()` (`PendingHostRead` / `HostView`). Host-coherent media map in place; others copy through a context staging pool. CUDA fills the pool with one producer-stream DtoH into cacheable pinned host memory (no device-wide drain, no second transfer). See [Settlement](../compute/settlement.md) and [Compute to Surface](../compute/compute-to-surface.md).
 
 **Shipped** CPU upload: `MemoryExchange::bind_deposit` records copy topology once. `(&deposit << &data)?` (or `DepositTransaction::write`) prepares an occurrence for this submission; `Scheme::submit` claims it internally and graph execution consumes the claim at the deposit copy dispatch. Staging backings are exchange-owned and never enter the parcel ledger. Retirement is an exchange-local epoch, distinct from destination RAW/WAR tracking.
 

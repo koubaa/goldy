@@ -4,7 +4,7 @@
 //! failure paths, and destination-ledger isolation of staging backings.
 
 use goldy::test_support::{mock_barrier_buffer_count, mock_reset_tracking, mock_runtime, CbReuseOverride};
-use goldy::{BufferKind, ComputePipeline, DepositTarget, MemoryExchange, NodeAccess, Runtime, Scheme, ShaderModule};
+use goldy::{BufferKind, ComputePipeline, DepositTarget, MemoryExchange, NodeAccess, Scheme, ShaderModule};
 
 const READ_SHADER: &str = r#"
 import goldy_exp;

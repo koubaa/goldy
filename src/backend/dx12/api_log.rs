@@ -76,7 +76,7 @@ static SYNC_WRITER: OnceLock<std::sync::Mutex<std::io::BufWriter<std::fs::File>>
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static INIT: Once = Once::new();
 
-/// Idempotent; call at the start of every `Dx12Backend::new()`. Only the *first* call
+/// Idempotent; call at the start of every `Dx12Backend::with_validation`. Only the *first* call
 /// process-wide actually opens/truncates the file and spawns the writer thread — `Dx12Backend`
 /// is constructed once per `Runtime`, and with many devices created across parallel tests we
 /// must not re-truncate (and thereby erase) an already-open log.

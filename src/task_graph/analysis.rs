@@ -41,13 +41,14 @@ fn push_compute_resource_bind(
     staging: &mut FrameTableStaging,
     slots: &[u32],
     user_slots: &[u32],
+    launch_words: &[u32],
 ) {
-    if !slots.is_empty() || !user_slots.is_empty() {
+    if !slots.is_empty() || !user_slots.is_empty() || !launch_words.is_empty() {
         let frame_table_base = staging.alloc_dispatch(slots.len() as u32);
         staging.write_dispatch_indices(frame_table_base, slots);
         commands.push(GpuCommand::BindResourcesRaw {
             indices: slots.to_vec(),
-            user: user_slots.to_vec(),
+            user: crate::backend::shared::pack_bind_words(user_slots, launch_words),
             frame_table_base,
         });
     }
@@ -84,16 +85,17 @@ fn emit_matmul_node(
         Some(r) => r.resolve_slots(&matmul.resource_slots, &node.bindings),
         None => matmul.resource_slots.clone(),
     };
-    let user = match crate::ops::matmul::fallback_user_slots(&matmul.desc, &matmul.a, &matmul.b, &matmul.c) {
-        Ok(words) => words.to_vec(),
-        Err(e) => {
-            tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
-            return;
-        }
-    };
-    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc);
+    let user =
+        match crate::ops::matmul::fallback_user_slots(&matmul.desc, matmul.fallback, &matmul.a, &matmul.b, &matmul.c) {
+            Ok(words) => words,
+            Err(e) => {
+                tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
+                return;
+            }
+        };
+    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc, matmul.fallback);
     commands.push(GpuCommand::SetPipeline(pipeline));
-    push_compute_resource_bind(commands, staging, &slots, &user);
+    push_compute_resource_bind(commands, staging, &slots, &user, &[]);
     commands.push(GpuCommand::Dispatch {
         label: Some(node.label.clone()),
         workgroups_x: x,
@@ -972,6 +974,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 pipeline: crate::backend::ComputePipelineHandle,
                 resource_slots: SlotData<'n>,
                 user_slots: &'n Vec<u32>,
+                launch_words: &'n Vec<u32>,
                 x: u32,
                 y: u32,
                 z: u32,
@@ -985,6 +988,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     pipeline,
                     resource_slots,
                     user_slots,
+                    launch_words,
                     dispatch: super::ir::DispatchDim::Direct { x, y, z },
                 } = &node.kind
                 {
@@ -997,6 +1001,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         pipeline: *pipeline,
                         resource_slots: slots,
                         user_slots,
+                        launch_words,
                         x: *x,
                         y: *y,
                         z: *z,
@@ -1018,6 +1023,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         pipeline,
                         resource_slots,
                         user_slots,
+                        launch_words,
                         dispatch: super::ir::DispatchDim::Indirect { buffer, offset },
                     } = &node.kind
                     {
@@ -1026,7 +1032,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                             None => resource_slots.clone(),
                         };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                        push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots, launch_words);
                         commands.push(GpuCommand::DispatchIndirect {
                             label: Some(node.label.clone()),
                             buffer: *buffer,
@@ -1050,7 +1056,8 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         let frame_table_base = frame_table.alloc_dispatch(slots.len() as u32);
                         frame_table.write_dispatch_indices(frame_table_base, slots);
                         let mut layout = crate::backend::shared::PushLayout::default();
-                        crate::backend::shared::fill_frame_table_dispatch(&mut layout, frame_table_base, d.user_slots);
+                        let words = crate::backend::shared::pack_bind_words(d.user_slots, d.launch_words);
+                        crate::backend::shared::fill_frame_table_dispatch(&mut layout, frame_table_base, &words);
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
                         arg_data.extend_from_slice(&d.x.to_ne_bytes());
                         arg_data.extend_from_slice(&d.y.to_ne_bytes());
@@ -1066,7 +1073,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     let slots = d.resource_slots.as_slice();
-                    push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots);
+                    push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots, d.launch_words);
                     commands.push(GpuCommand::Dispatch {
                         label: Some(d.label.clone()),
                         workgroups_x: d.x,
@@ -1095,7 +1102,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     None => resource_slots.clone(),
                 };
                 commands.push(GpuCommand::SetRayTracingPipeline(*pipeline));
-                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots, &[]);
                 commands.push(GpuCommand::TraceRays {
                     label: Some(node.label.clone()),
                     width: *width,
@@ -1817,6 +1824,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     pipeline,
                     resource_slots,
                     user_slots,
+                    launch_words,
                     dispatch,
                 } => {
                     let slots = match resolver {
@@ -1825,7 +1833,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
                     let mut bind_cmds = Vec::new();
-                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots, launch_words);
                     for cmd in bind_cmds {
                         commands.push(GraphCommand::Compute(cmd));
                     }
@@ -1861,7 +1869,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetRayTracingPipeline(*pipeline)));
                     let mut bind_cmds = Vec::new();
-                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots, &[]);
                     for cmd in bind_cmds {
                         commands.push(GraphCommand::Compute(cmd));
                     }
@@ -1936,6 +1944,7 @@ mod tests {
                 pipeline,
                 resource_slots: Vec::new(),
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }
@@ -1961,6 +1970,7 @@ mod tests {
                 pipeline,
                 resource_slots: vec![pipeline as u32 + 100], // non-empty → alloc_dispatch called
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }
@@ -2332,6 +2342,7 @@ mod tests {
                     pipeline: 1,
                     resource_slots: vec![42u32], // non-empty → alloc_dispatch is called
                     user_slots: Vec::new(),
+                    launch_words: Vec::new(),
                     dispatch: DispatchDim::Direct { x: 4, y: 1, z: 1 },
                 },
             }],
@@ -2635,6 +2646,7 @@ mod tests {
                     pipeline: 10,
                     resource_slots: vec![42, 7],
                     user_slots: Vec::new(),
+                    launch_words: Vec::new(),
                     dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],

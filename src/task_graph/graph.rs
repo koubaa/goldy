@@ -3,9 +3,10 @@
 use super::analysis;
 use super::cross_submit::{
     apply_resource_sync_updates, apply_stamp_targets_legacy, net_access_for_waves, prepend_prologue,
-    CrossSubmitScratch, ResourceKey, ResourceKeyMap,
+    CrossSubmitScratch, NetAccess, ResourceKey, ResourceKeyMap,
 };
 use super::ir::{CompiledSchedule, DispatchDim, GraphIR, NodeAccess, NodeKind, Wave};
+#[cfg(test)]
 use super::ResourceId;
 use crate::backend::{GpuCommand, GraphCommand, SubmitSync};
 use crate::cpu_dispatch::CpuDispatchExec;
@@ -352,6 +353,22 @@ fn apply_partition_epoch_stamps(
     }
 }
 
+fn apply_partition_epoch_stamps_precomputed(
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+    stamp_targets: &[Arc<crate::parcel::ParcelStamp>],
+    ctx: crate::backend::ContextHandle,
+    net: &ResourceKeyMap<NetAccess>,
+    has_unkeyed_bindings: bool,
+    tv: TimelineValue,
+) {
+    if !net.is_empty() {
+        apply_resource_sync_updates(net, resource_stamps, ctx, tv);
+    }
+    if !stamp_targets.is_empty() && has_unkeyed_bindings {
+        apply_stamp_targets_legacy(stamp_targets, ctx, tv);
+    }
+}
+
 // ---- Free functions over GraphIR -------------------------------------------
 //
 // These are pure algorithms: they take GraphIR + backend data and produce a
@@ -395,12 +412,14 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             pipeline,
             resource_slots,
             user_slots,
+            launch_words,
             dispatch,
         } => {
             0u8.hash(h);
             pipeline.hash(h);
             resource_slots.hash(h);
             user_slots.hash(h);
+            launch_words.hash(h);
             match dispatch {
                 DispatchDim::Direct { x, y, z } => {
                     0u8.hash(h);
@@ -619,6 +638,7 @@ fn hash_node_kind_for_emission(kind: &NodeKind, h: &mut impl std::hash::Hasher) 
             node.c.hash(h);
             node.resource_slots.hash(h);
             node.native.hash(h);
+            node.fallback.hash(h);
             node.fallback_pipeline.hash(h);
         }
     }
@@ -765,12 +785,14 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 pipeline,
                 resource_slots,
                 user_slots,
+                launch_words,
                 dispatch,
             } => {
                 0u8.hash(&mut h);
                 pipeline.hash(&mut h);
                 hash_resource_slots_for_fingerprint(resource_slots, &mut h);
                 user_slots.hash(&mut h);
+                launch_words.hash(&mut h);
                 match dispatch {
                     DispatchDim::Direct { x, y, z } => {
                         0u8.hash(&mut h);
@@ -819,6 +841,7 @@ pub(crate) fn partition_fingerprint(ir: &GraphIR, schedule: &CompiledSchedule, p
                 node.c.hash(&mut h);
                 hash_resource_slots_for_fingerprint(&node.resource_slots, &mut h);
                 node.native.hash(&mut h);
+                node.fallback.hash(&mut h);
                 node.fallback_pipeline.hash(&mut h);
             }
             NodeKind::CopyBufferToTexture {
@@ -1077,6 +1100,20 @@ fn cross_sync_for_stamps<'a>(
     Some(scratch.plan(ir, resource_stamps, submitting_ctx, waves, separate_graphics))
 }
 
+fn cross_sync_for_stamps_precomputed<'a>(
+    scratch: &'a mut CrossSubmitScratch,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+    net: &ResourceKeyMap<NetAccess>,
+    registry: &[(ResourceKey, Arc<crate::parcel::ParcelStamp>)],
+    submitting_ctx: crate::backend::ContextHandle,
+    separate_graphics: bool,
+) -> Option<&'a SubmitSync> {
+    if resource_stamps.is_empty() {
+        return None;
+    }
+    Some(scratch.plan_precomputed(net, registry, submitting_ctx, separate_graphics))
+}
+
 /// Outcome of partitioned IR submit: retention records vs resubmit hits.
 ///
 /// When CB replay is disabled, both counters stay at zero — fresh encodes are
@@ -1316,6 +1353,7 @@ fn ensure_present_ready(
 ///
 /// Combines the stable partition fingerprint with present-lease slots referenced
 /// by `waves` and every resolved upload-buffer physical handle those waves use.
+#[cfg(test)]
 fn dynamic_partition_slot_key(
     part_fp: u64,
     present_slots: &[ResolvedPresentSlot],
@@ -1323,18 +1361,7 @@ fn dynamic_partition_slot_key(
     waves: &[Wave],
     resolver: &super::SlotResolver,
 ) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    part_fp.hash(&mut h);
     let needed = analysis::partition_present_binding_ids(ir, waves);
-    for slot in present_slots {
-        if needed.binary_search(&slot.binding_id).is_ok() {
-            slot.binding_id.hash(&mut h);
-            slot.generation.hash(&mut h);
-            slot.slot_id.hash(&mut h);
-        }
-    }
     let mut upload_ids: Vec<u32> = waves
         .iter()
         .flat_map(|w| w.node_indices.iter().copied())
@@ -1346,7 +1373,28 @@ fn dynamic_partition_slot_key(
         .collect();
     upload_ids.sort_unstable();
     upload_ids.dedup();
-    for id in upload_ids {
+    dynamic_partition_slot_key_precomputed(part_fp, present_slots, &needed, &upload_ids, resolver)
+}
+
+fn dynamic_partition_slot_key_precomputed(
+    part_fp: u64,
+    present_slots: &[ResolvedPresentSlot],
+    needed_present: &[u32],
+    upload_ids: &[u32],
+    resolver: &super::SlotResolver,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    part_fp.hash(&mut h);
+    for slot in present_slots {
+        if needed_present.binary_search(&slot.binding_id).is_ok() {
+            slot.binding_id.hash(&mut h);
+            slot.generation.hash(&mut h);
+            slot.slot_id.hash(&mut h);
+        }
+    }
+    for &id in upload_ids {
         id.hash(&mut h);
         let resolved = resolver
             .deposits
@@ -1371,6 +1419,16 @@ fn consume_waves_deposits(
             claims,
             tv,
         );
+    }
+}
+
+fn consume_partition_deposits(
+    ids: &[u32],
+    claims: &mut Option<&mut std::collections::HashMap<u32, Option<crate::exchange::DepositClaim>>>,
+    tv: TimelineValue,
+) {
+    if let Some(claims) = claims.as_mut() {
+        crate::exchange::consume_deposit_claims(ids.iter().copied(), claims, tv);
     }
 }
 
@@ -1753,7 +1811,14 @@ fn submit_resolved_ir_partitions_replay(
         .runtime()
         .capabilities()
         .split_compute_partitions_on_barrier_cost;
-    let wave_ranges = analysis::partition_wave_ranges(ir, &cache.as_ref().unwrap().schedule, split_on_barrier_cost);
+    ensure_replay_static_plan(cache, ir, split_on_barrier_cost, resource_stamps);
+    let static_plan = Arc::clone(
+        cache
+            .as_ref()
+            .and_then(|entry| entry.replay_static.as_ref())
+            .expect("replay static plan"),
+    );
+    let wave_ranges = &static_plan.wave_ranges;
 
     let partition_fps: Vec<u64> = {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.partition_fps");
@@ -1782,7 +1847,7 @@ fn submit_resolved_ir_partitions_replay(
                 .collect()
         } else {
             let schedule = &cache.as_ref().unwrap().schedule;
-            compute_partition_fps(ir, schedule, &wave_ranges, Some(&layout_tag))
+            compute_partition_fps(ir, schedule, wave_ranges, Some(&layout_tag))
         }
     };
 
@@ -1790,7 +1855,7 @@ fn submit_resolved_ir_partitions_replay(
 
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.build_partitions");
-        get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost);
+        get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost, ir_clean);
     }
 
     let mut resolver = SlotResolver::new();
@@ -1861,7 +1926,7 @@ fn submit_resolved_ir_partitions_replay(
 
             let upload_compute_merged = {
                 let schedule = &cache.as_ref().unwrap().schedule;
-                try_merge_upload_compute_range(ir, schedule, &wave_ranges, part_idx, fuse_upload)
+                try_merge_upload_compute_range(ir, schedule, wave_ranges, part_idx, fuse_upload)
             };
             if let Some(merged_range) = upload_compute_merged {
                 let merged_waves = {
@@ -1907,7 +1972,7 @@ fn submit_resolved_ir_partitions_replay(
 
             let merged_range = {
                 let schedule = &cache.as_ref().unwrap().schedule;
-                try_merge_compute_render_range(ir, schedule, &wave_ranges, part_idx, separate)
+                try_merge_compute_render_range(ir, schedule, wave_ranges, part_idx, separate)
             };
             if let Some(merged_range) = merged_range {
                 let merged_fp = merged_compute_render_fp(partition_fps[part_idx], partition_fps[part_idx + 1]);
@@ -1960,16 +2025,24 @@ fn submit_resolved_ir_partitions_replay(
             let part_fp = partition_fps[part_idx];
             let range = wave_ranges[part_idx].clone();
             let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
-            let can_retain = partition_waves_can_retain(ir, &waves);
-            let has_render = partition_waves_have_render(ir, &waves);
-            let has_present = analysis::partition_waves_have_present(ir, &waves);
-            let present_bindings = analysis::partition_present_binding_ids(ir, &waves);
-            let has_upload_slots = analysis::partition_waves_have_upload_slots(ir, &waves);
-            let needs_resolver = partition_needs_slot_resolver(ir, &waves, has_present);
+            let static_partition = &static_plan.partitions[part_idx];
+            let can_retain = static_partition.can_retain;
+            let has_render = static_partition.has_render;
+            let has_present = static_partition.has_present;
+            let present_bindings = &static_partition.present_bindings;
+            let has_upload_slots = static_partition.has_upload_slots;
+            let needs_resolver = has_present || has_upload_slots;
             let stamp_ctx = partition_stamp_context(separate, has_render, ctx, device_owner);
             let base_sync = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.cross_sync");
-                cross_sync_for_stamps(&mut cross_scratch, resource_stamps, ir, stamp_ctx, &waves, separate)
+                cross_sync_for_stamps_precomputed(
+                    &mut cross_scratch,
+                    resource_stamps,
+                    &static_partition.net_access,
+                    static_plan.registry.as_slice(),
+                    stamp_ctx,
+                    separate,
+                )
             };
             let sync = merge_queue_boundary_waits(
                 base_sync,
@@ -1982,14 +2055,14 @@ fn submit_resolved_ir_partitions_replay(
             );
             let merged = sidecar.merge_sync(sync.as_ref());
 
-            if analysis::partition_waves_are_accel_build(ir, &waves)
+            if static_partition.is_accel_build
                 && ir_clean
                 && replay.partition_last_tv.get(part_idx).copied().flatten().is_some()
             {
                 last_tv = replay.partition_last_tv[part_idx].unwrap();
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+                consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                 *partial_tv = last_tv;
                 *partial = result.clone();
                 part_idx += 1;
@@ -1998,7 +2071,7 @@ fn submit_resolved_ir_partitions_replay(
 
             if !can_retain {
                 if has_present {
-                    ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
+                    ensure_present_ready(present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
                 }
                 let cache_entry = cache.as_ref().unwrap();
                 let cmds = {
@@ -2018,9 +2091,9 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+                consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                 if has_present {
-                    result.note_present_bindings(&present_bindings, last_tv);
+                    result.note_present_bindings(present_bindings, last_tv);
                 }
                 *partial_tv = last_tv;
                 *partial = result.clone();
@@ -2032,7 +2105,7 @@ fn submit_resolved_ir_partitions_replay(
             // so retention keys include the concrete slot combination.
             if has_present || has_upload_slots {
                 if has_present {
-                    ensure_present_ready(&present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
+                    ensure_present_ready(present_bindings, present_slots, &mut deferred_acquire, &mut resolver)?;
                 }
 
                 // Metal (and any backend that cannot retain present partitions): always fresh
@@ -2056,8 +2129,8 @@ fn submit_resolved_ir_partitions_replay(
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
                     apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                    consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
-                    result.note_present_bindings(&present_bindings, last_tv);
+                    consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
+                    result.note_present_bindings(present_bindings, last_tv);
                     *partial_tv = last_tv;
                     *partial = result.clone();
                     part_idx += 1;
@@ -2066,7 +2139,13 @@ fn submit_resolved_ir_partitions_replay(
 
                 let slot_key = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.dynamic_slot_key");
-                    dynamic_partition_slot_key(part_fp, present_slots, ir, &waves, &resolver)
+                    dynamic_partition_slot_key_precomputed(
+                        part_fp,
+                        present_slots,
+                        present_bindings,
+                        &static_partition.deposit_ids,
+                        &resolver,
+                    )
                 };
 
                 let already_retained = replay.partition_slot_keys[part_idx]
@@ -2081,10 +2160,17 @@ fn submit_resolved_ir_partitions_replay(
                         result.resubmit_hits += 1;
                         replay.record_last_tv(part_idx, last_tv);
                         boundary.record(separate, has_render, last_tv);
-                        apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                        consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+                        apply_partition_epoch_stamps_precomputed(
+                            resource_stamps,
+                            stamp_targets,
+                            stamp_ctx,
+                            &static_partition.net_access,
+                            static_partition.has_unkeyed_bindings,
+                            last_tv,
+                        );
+                        consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                         if has_present {
-                            result.note_present_bindings(&present_bindings, last_tv);
+                            result.note_present_bindings(present_bindings, last_tv);
                         }
                         *partial_tv = last_tv;
                         *partial = result.clone();
@@ -2114,10 +2200,17 @@ fn submit_resolved_ir_partitions_replay(
                 replay.record_last_tv(part_idx, last_tv);
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+                apply_partition_epoch_stamps_precomputed(
+                    resource_stamps,
+                    stamp_targets,
+                    stamp_ctx,
+                    &static_partition.net_access,
+                    static_partition.has_unkeyed_bindings,
+                    last_tv,
+                );
+                consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                 if has_present {
-                    result.note_present_bindings(&present_bindings, last_tv);
+                    result.note_present_bindings(present_bindings, last_tv);
                 }
                 *partial_tv = last_tv;
                 *partial = result.clone();
@@ -2134,8 +2227,15 @@ fn submit_resolved_ir_partitions_replay(
                     result.resubmit_hits += 1;
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-                    consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+                    apply_partition_epoch_stamps_precomputed(
+                        resource_stamps,
+                        stamp_targets,
+                        stamp_ctx,
+                        &static_partition.net_access,
+                        static_partition.has_unkeyed_bindings,
+                        last_tv,
+                    );
+                    consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                     *partial_tv = last_tv;
                     *partial = result.clone();
                     part_idx += 1;
@@ -2154,8 +2254,15 @@ fn submit_resolved_ir_partitions_replay(
             replay.record_last_tv(part_idx, last_tv);
             result.records += 1;
             boundary.record(separate, has_render, last_tv);
-            apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
-            consume_waves_deposits(ir, &waves, &mut deposit_claims, last_tv);
+            apply_partition_epoch_stamps_precomputed(
+                resource_stamps,
+                stamp_targets,
+                stamp_ctx,
+                &static_partition.net_access,
+                static_partition.has_unkeyed_bindings,
+                last_tv,
+            );
+            consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
             *partial_tv = last_tv;
             *partial = result.clone();
             part_idx += 1;
@@ -2354,6 +2461,63 @@ pub(crate) struct CompiledCacheEntry {
     /// flags precomputed. The fresh path emits commands each frame from these
     /// ranges; it does not use `partitioned_commands`.
     fresh_plan: Option<Vec<FreshSegment>>,
+    /// Topology-only inputs reused by clean retained partition submits.
+    replay_static: Option<Arc<ReplayStaticPlan>>,
+}
+
+struct ReplayStaticPartition {
+    net_access: Arc<ResourceKeyMap<NetAccess>>,
+    has_unkeyed_bindings: bool,
+    can_retain: bool,
+    has_render: bool,
+    has_present: bool,
+    present_bindings: Vec<u32>,
+    deposit_ids: Vec<u32>,
+    has_upload_slots: bool,
+    is_accel_build: bool,
+}
+
+struct ReplayStaticPlan {
+    registry: Arc<Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>>,
+    wave_ranges: Vec<std::ops::Range<usize>>,
+    partitions: Vec<ReplayStaticPartition>,
+}
+
+fn ensure_replay_static_plan(
+    cache: &mut Option<CompiledCacheEntry>,
+    ir: &GraphIR,
+    split_on_barrier_cost: bool,
+    resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
+) {
+    if cache.as_ref().is_some_and(|entry| entry.replay_static.is_some()) {
+        return;
+    }
+    let schedule = &cache.as_ref().expect("schedule cache").schedule;
+    let wave_ranges = analysis::partition_wave_ranges(ir, schedule, split_on_barrier_cost);
+    let partitions = wave_ranges
+        .iter()
+        .map(|range| {
+            let waves = &schedule.waves[range.clone()];
+            let deposit_ids = analysis::partition_deposit_ids(ir, waves);
+            ReplayStaticPartition {
+                net_access: Arc::new(net_access_for_waves(ir, waves)),
+                has_unkeyed_bindings: partition_has_unkeyed_bindings(ir, waves),
+                can_retain: partition_waves_can_retain(ir, waves),
+                has_render: partition_waves_have_render(ir, waves),
+                has_present: analysis::partition_waves_have_present(ir, waves),
+                present_bindings: analysis::partition_present_binding_ids(ir, waves),
+                has_upload_slots: !deposit_ids.is_empty(),
+                deposit_ids,
+                is_accel_build: analysis::partition_waves_are_accel_build(ir, waves),
+            }
+        })
+        .collect();
+    let registry = Arc::new(super::cross_submit::resource_stamps_from_ir(ir, resource_stamps));
+    cache.as_mut().expect("schedule cache").replay_static = Some(Arc::new(ReplayStaticPlan {
+        registry,
+        wave_ranges,
+        partitions,
+    }));
 }
 
 /// Return a reference to the compiled schedule for `ir`, using the cache when possible.
@@ -2378,6 +2542,7 @@ fn get_or_build_schedule<'c>(cache: &'c mut Option<CompiledCacheEntry>, ir: &Gra
             partitioned_upload_remap: Vec::new(),
             partitioned_graph_commands: Vec::new(),
             fresh_plan: None,
+            replay_static: None,
         });
     }
     &cache.as_ref().unwrap().schedule
@@ -2434,6 +2599,7 @@ fn get_or_build_partitioned_commands(
     ir: &GraphIR,
     fp: u64,
     split_on_barrier_cost: bool,
+    ir_clean: bool,
 ) {
     let _tz = crate::tracy_zone!("goldy.compile_partitioned");
 
@@ -2454,7 +2620,13 @@ fn get_or_build_partitioned_commands(
             partitioned_upload_remap: Vec::new(),
             partitioned_graph_commands: Vec::new(),
             fresh_plan: None,
+            replay_static: None,
         });
+    }
+
+    if ir_clean && cache.as_ref().is_some_and(|entry| entry.partitioned_commands.is_some()) {
+        tracing::trace!(target: "goldy::schedule_cache", hit = true, fp, "partitioned_commands");
+        return;
     }
 
     let emission_fp = emission_fingerprint(ir);
@@ -2635,6 +2807,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2674,6 +2847,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2740,6 +2914,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2905,6 +3080,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -2941,6 +3117,7 @@ mod slice_retention_tests {
                 pipeline: p.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3190,6 +3367,7 @@ mod slice_retention_tests {
                 pipeline: p,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -3516,6 +3694,7 @@ mod slice_retention_tests {
                         pipeline: p,
                         resource_slots: vec![],
                         user_slots: vec![],
+                        launch_words: Vec::new(),
                         dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                     },
                 },
@@ -3590,6 +3769,7 @@ mod slice_retention_tests {
                         pipeline: p,
                         resource_slots: vec![],
                         user_slots: vec![],
+                        launch_words: Vec::new(),
                         dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                     },
                 },
@@ -3993,6 +4173,7 @@ mod slice_retention_tests {
                 pipeline: p_a.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4013,6 +4194,7 @@ mod slice_retention_tests {
                 pipeline: p_b.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4027,6 +4209,7 @@ mod slice_retention_tests {
                 pipeline: p_c.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4211,6 +4394,7 @@ mod slice_retention_tests {
                 pipeline: p_b.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4231,6 +4415,7 @@ mod slice_retention_tests {
                 pipeline: p_c.handle,
                 resource_slots: vec![],
                 user_slots: vec![],
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
             },
         });
@@ -4301,6 +4486,7 @@ mod partitioning_tests {
                 pipeline,
                 resource_slots: Vec::new(),
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }
@@ -4366,7 +4552,7 @@ mod partitioning_tests {
     fn build_cache(ir: &GraphIR) -> CompiledCacheEntry {
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(ir);
-        get_or_build_partitioned_commands(&mut cache, ir, fp, true);
+        get_or_build_partitioned_commands(&mut cache, ir, fp, true, false);
         cache.unwrap()
     }
 
@@ -4869,10 +5055,10 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
+        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
         let ptr_before = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
 
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
+        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
         let ptr_after = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
         assert_eq!(
             ptr_before, ptr_after,
@@ -4896,10 +5082,10 @@ mod partitioning_tests {
         assert_ne!(fp1, fp2, "test requires distinct binding fingerprints");
 
         let mut cache: Option<CompiledCacheEntry> = None;
-        get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1, true);
+        get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1, true, false);
         assert_eq!(cache.as_ref().unwrap().fp, fp1);
 
-        get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2, true);
+        get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2, true, false);
         assert_eq!(
             cache.as_ref().unwrap().fp,
             fp2,
@@ -4977,7 +5163,7 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
+        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
 
         let ptr_before = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
@@ -4991,7 +5177,7 @@ mod partitioning_tests {
         if let NodeKind::WriteBuffer { data, .. } = &mut ir.nodes[0].kind {
             *data = Arc::from(vec![9u8; 4]);
         }
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true);
+        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
 
         let ptr_after = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();

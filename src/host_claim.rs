@@ -2,8 +2,11 @@
 //!
 //! `(&mut submission >> &parcel).take::<T>()` waits for the submission (and any later
 //! GPU write on the parcel), then realizes a typed view. Host-coherent media map in
-//! place; others copy through a context staging pool. While the view lives, a later
-//! submit that writes the parcel fails rather than blocking.
+//! place; others copy through a context staging pool. CUDA fills that pool with one
+//! producer-stream DtoH into cacheable pinned host memory, then `take()` copies into
+//! an owned view. Eager sink copies and independently settled streaming identities are
+//! not part of this path. While the view lives, a later submit that writes the parcel
+//! fails rather than blocking.
 
 use crate::backend::{GpuCommand, HostMapping};
 use crate::buffer::{Allocation, BufferSource};
@@ -24,6 +27,25 @@ use std::sync::Arc;
 #[must_use = "call take() to realize the host view"]
 pub struct PendingHostRead {
     inner: Result<HostReadRequest, GoldyError>,
+}
+
+/// Selected read from a scheme-recorded [`crate::HostSink`].
+///
+/// Selection reserves the sink parcel immediately but does not wait. `take`
+/// waits for the producing submission and reads the already-populated staging;
+/// it never submits another GPU copy.
+#[must_use = "call take() to realize the host view"]
+pub struct PendingHostSinkRead {
+    inner: Result<HostSinkReadRequest, GoldyError>,
+}
+
+struct HostSinkReadRequest {
+    ctx: Context,
+    ready_after: TimelineValue,
+    handle: crate::backend::BufferHandle,
+    byte_size: u64,
+    stamp: Arc<ParcelStamp>,
+    claimed: bool,
 }
 
 struct HostReadRequest {
@@ -65,6 +87,92 @@ impl PendingHostRead {
     /// Wait for the gate and return an untyped byte view.
     pub fn take_bytes(self) -> Result<HostView<u8>, GoldyError> {
         self.take::<u8>()
+    }
+}
+
+impl PendingHostSinkRead {
+    pub(crate) fn from_submission(submission: &Submission, sink: &crate::HostSink) -> Self {
+        let result = (|| {
+            if submission.scheme_id() != sink.inner.scheme_id {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "HostSink belongs to a different scheme than this submission"
+                )));
+            }
+            if !Arc::ptr_eq(&submission.context().inner, &sink.inner.ctx.inner) {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "HostSink belongs to a different context than this submission"
+                )));
+            }
+            sink.inner.stamp.acquire_host_claim();
+            Ok(HostSinkReadRequest {
+                ctx: sink.inner.ctx.clone(),
+                ready_after: submission.timeline_value(),
+                handle: sink.inner.handle,
+                byte_size: sink.inner.byte_size,
+                stamp: Arc::clone(&sink.inner.stamp),
+                claimed: true,
+            })
+        })();
+        Self { inner: result }
+    }
+
+    /// Wait for the recorded sink copy and return its typed contents.
+    pub fn take<T: bytemuck::Pod>(self) -> Result<HostView<T>, GoldyError> {
+        self.inner?.realize::<T>()
+    }
+
+    /// Wait for the recorded sink copy and return its bytes.
+    pub fn take_bytes(self) -> Result<HostView<u8>, GoldyError> {
+        self.take::<u8>()
+    }
+}
+
+impl std::fmt::Debug for PendingHostSinkRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingHostSinkRead")
+            .field("ok", &self.inner.is_ok())
+            .finish()
+    }
+}
+
+impl HostSinkReadRequest {
+    fn realize<T: bytemuck::Pod>(mut self) -> Result<HostView<T>, GoldyError> {
+        let elem = std::mem::size_of::<T>();
+        if elem == 0 || !(self.byte_size as usize).is_multiple_of(elem) {
+            return Err(GoldyError::Backend(anyhow::anyhow!(
+                "host sink byte size {} is not a multiple of {elem}",
+                self.byte_size
+            )));
+        }
+        self.ctx.wait_until(self.ready_after)?;
+        let last_write = self.stamp.sync.lock().unwrap().last_write.clone();
+        for (context, value) in last_write.iter() {
+            self.ctx.wait_until_epoch(Epoch { context, value })?;
+        }
+        let mut bytes = vec![0u8; self.byte_size as usize];
+        {
+            let backend = self.ctx.runtime().inner.backend.lock().unwrap();
+            backend
+                .read_readback_buffer(self.handle, &mut bytes)
+                .map_err(|e| self.ctx.classify(e))?;
+        }
+        let values = cast_bytes::<T>(bytes)?;
+        self.claimed = false;
+        Ok(HostView {
+            stamp: Arc::clone(&self.stamp),
+            ctx: None,
+            mapped_handle: None,
+            backing: HostViewBacking::Owned(values),
+            _ty: PhantomData,
+        })
+    }
+}
+
+impl Drop for HostSinkReadRequest {
+    fn drop(&mut self) {
+        if self.claimed {
+            self.stamp.release_host_claim();
+        }
     }
 }
 

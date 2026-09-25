@@ -28,6 +28,7 @@ pub(crate) struct VulkanSubmitView<'a> {
     pub textures: &'a SharedTextureTable,
     pub accels: &'a SharedAccelTable,
     pub compute_fence_pool: &'a SharedComputeFencePool,
+    pub validation: crate::Validation,
 }
 
 impl VulkanState {
@@ -44,6 +45,7 @@ impl VulkanState {
             textures: &self.textures,
             accels: &self.accels,
             compute_fence_pool: &self.compute_fence_pool,
+            validation: self.validation,
         }
     }
 }
@@ -93,6 +95,7 @@ pub(crate) struct VulkanSubmitSession {
     compute_fence_pool: SharedComputeFencePool,
     device_owner_handle: Option<ContextHandle>,
     validation_sink: Option<Arc<super::debug_utils::ValidationSink>>,
+    validation: crate::Validation,
 }
 
 impl VulkanSubmitSession {
@@ -133,6 +136,7 @@ impl VulkanSubmitSession {
             compute_fence_pool: Arc::clone(&state.compute_fence_pool),
             device_owner_handle,
             validation_sink: state.validation_sink.clone(),
+            validation: state.validation,
         }))
     }
 
@@ -153,6 +157,7 @@ impl VulkanSubmitSession {
                 textures: &self.textures,
                 accels: &self.accels,
                 compute_fence_pool: &self.compute_fence_pool,
+                validation: self.validation,
             },
             frame_table: Arc::clone(&self.frame_table),
             device_owner: self.device_owner_handle,

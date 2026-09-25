@@ -1,5 +1,9 @@
-//! Environment-driven validation switches (`GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS`,
-//! `GOLDY_SHADER_VALIDATION`).
+//! Validation settings and the environment switches that default them (`GOLDY_VALIDATION`,
+//! `GOLDY_VALIDATE_LAYOUTS`, `GOLDY_SHADER_VALIDATION`).
+//!
+//! [`Validation`] is the API: an instance or backend is created with one, and every check
+//! reads that value rather than the environment. `GOLDY_VALIDATION` and
+//! `GOLDY_VALIDATE_LAYOUTS` only supply [`Validation::from_env`], the default.
 //!
 //! **Semantics**
 //! - `GOLDY_VALIDATE_LAYOUTS=1|true|yes` — unchanged; enables Rust/Slang layout and buffer
@@ -8,10 +12,9 @@
 //!   case-insensitive):
 //!   - `layout` / `layouts` — layout + stride checks
 //!   - `api` — graphics API validation (Vulkan validation layer + `VK_EXT_debug_utils` where
-//!     built; Metal `MTL_SHADER_VALIDATION=1` when `GOLDY_VALIDATION` includes `api` and the
-//!     variable is unset — set once before the first device is enumerated; CUDA Driver
-//!     diagnostics: PTX JIT logs, eager stream sync, launch-limit checks, and
-//!     `CUDA_LAUNCH_BLOCKING=1` when unset; WebGPU/wgpu validation error scopes on
+//!     built; Metal `MTL_SHADER_VALIDATION=1` when unset, process-wide from the first Metal
+//!     backend; CUDA Driver diagnostics: PTX JIT logs, launch-limit checks, and a stream
+//!     sync after every op with graph capture off; WebGPU/wgpu validation error scopes on
 //!     shader/PSO create and bind groups). For loader-only Vulkan layers, set
 //!     `VK_INSTANCE_LAYERS` / `VK_LAYER_PATH` yourself.
 //!   - `timeline` — WSI timeline invariants (Vulkan surface `acquire()` post-wait checks)
@@ -35,13 +38,69 @@
 //!   `GOLDY_GPU_PROFILE` is set, because timestamp queries reference a per-submit
 //!   query heap that must not outlive a retained list.
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-struct ParsedValidation {
-    layout: bool,
-    gpu_api: bool,
-    timeline: bool,
-    scheme: bool,
-    host_access: bool,
+/// Which of Goldy's validation checks run.
+///
+/// The default is [`Validation::from_env`], so `GOLDY_VALIDATION` decides unless a program
+/// passes its own value to [`crate::Instance::with_validation`] (or a backend constructor).
+/// A backend keeps the value it was created with, and every runtime on it reports that value
+/// through [`crate::Runtime::validation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Validation {
+    /// Rust/Slang layout and buffer-stride checks (`layout`, or `GOLDY_VALIDATE_LAYOUTS`).
+    pub layout: bool,
+    /// Graphics API validation (`api`): the Vulkan validation layer, Metal shader validation,
+    /// CUDA driver diagnostics with a stream sync after every operation and no graph capture,
+    /// and WebGPU error scopes.
+    pub gpu_api: bool,
+    /// WSI timeline invariants (`timeline`).
+    pub timeline: bool,
+    /// Retained-scheme host-read and graph lifetime checks (`scheme`).
+    pub scheme: bool,
+    /// Page-protected CPU-visible copies (`host_access`).
+    pub host_access: bool,
+    /// GPU API validation errors fail Goldy calls and panic on backend drop
+    /// (`GOLDY_VALIDATION_FATAL`; `all` does not imply it).
+    pub fatal: bool,
+}
+
+impl Validation {
+    /// Every check off.
+    pub const NONE: Self = Self {
+        layout: false,
+        gpu_api: false,
+        timeline: false,
+        scheme: false,
+        host_access: false,
+        fatal: false,
+    };
+
+    /// Every check `GOLDY_VALIDATION=all` enables. Errors stay non-fatal.
+    pub const ALL: Self = Self {
+        layout: true,
+        gpu_api: true,
+        timeline: true,
+        scheme: true,
+        host_access: true,
+        fatal: false,
+    };
+
+    /// The checks `GOLDY_VALIDATION`, `GOLDY_VALIDATE_LAYOUTS` and `GOLDY_VALIDATION_FATAL`
+    /// request.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let mut v = std::env::var("GOLDY_VALIDATION")
+            .map(|s| parse_validation_list(&s))
+            .unwrap_or(Self::NONE);
+        v.layout |= env_truthy("GOLDY_VALIDATE_LAYOUTS");
+        v.fatal = env_truthy("GOLDY_VALIDATION_FATAL");
+        v
+    }
+}
+
+impl Default for Validation {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -62,8 +121,8 @@ fn legacy_gpu_only_short_form(raw: &str) -> Option<bool> {
     }
 }
 
-fn parse_validation_list(raw: &str) -> ParsedValidation {
-    let mut out = ParsedValidation::default();
+fn parse_validation_list(raw: &str) -> Validation {
+    let mut out = Validation::NONE;
     if let Some(true) = legacy_gpu_only_short_form(raw) {
         out.gpu_api = true;
         return out;
@@ -76,13 +135,7 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
                 continue;
             }
             match p.to_ascii_lowercase().as_str() {
-                "all" => {
-                    out.layout = true;
-                    out.gpu_api = true;
-                    out.timeline = true;
-                    out.scheme = true;
-                    out.host_access = true;
-                }
+                "all" => out = Validation::ALL,
                 "layout" | "layouts" => out.layout = true,
                 "api" => out.gpu_api = true,
                 "timeline" => out.timeline = true,
@@ -93,57 +146,6 @@ fn parse_validation_list(raw: &str) -> ParsedValidation {
         }
     }
     out
-}
-
-fn from_goldy_validation_var() -> ParsedValidation {
-    std::env::var("GOLDY_VALIDATION")
-        .map(|s| parse_validation_list(&s))
-        .unwrap_or_default()
-}
-
-/// Layout / struct / buffer-stride validation (Slang reflection vs Rust, dispatch-time strides).
-#[must_use]
-pub fn layout_validation_enabled() -> bool {
-    if env_truthy("GOLDY_VALIDATE_LAYOUTS") {
-        return true;
-    }
-    from_goldy_validation_var().layout
-}
-
-/// Vulkan Khronos validation + `VK_EXT_debug_utils`, Metal `MTL_SHADER_VALIDATION`,
-/// CUDA Driver diagnostics (JIT logs / eager sync / launch limits),
-/// WebGPU/wgpu validation error scopes.
-#[cfg(any(
-    feature = "vulkan",
-    feature = "cuda",
-    feature = "webgpu",
-    all(feature = "metal", any(target_os = "macos", target_os = "ios")),
-))]
-#[must_use]
-pub(crate) fn gpu_api_validation_enabled() -> bool {
-    from_goldy_validation_var().gpu_api
-}
-
-/// WSI timeline invariants (Vulkan surface acquire post-wait checks).
-#[cfg(feature = "vulkan")]
-#[must_use]
-pub(crate) fn timeline_validation_enabled() -> bool {
-    from_goldy_validation_var().timeline
-}
-
-/// Retained-scheme host-read staging invariants (staging pool checks, graph-level lifetime).
-#[must_use]
-pub(crate) fn scheme_validation_enabled() -> bool {
-    from_goldy_validation_var().scheme
-}
-
-/// When true, GPU API validation ERROR messages fail Goldy `Result` calls and panic on backend drop.
-///
-/// Set `GOLDY_VALIDATION_FATAL=1`/`true`/`yes`. Independent of `GOLDY_VALIDATION`
-/// (`all` does not imply fatal).
-#[must_use]
-pub fn validation_fatal_enabled() -> bool {
-    env_truthy("GOLDY_VALIDATION_FATAL")
 }
 
 /// Static checks to run over Slang IR at shader compile time (`GOLDY_SHADER_VALIDATION`).
@@ -157,17 +159,6 @@ pub fn shader_validation_checks() -> crate::slang::ShaderChecks {
         .unwrap_or_default()
 }
 
-/// Page-protect CPU-visible GPU copies so stray host pointers fault.
-///
-/// First slice: CPU-backend parcel storage. Native mapped staging can grow into this later.
-#[must_use]
-pub(crate) fn host_access_validation_enabled() -> bool {
-    if let Some(v) = TEST_HOST_ACCESS_OVERRIDE.with(|c| c.get()) {
-        return v;
-    }
-    from_goldy_validation_var().host_access
-}
-
 use std::cell::Cell;
 
 // Thread-local override for `retained_cb_reuse_disabled`. When `Some`, takes precedence
@@ -176,8 +167,31 @@ use std::cell::Cell;
 // via [`crate::test_support::CbReuseOverride`].
 thread_local! {
     static TEST_CB_REUSE_DISABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
-    static TEST_HOST_ACCESS_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_SPECIALIZATION_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_FUSION_COMPILE_FAULT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Make fused compiles started on this thread fail (tests of the unfused fallback).
+#[doc(hidden)]
+pub fn set_fusion_compile_fault(fail: bool) {
+    TEST_FUSION_COMPILE_FAULT.with(|c| c.set(fail));
+}
+
+pub(crate) fn fusion_compile_fault() -> bool {
+    TEST_FUSION_COMPILE_FAULT.with(|c| c.get())
+}
+
+/// Default for [`crate::Scheme::automatic_fusion`] on schemes that never called
+/// [`crate::Scheme::set_automatic_fusion`].
+///
+/// Off unless `GOLDY_FUSION=1` (or `true` / `yes` / `on`); see
+/// `docs/src/programming-model/rust-kernels.md`.
+#[must_use]
+pub(crate) fn fusion_enabled() -> bool {
+    match std::env::var("GOLDY_FUSION") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
 }
 
 /// Install a thread-local override for [`specialization_enabled`].
@@ -227,18 +241,6 @@ pub fn set_cb_reuse_override(disabled: bool) {
 #[doc(hidden)]
 pub fn clear_cb_reuse_override() {
     TEST_CB_REUSE_DISABLED_OVERRIDE.with(|c| c.set(None));
-}
-
-/// Install a thread-local override for [`host_access_validation_enabled`].
-#[doc(hidden)]
-pub fn set_host_access_override(enabled: bool) {
-    TEST_HOST_ACCESS_OVERRIDE.with(|c| c.set(Some(enabled)));
-}
-
-/// Clear the override installed by [`set_host_access_override`].
-#[doc(hidden)]
-pub fn clear_host_access_override() {
-    TEST_HOST_ACCESS_OVERRIDE.with(|c| c.set(None));
 }
 
 /// When true, disable the CB-retention facility entirely (not merely skip resubmit hits).

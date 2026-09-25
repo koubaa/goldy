@@ -65,6 +65,8 @@ pub(crate) mod allocation_policy;
 #[cfg(test)]
 mod buffer_alloc_tests;
 pub mod exchange;
+pub(crate) mod fusion_cost;
+pub(crate) mod fusion_plan;
 #[cfg(test)]
 mod heap_tests;
 pub mod parcel;
@@ -73,10 +75,12 @@ pub(crate) mod retained_pool;
 pub mod rt_pipeline;
 pub mod scheme;
 pub mod scheme_label;
+pub(crate) mod semantic_fusion;
 pub mod signal;
 pub(crate) mod specialization;
 #[cfg(feature = "graphics")]
 pub mod swapchain_pool;
+pub(crate) mod temporary;
 pub(crate) mod timeline;
 pub mod transient_pool;
 pub(crate) mod vram_allocator;
@@ -84,9 +88,15 @@ pub use allocation_policy::BudgetPolicy;
 pub use error::GoldyError;
 #[cfg(feature = "graphics")]
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
-pub use exchange::{DepositTarget, DepositTransaction, MemoryExchange};
+pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
-pub use host_claim::{HostView, PendingHostRead};
+pub use fusion_cost::FusionCostModel;
+pub use fusion_plan::{
+    FusionCost, FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier, RejectedFusion,
+};
+pub use goldy_shader_ir::algebra::ContractionPrecision;
+pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;
+pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};
 pub use scheme::{
@@ -102,6 +112,7 @@ pub use swapchain_pool::{AcquiredPresent, PresentLease};
 pub use task_graph::ShaderResourceSlot;
 #[cfg(feature = "graphics")]
 pub use task_graph::PRESENT_LEASE_SLOT_PLACEHOLDER;
+pub use temporary::Temporary;
 pub use vram_allocator::DeferredPayload;
 
 // Re-export main types
@@ -127,8 +138,9 @@ pub mod __private {
 }
 pub use kernel::gpu;
 pub use kernel::{
-    prepare_kernel, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType, KernelBindable, KernelDef,
-    KernelParam, KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarType, SourceMap, TensorDimSpec,
+    prepare_kernel, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType, FusedKernel, FusionError,
+    FusionRejection, Invocation, InvocationBuilder, KernelBindable, KernelDef, KernelId, KernelParam, KernelSource,
+    ParamCategory, PreparedKernel, RecordedDispatch, ScalarOrigin, ScalarType, SourceMap, TensorDimSpec,
     TensorShapeEnv, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES,
     TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
@@ -143,9 +155,9 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
 pub use slang::{
-    layout_validation_enabled, GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode,
-    LayoutCheck, PackedGpuField, PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface,
-    StageIoField, StructFieldLayout, StructLayout,
+    GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode, LayoutCheck, PackedGpuField,
+    PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface, StageIoField, StructFieldLayout,
+    StructLayout,
 };
 pub use task_graph::NodeAccess;
 #[cfg(feature = "tensor")]
@@ -154,6 +166,7 @@ pub use tensor::{
     TensorShape, TensorView, MAX_TENSOR_RANK,
 };
 pub use texture::TextureCopyFootprint;
+pub use validation_env::Validation;
 
 pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
@@ -613,21 +626,30 @@ pub mod test_support {
         scheme.wait_for_specialization_compiles();
     }
 
-    /// Thread-local pin for `GOLDY_VALIDATION=host_access`.
-    pub struct HostAccessOverride {
+    /// Make every fused compile a scheme starts on this thread fail until dropped.
+    pub struct FusionCompileFault {
         _private: (),
     }
 
-    impl HostAccessOverride {
-        pub fn force_enabled() -> Self {
-            crate::validation_env::set_host_access_override(true);
+    impl FusionCompileFault {
+        pub fn install() -> Self {
+            crate::validation_env::set_fusion_compile_fault(true);
             Self { _private: () }
         }
     }
 
-    impl Drop for HostAccessOverride {
+    impl Drop for FusionCompileFault {
         fn drop(&mut self) {
-            crate::validation_env::clear_host_access_override();
+            crate::validation_env::set_fusion_compile_fault(false);
         }
+    }
+
+    /// Block until every in-flight fused compile owned by `scheme` has finished.
+    ///
+    /// The planner compiles fused pipelines on worker threads and promotes the plan on a
+    /// later submit; tests that assert a promotion happened by frame N need the compiles
+    /// to have landed first.
+    pub fn wait_for_fusion_compiles(scheme: &mut crate::Scheme) {
+        scheme.wait_for_fusion_compiles();
     }
 }

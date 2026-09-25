@@ -755,6 +755,7 @@ pub(crate) fn sync_table_row_to_device(
 
 /// Lower render commands and build staging for standalone render passes (not graph submit).
 pub(crate) fn prepare_render_commands(
+    validation: crate::Validation,
     buffers: &SharedBufferTable,
     pipelines: &SharedPipelineTable,
     commands: &[crate::backend::RenderCommand],
@@ -762,7 +763,7 @@ pub(crate) fn prepare_render_commands(
     use crate::backend::RenderCommand;
     use crate::frame_table::FrameTableStaging;
 
-    crate::backend::with_layout_validation(|| {
+    crate::backend::with_layout_validation(validation, || {
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {

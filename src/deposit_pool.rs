@@ -61,17 +61,19 @@ impl DepositExchangePool {
             }
         }
 
+        // Scattered buffers are word-structured; odd-length deposits still copy only `need` bytes.
+        let capacity = need.next_multiple_of(4);
         let device = ctx.runtime().inner.handle;
         let handle = {
             let mut backend = ctx.runtime().inner.backend.lock().unwrap();
             backend
-                .create_buffer(device, need, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE)
+                .create_buffer(device, capacity, BufferKind::Scattered, None, BufferFlags::CPU_WRITABLE)
                 .map_err(|e| ctx.classify(e))?
         };
         let mut entries = self.lock();
         entries.push(DepositBacking {
             handle,
-            capacity: need,
+            capacity,
             ready_after: 0,
             claimed: true,
             last_affinity: affinity,
@@ -108,12 +110,13 @@ impl DepositExchangePool {
             let entries = self.lock();
             entries.iter().map(|e| e.ready_after).max().unwrap_or(0)
         };
+        let drained: Vec<DepositBacking> = self.lock().drain(..).collect();
+        let Ok(mut backend) = device.inner.backend.lock() else {
+            return;
+        };
         if max_ready > 0 {
-            let mut backend = device.inner.backend.lock().unwrap();
             let _ = backend.wait_until(handle, max_ready);
         }
-        let drained: Vec<DepositBacking> = self.lock().drain(..).collect();
-        let mut backend = device.inner.backend.lock().unwrap();
         for entry in drained {
             backend.destroy_buffer(entry.handle);
         }

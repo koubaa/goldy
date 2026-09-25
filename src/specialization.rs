@@ -1,14 +1,17 @@
 //! Generic shader specialization prediction for retained schemes.
 //!
 //! Design: `docs/src/design/shader-specialization.md`. Every [`crate::Scheme`] owns one
-//! [`SchemePredictor`]; every compute dispatch node that carries at least one `with_param`
-//! scalar gets a [`SitePredictor`]. On each submit the scheme hands the predictor its IR
-//! and whether the scheme was otherwise clean. The predictor keeps a per-slot streak of
-//! clean submits during which the scalar word held its value, compiles a variant with the
-//! stable slots baked in once the streaks pass the warm threshold, swaps the variant onto
-//! the node once they pass the promote threshold, and — through the scheme's
-//! `set_node_param` — demotes the node back to its universal pipeline the moment a baked
-//! word changes.
+//! [`SchemePredictor`]; every compute dispatch node that carries a `with_param` scalar or
+//! a tensor layout gets a [`SitePredictor`].
+//!
+//! A node's words change only through the scheme's `set_node_param`, so the predictor
+//! learns of every change as an event. A word the caller never changed is the one the
+//! node was recorded with, and it bakes at the node's first submit, as do layout facts.
+//! A changed slot is predicted: it bakes once it has held its word for its threshold,
+//! however dirty the rest of the scheme is. The variant is swapped onto the node once
+//! every baked slot is certain or has held for the promote threshold, and
+//! `set_node_param` demotes the node back to its universal pipeline the moment a baked
+//! word changes. Each submit steps only the sites with something to decide.
 //!
 //! Nothing here changes what a dispatch computes. The universal pipeline reads every scalar
 //! from the push-constant word; a variant reads the baked ones as literals through
@@ -22,16 +25,17 @@ use crate::runtime::Runtime;
 use crate::shader::{ShaderModule, ShaderProvenance};
 use crate::slang::virtual_main::scalar_specialization_macro;
 use crate::task_graph::{GraphIR, NodeKind};
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Thresholds the predictor runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SpecializationPolicy {
-    /// Clean submits a slot must hold its value before a variant baking it is compiled.
+    /// Submits a changed slot must hold its word before a variant baking it is compiled.
     pub warm_after: u32,
-    /// Clean submits every baked slot must have held its value before the variant is swapped in.
+    /// Submits every baked changed slot must have held its word before the variant is swapped in.
     pub promote_after: u32,
     /// Failed variant compiles before a site is pinned to its universal pipeline for good.
     pub max_failures: u32,
@@ -58,7 +62,59 @@ impl Default for SpecializationPolicy {
 }
 
 /// `(slot, wire word)` pairs in ascending slot order — the identity of one variant.
+///
+/// Slots below [`TENSOR_FACT_SLOT_BASE`] are scalar params; the rest are tensor layout facts.
 pub(crate) type BakedSlots = Vec<(u32, u32)>;
+
+/// First slot id of a tensor layout fact; see [`tensor_fact_slot`].
+pub(crate) const TENSOR_FACT_SLOT_BASE: u32 = 1 << 16;
+const TENSOR_FACT_STRIDE: u32 = 16;
+const _: () = assert!(goldy_shader_ir::TENSOR_FACTS.len() <= TENSOR_FACT_STRIDE as usize);
+
+/// Slot id of layout field `TENSOR_FACTS[fact]` of tensor slot `tensor`.
+#[cfg(any(feature = "tensor", test))]
+pub(crate) fn tensor_fact_slot(tensor: u32, fact: usize) -> u32 {
+    TENSOR_FACT_SLOT_BASE + tensor * TENSOR_FACT_STRIDE + fact as u32
+}
+
+fn is_fact_slot(slot: u32) -> bool {
+    slot >= TENSOR_FACT_SLOT_BASE
+}
+
+/// `(tensor slot, fact index)` of a fact slot id.
+fn split_fact_slot(slot: u32) -> (u32, usize) {
+    let rel = slot - TENSOR_FACT_SLOT_BASE;
+    (rel / TENSOR_FACT_STRIDE, (rel % TENSOR_FACT_STRIDE) as usize)
+}
+
+/// Preprocessor macro that bakes `slot` of `entry`.
+fn bake_macro(entry: &str, slot: u32) -> String {
+    if is_fact_slot(slot) {
+        let (tensor, fact) = split_fact_slot(slot);
+        goldy_shader_ir::tensor_fact_macro(entry, tensor, fact)
+    } else {
+        scalar_specialization_macro(entry, slot)
+    }
+}
+
+/// The program a variant specializes.
+///
+/// A module that declares a [`crate::shader::KernelIdentity`] shares variants with every
+/// other module of that kernel program; any other module has variants of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VariantKey {
+    Module(u64),
+    Kernel(goldy_shader_ir::KernelId),
+}
+
+impl VariantKey {
+    fn of(provenance: &ShaderProvenance) -> Self {
+        match provenance.kernel() {
+            Some(kernel) => Self::Kernel(kernel.id),
+            None => Self::Module(provenance.id()),
+        }
+    }
+}
 
 /// Counters the predictor bumps; the scheme folds them into [`crate::scheme::ReplayStats`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,38 +128,30 @@ pub(crate) struct SpecializationEvents {
 ///
 /// Shared with compile workers so a compile that finished after its site lost interest
 /// (cancelled, or the scheme moved on) still lands here instead of being thrown away.
-/// Holding a variant here does not promote it; sites re-earn promotion through streaks.
+/// Holding a variant here does not promote it; a site promotes it only once its slots prove out.
 struct VariantCache {
     entries: VecDeque<VariantEntry>,
     capacity: usize,
 }
 
 struct VariantEntry {
-    provenance_id: u64,
+    key: VariantKey,
     baked: BakedSlots,
     pipeline: Arc<ComputePipeline>,
 }
 
 impl VariantCache {
-    fn get(&mut self, provenance_id: u64, baked: &[(u32, u32)]) -> Option<Arc<ComputePipeline>> {
-        let pos = self
-            .entries
-            .iter()
-            .position(|e| e.provenance_id == provenance_id && e.baked == baked)?;
+    fn get(&mut self, key: VariantKey, baked: &[(u32, u32)]) -> Option<Arc<ComputePipeline>> {
+        let pos = self.entries.iter().position(|e| e.key == key && e.baked == baked)?;
         let entry = self.entries.remove(pos).expect("position came from iter");
         let pipeline = Arc::clone(&entry.pipeline);
         self.entries.push_back(entry);
         Some(pipeline)
     }
 
-    fn insert(&mut self, provenance_id: u64, baked: BakedSlots, pipeline: Arc<ComputePipeline>) {
-        self.entries
-            .retain(|e| !(e.provenance_id == provenance_id && e.baked == baked));
-        self.entries.push_back(VariantEntry {
-            provenance_id,
-            baked,
-            pipeline,
-        });
+    fn insert(&mut self, key: VariantKey, baked: BakedSlots, pipeline: Arc<ComputePipeline>) {
+        self.entries.retain(|e| !(e.key == key && e.baked == baked));
+        self.entries.push_back(VariantEntry { key, baked, pipeline });
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
         }
@@ -115,30 +163,45 @@ impl VariantCache {
     }
 }
 
-/// One in-flight variant compile.
+/// One variant compile, shared by every site of the scheme that wants the same variant.
+struct CompileJob {
+    key: VariantKey,
+    baked: BakedSlots,
+    /// Sites holding a [`WarmJob`] on this compile. The worker skips the compile when none
+    /// are left by the time it starts.
+    holders: AtomicUsize,
+    /// `None` while running; `Some(Ok)` once the variant is in the cache.
+    outcome: Mutex<Option<Result<(), String>>>,
+}
+
+/// A site's hold on a [`CompileJob`].
 struct WarmJob {
     baked: BakedSlots,
-    cancel: Arc<AtomicBool>,
-    /// `None` while running; `Some(Ok)` once the variant is in the cache.
-    outcome: Arc<Mutex<Option<Result<(), String>>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    job: Arc<CompileJob>,
 }
 
 impl WarmJob {
-    fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+    /// Hold `job` too, unless every holder has already let it go.
+    fn attach(job: &Arc<CompileJob>) -> Option<Self> {
+        job.holders
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n > 0).then_some(n + 1))
+            .ok()?;
+        Some(Self {
+            baked: job.baked.clone(),
+            job: Arc::clone(job),
+        })
     }
 
     fn poll(&self) -> Option<Result<(), String>> {
-        self.outcome.lock().unwrap().clone()
+        self.job.outcome.lock().unwrap().clone()
     }
 }
 
 impl Drop for WarmJob {
     fn drop(&mut self) {
-        // A job that is dropped without being joined is detached; the worker keeps its own
-        // clones of everything it needs and still files the result in the shared cache.
-        self.cancel();
+        // The worker keeps its own reference and still files a compile that already started
+        // in the shared cache.
+        self.job.holders.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -149,6 +212,11 @@ struct Candidate {
 }
 
 /// Per-dispatch-site predictor state.
+///
+/// A node's scalar words change only through `Scheme::set_node_param`, so a slot the
+/// caller has never changed is not a guess: it is the word the node was recorded with,
+/// and it bakes at the first submit. Only a slot that has changed is predicted, by how
+/// many submits it has since held its word.
 pub(crate) struct SitePredictor {
     /// The pipeline the caller bound. Everything demotes back to this.
     universal: ComputePipelineHandle,
@@ -156,14 +224,20 @@ pub(crate) struct SitePredictor {
     /// `[goldy_compute]` function name the bake macros are scoped to.
     entry: String,
     label: crate::SchemeLabel,
-    /// Scalar words seen at the previous submit.
+    /// Tensor layout facts. They hold for the node's lifetime and join every bake target.
+    facts: BakedSlots,
+    /// The node's scalar words as the predictor last saw them.
     last: Vec<u32>,
-    /// Per slot: consecutive clean submits the word has held its current value.
-    streak: Vec<u32>,
-    /// Per slot: streak a slot needs before it is baked. Starts at `warm_after`; every
-    /// time a slot invalidates a compile or a promotion it grows, so a fact that flips
-    /// every few frames stops causing compiles.
+    /// Per slot: whether the caller has changed it since the node's first submit.
+    changed: Vec<bool>,
+    /// Per slot: the first submit that ran its current word.
+    held_since: Vec<u64>,
+    /// Per slot: submits a changed slot must hold its word before it is baked. Every time
+    /// a slot invalidates a compile or a promotion it grows, so a word that flips every
+    /// few frames stops causing compiles.
     bake_threshold: Vec<u32>,
+    /// Whether the site has been through a submit. Changes before that are still record time.
+    submitted: bool,
     failures: u32,
     pinned: bool,
     promoted: Option<Candidate>,
@@ -178,16 +252,22 @@ impl SitePredictor {
         entry: String,
         label: crate::SchemeLabel,
         slots: &[u32],
+        facts: &[(u32, u32)],
         policy: &SpecializationPolicy,
     ) -> Self {
+        debug_assert!(facts.iter().all(|&(s, _)| is_fact_slot(s)));
+        debug_assert!(facts.windows(2).all(|w| w[0].0 < w[1].0));
         Self {
             universal,
             provenance,
             entry,
             label,
+            facts: facts.to_vec(),
             last: slots.to_vec(),
-            streak: vec![0; slots.len()],
+            changed: vec![false; slots.len()],
+            held_since: vec![0; slots.len()],
             bake_threshold: vec![policy.warm_after; slots.len()],
+            submitted: false,
             failures: 0,
             pinned: false,
             promoted: None,
@@ -200,22 +280,66 @@ impl SitePredictor {
         self.promoted.is_some()
     }
 
-    /// Slots that have held their value long enough to be baked, with those values.
-    fn bake_target(&self, slots: &[u32]) -> BakedSlots {
-        slots
+    fn variant_key(&self) -> VariantKey {
+        VariantKey::of(&self.provenance)
+    }
+
+    /// Kernel identity for diagnostics; `-` for a module without one.
+    fn kernel(&self) -> String {
+        self.provenance
+            .kernel()
+            .map_or_else(|| "-".into(), |k| k.id.to_string())
+    }
+
+    /// `baked` as `name=word` pairs, naming scalar slots by their kernel's scalar origins
+    /// and facts as `t{tensor}.{field}`.
+    fn describe(&self, baked: &[(u32, u32)]) -> String {
+        let names = self.provenance.kernel().map(|k| k.scalars.as_slice()).unwrap_or(&[]);
+        baked
+            .iter()
+            .map(|&(slot, word)| {
+                if is_fact_slot(slot) {
+                    let (tensor, fact) = split_fact_slot(slot);
+                    return format!("t{tensor}.{}={word:#x}", goldy_shader_ir::TENSOR_FACTS[fact]);
+                }
+                match names.get(slot as usize) {
+                    Some(name) => format!("{name}={word:#x}"),
+                    None => format!("slot{slot}={word:#x}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Submits, as of submit `now`, that `slot` has held its word.
+    fn held(&self, slot: usize, now: u64) -> u64 {
+        now.saturating_sub(self.held_since[slot])
+    }
+
+    /// Whether `slot` bakes without proof: a layout fact, or a scalar never changed.
+    fn is_certain(&self, slot: u32) -> bool {
+        is_fact_slot(slot) || !self.changed[slot as usize]
+    }
+
+    /// The certain slots, and the changed slots that have held their word long enough to
+    /// be baked, with their words.
+    fn bake_target(&self, now: u64) -> BakedSlots {
+        let mut target: BakedSlots = self
+            .last
             .iter()
             .enumerate()
-            .filter(|&(s, _)| self.streak[s] >= self.bake_threshold[s])
+            .filter(|&(s, _)| self.is_certain(s as u32) || self.held(s, now) >= u64::from(self.bake_threshold[s]))
             .map(|(s, &word)| (s as u32, word))
-            .collect()
+            .collect();
+        target.extend_from_slice(&self.facts);
+        target
     }
 
-    fn all_baked_still_hold(&self, baked: &[(u32, u32)], slots: &[u32]) -> bool {
-        baked.iter().all(|&(s, word)| slots[s as usize] == word)
-    }
-
-    fn all_baked_at_least(&self, baked: &[(u32, u32)], threshold: u32) -> bool {
-        baked.iter().all(|&(s, _)| self.streak[s as usize] >= threshold)
+    /// Whether every baked slot is certain or has held its word for `threshold` submits.
+    fn all_baked_proven(&self, baked: &[(u32, u32)], now: u64, threshold: u32) -> bool {
+        baked
+            .iter()
+            .all(|&(s, _)| self.is_certain(s) || self.held(s as usize, now) >= u64::from(threshold))
     }
 
     fn burn_slot(&mut self, slot: usize, policy: &SpecializationPolicy) {
@@ -223,24 +347,52 @@ impl SitePredictor {
         *t = (*t).saturating_mul(2).max(policy.promote_after).min(1 << 16);
     }
 
-    /// Advance streaks for one submit.
+    /// Record that `slot` now holds `word`, starting at submit `from`.
     ///
-    /// Slots whose word changed reset to zero (on any submit). Slots that held their word
-    /// advance only on clean submits: a scheme that re-records every frame for other reasons
-    /// keeps its history but does not earn promotions from it.
-    fn observe(&mut self, slots: &[u32], ir_clean: bool) {
-        for ((streak, &now), &before) in self.streak.iter_mut().zip(slots).zip(&self.last) {
-            if now != before {
-                *streak = 0;
-            } else if ir_clean {
-                *streak = streak.saturating_add(1);
-            }
+    /// Returns whether it changed. Before the first submit a change is still part of
+    /// recording, and the slot stays certain.
+    fn set_word(&mut self, slot: usize, word: u32, from: u64) -> bool {
+        if self.last[slot] == word {
+            return false;
         }
-        self.last.copy_from_slice(slots);
+        self.last[slot] = word;
+        self.held_since[slot] = from;
+        if self.submitted {
+            self.changed[slot] = true;
+        }
+        true
     }
 
-    fn reset_streaks(&mut self) {
-        self.streak.iter_mut().for_each(|s| *s = 0);
+    /// Forget how long every slot has held its word, as of submit `from`.
+    fn restart(&mut self, from: u64) {
+        self.held_since.iter_mut().for_each(|h| *h = from);
+    }
+
+    /// The submit at which this site next has something to decide with no event in between,
+    /// or `None` if it has nothing to decide until a word changes.
+    fn next_wake(&self, now: u64, policy: &SpecializationPolicy) -> Option<u64> {
+        if self.pinned {
+            return None;
+        }
+        if self.job.is_some() {
+            return Some(now + 1);
+        }
+        if let Some(c) = &self.ready {
+            // Every baked slot must reach the promote threshold.
+            return c
+                .baked
+                .iter()
+                .filter(|&&(s, _)| !self.is_certain(s))
+                .map(|&(s, _)| self.held_since[s as usize] + u64::from(policy.promote_after))
+                .max()
+                .or(Some(now + 1));
+        }
+        // The target widens when the first unbaked changed slot reaches its threshold.
+        let baked = self.promoted.as_ref().map(|c| c.baked.as_slice()).unwrap_or(&[]);
+        (0..self.last.len())
+            .filter(|&s| !self.is_certain(s as u32) && !baked.iter().any(|&(b, _)| b == s as u32))
+            .map(|s| self.held_since[s] + u64::from(self.bake_threshold[s]))
+            .min()
     }
 }
 
@@ -264,6 +416,29 @@ pub(crate) struct SchemePredictor {
     /// `GpuBackend::compute_pipeline_layout_follows_signature`, queried once.
     backend_supported: Option<bool>,
     events: SpecializationEvents,
+    /// Compiles started by this scheme's sites. A site warming a variant that is already
+    /// compiling joins that compile instead of starting its own.
+    inflight: Vec<std::sync::Weak<CompileJob>>,
+    /// Every compile thread this scheme started that may still be running, whether or
+    /// not a site still holds its job.
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Submits begun so far.
+    now: u64,
+    /// Sites the next submit must step: new, changed, or due.
+    awake: BTreeSet<u32>,
+    /// `(submit, node)`: a site with nothing to decide before that submit. Entries can be
+    /// stale; stepping a site early is harmless.
+    wake: BinaryHeap<Reverse<(u64, u32)>>,
+    /// Whether the previous submit ran with prediction enabled.
+    was_enabled: bool,
+}
+
+impl Drop for SchemePredictor {
+    /// A compile outliving its scheme can still be inside Slang when the process exits,
+    /// racing the library's static destructors.
+    fn drop(&mut self) {
+        self.wait_for_compiles();
+    }
 }
 
 impl SchemePredictor {
@@ -282,6 +457,12 @@ impl SchemePredictor {
             retiring: VecDeque::from(vec![Vec::new(), Vec::new()]),
             backend_supported: None,
             events: SpecializationEvents::default(),
+            inflight: Vec::new(),
+            workers: Vec::new(),
+            now: 0,
+            awake: BTreeSet::new(),
+            wake: BinaryHeap::new(),
+            was_enabled: true,
         }
     }
 
@@ -292,8 +473,9 @@ impl SchemePredictor {
 
     /// Register (or re-register, after a caller-side pipeline swap) a dispatch site.
     ///
-    /// Sites without scalar params, or whose shader has no single `[goldy_compute]`
-    /// entry to scope bake macros to, are not tracked.
+    /// `facts` are the node's tensor layout facts in ascending slot order (see
+    /// [`tensor_fact_slot`]). Sites with neither scalar params nor facts, or whose shader
+    /// has no single `[goldy_compute]` entry to scope bake macros to, are not tracked.
     pub(crate) fn register_site(
         &mut self,
         node: u32,
@@ -301,11 +483,12 @@ impl SchemePredictor {
         provenance: &Arc<ShaderProvenance>,
         label: crate::SchemeLabel,
         slots: &[u32],
+        facts: &[(u32, u32)],
     ) {
         if let Some(old) = self.sites.remove(&node) {
             self.retire_site(old);
         }
-        if slots.is_empty() {
+        if slots.is_empty() && facts.is_empty() {
             return;
         }
         let Some(entry) = provenance.compute_entry() else {
@@ -317,29 +500,61 @@ impl SchemePredictor {
             entry.to_string(),
             label,
             slots,
+            facts,
             &self.policy,
         );
         self.sites.insert(node, site);
+        self.awake.insert(node);
     }
 
-    /// Re-register child's tracked dispatch sites at `node_offset` in the parent IR.
-    pub(crate) fn copy_sites_from(&mut self, child: &Self, node_offset: u32) {
+    /// The tensor layout facts `node` was registered with.
+    pub(crate) fn tensor_facts(&self, node: u32) -> BakedSlots {
+        self.sites.get(&node).map(|s| s.facts.clone()).unwrap_or_default()
+    }
+
+    /// Re-register child's tracked dispatch sites at `map(child node)` in the parent IR;
+    /// `None` skips a site.
+    pub(crate) fn copy_sites_mapped(&mut self, child: &Self, map: impl Fn(u32) -> Option<u32>) {
         let snapshot: Vec<_> = child
             .sites
             .iter()
-            .map(|(&idx, site)| {
-                (
-                    idx + node_offset,
+            .filter_map(|(&idx, site)| {
+                Some((
+                    map(idx)?,
                     site.universal,
                     Arc::clone(&site.provenance),
                     site.label.clone(),
                     site.last.clone(),
-                )
+                    site.facts.clone(),
+                ))
             })
             .collect();
-        for (idx, universal, provenance, label, slots) in snapshot {
-            self.register_site(idx, universal, &provenance, label, &slots);
+        for (idx, universal, provenance, label, slots, facts) in snapshot {
+            self.register_site(idx, universal, &provenance, label, &slots, &facts);
         }
+    }
+
+    /// Stop tracking `node`, releasing its variants through the retire queue.
+    pub(crate) fn remove_site(&mut self, node: u32) {
+        if let Some(site) = self.sites.remove(&node) {
+            self.retire_site(site);
+        }
+    }
+
+    /// Move every site to `map(node)`, keeping its history; `None` removes the site.
+    pub(crate) fn rekey(&mut self, map: impl Fn(u32) -> Option<u32>) {
+        let sites = std::mem::take(&mut self.sites);
+        for (node, site) in sites {
+            match map(node) {
+                Some(to) => {
+                    self.sites.insert(to, site);
+                }
+                None => self.retire_site(site),
+            }
+        }
+        // Scheduled node indices are stale; step every site once to reschedule it.
+        self.wake.clear();
+        self.awake = self.sites.keys().copied().collect();
     }
 
     /// Whether `node` currently runs a predictor-chosen variant instead of the caller's pipeline.
@@ -347,15 +562,18 @@ impl SchemePredictor {
         self.sites.get(&node).is_some_and(SitePredictor::is_promoted)
     }
 
-    /// The caller changed scalar `slot` on `node`. Demote if the running variant baked it.
+    /// The caller set scalar `slot` on `node` to `word`. Demote if the running variant
+    /// baked another word.
     ///
     /// Returns the universal pipeline the scheme must rebind, if a demotion happened.
-    pub(crate) fn on_param_changed(&mut self, node: u32, slot: usize) -> Option<ComputePipelineHandle> {
+    pub(crate) fn on_param_changed(&mut self, node: u32, slot: usize, word: u32) -> Option<ComputePipelineHandle> {
         let policy = self.policy;
+        let from = self.now + 1;
         let site = self.sites.get_mut(&node)?;
-        if slot >= site.streak.len() {
+        if slot >= site.last.len() || !site.set_word(slot, word, from) {
             return None;
         }
+        self.awake.insert(node);
         let slot_id = slot as u32;
         let mut burned = false;
         if site
@@ -393,8 +611,9 @@ impl SchemePredictor {
             tracing::debug!(
                 node,
                 label = %site.label,
+                kernel = %site.kernel(),
                 slot,
-                baked = ?demoted.baked,
+                baked = %site.describe(&demoted.baked),
                 "specialization: demoted (baked param changed)"
             );
             rebind = Some(site.universal);
@@ -408,57 +627,76 @@ impl SchemePredictor {
 
     /// Run the predictor at the top of a submit, before dirtiness is read for recording.
     ///
-    /// `ir_clean` is whether the scheme was clean coming into this submit. Returns `true`
-    /// when a node's pipeline was rebound (the scheme must mark itself params-dirty).
-    pub(crate) fn begin_submit(
-        &mut self,
-        device: &Runtime,
-        ir: &mut GraphIR,
-        ir_clean: bool,
-        topo_dirty: bool,
-    ) -> bool {
+    /// Steps only the sites with something to decide: new sites, sites whose words
+    /// changed, sites with a compile in flight, and sites due by their schedule. A scheme
+    /// whose sites have all settled does no work here. Returns `true` when a node's
+    /// pipeline was rebound (the scheme must mark itself params-dirty).
+    pub(crate) fn begin_submit(&mut self, device: &Runtime, ir: &mut GraphIR) -> bool {
+        self.now += 1;
         if self.sites.is_empty() {
             return false;
         }
         if !self.enabled(device) {
-            return self.disable_all(ir);
+            let rebound = self.was_enabled && self.disable_all(ir);
+            self.was_enabled = false;
+            return rebound;
         }
+        if !self.was_enabled {
+            self.was_enabled = true;
+            self.wake.clear();
+            self.awake = self.sites.keys().copied().collect();
+        }
+        let now = self.now;
+        while let Some(&Reverse((at, node))) = self.wake.peek() {
+            if at > now {
+                break;
+            }
+            self.wake.pop();
+            self.awake.insert(node);
+        }
+        if self.awake.is_empty() {
+            return false;
+        }
+        let _tz = crate::tracy_zone!("specialization.step");
         let policy = self.policy;
         let mut rebound = false;
-        let mut node_indices: Vec<u32> = self.sites.keys().copied().collect();
-        node_indices.sort_unstable();
-        for node in node_indices {
+        self.inflight
+            .retain(|j| j.upgrade().is_some_and(|j| j.holders.load(Ordering::Acquire) > 0));
+        self.workers.retain(|w| !w.is_finished());
+        for node in std::mem::take(&mut self.awake) {
+            let Some(site) = self.sites.get_mut(&node) else {
+                continue;
+            };
             let Some(NodeKind::Dispatch {
                 pipeline, user_slots, ..
             }) = ir.nodes.get_mut(node as usize).map(|n| &mut n.kind)
             else {
                 continue;
             };
-            let slots: Vec<u32> = user_slots.clone();
-            let site = self.sites.get_mut(&node).expect("iterating own keys");
-            if slots.len() != site.last.len() {
+            if user_slots.len() != site.last.len() {
                 // Shape drift is not something the builder allows; be defensive anyway.
                 continue;
             }
-            if topo_dirty {
-                site.reset_streaks();
-            }
-            site.observe(&slots, ir_clean);
-            match Self::step_site(
+            site.submitted = true;
+            let change = Self::step_site(
                 site,
-                &slots,
+                user_slots,
                 device,
                 &self.variants,
                 &mut self.retiring,
+                &mut self.inflight,
+                &mut self.workers,
                 &mut self.events,
                 &policy,
                 node,
-            ) {
-                NodeChange::None => {}
-                NodeChange::Bind(handle) => {
-                    *pipeline = handle;
-                    rebound = true;
-                }
+                now,
+            );
+            if let NodeChange::Bind(handle) = change {
+                *pipeline = handle;
+                rebound = true;
+            }
+            if let Some(at) = site.next_wake(now, &policy) {
+                self.wake.push(Reverse((at.max(now + 1), node)));
             }
         }
         rebound
@@ -470,14 +708,15 @@ impl SchemePredictor {
         self.retiring.push_back(Vec::new());
     }
 
-    /// Join every in-flight compile (tests).
+    /// Whether a site has a compile in flight or a compiled variant awaiting promotion.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.sites.values().any(|s| s.job.is_some() || s.ready.is_some())
+    }
+
+    /// Join every compile this scheme started.
     pub(crate) fn wait_for_compiles(&mut self) {
-        for site in self.sites.values_mut() {
-            if let Some(job) = site.job.as_mut() {
-                if let Some(thread) = job.thread.take() {
-                    let _ = thread.join();
-                }
-            }
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
         }
     }
 
@@ -486,9 +725,20 @@ impl SchemePredictor {
         self.variants.lock().unwrap().len()
     }
 
+    /// Per slot of `node`: submits it has held its word, or `None` for a slot never changed.
     #[cfg(test)]
-    pub(crate) fn site_streaks(&self, node: u32) -> Option<Vec<u32>> {
-        self.sites.get(&node).map(|s| s.streak.clone())
+    pub(crate) fn site_held(&self, node: u32) -> Option<Vec<Option<u64>>> {
+        self.sites.get(&node).map(|s| {
+            (0..s.last.len())
+                .map(|slot| s.changed[slot].then(|| s.held(slot, self.now)))
+                .collect()
+        })
+    }
+
+    /// Whether no site is awake or scheduled: submits do no predictor work.
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.awake.is_empty() && self.wake.is_empty()
     }
 
     #[cfg(test)]
@@ -532,7 +782,7 @@ impl SchemePredictor {
                 }
                 self.events.demotions += 1;
             }
-            site.reset_streaks();
+            site.restart(self.now + 1);
         }
         rebound
     }
@@ -555,32 +805,47 @@ impl SchemePredictor {
         device: &Runtime,
         variants: &Arc<Mutex<VariantCache>>,
         retiring: &mut VecDeque<Vec<Arc<ComputePipeline>>>,
+        inflight: &mut Vec<std::sync::Weak<CompileJob>>,
+        workers: &mut Vec<std::thread::JoinHandle<()>>,
         events: &mut SpecializationEvents,
         policy: &SpecializationPolicy,
         node: u32,
+        now: u64,
     ) -> NodeChange {
         if site.pinned {
             return NodeChange::None;
         }
 
-        // A compile whose baked facts no longer hold is wasted work; stop it.
-        if let Some(job) = site.job.as_ref() {
-            if !site.all_baked_still_hold(&job.baked, slots) {
-                let baked = job.baked.clone();
-                site.job.take();
-                // `observe` already ran: a baked slot whose word moved has streak 0.
-                for (s, _) in baked {
-                    if site.streak[s as usize] == 0 {
-                        site.burn_slot(s as usize, policy);
-                    }
-                }
+        // Words normally change through `on_param_changed`; catch any that moved another way.
+        let mut demote = false;
+        for (s, &word) in slots.iter().enumerate() {
+            if !site.set_word(s, word, now) {
+                continue;
             }
-        }
-        if let Some(c) = site.ready.as_ref() {
-            if !site.all_baked_still_hold(&c.baked, slots) {
+            let bakes = |baked: &BakedSlots| baked.iter().any(|&(b, _)| b == s as u32);
+            let mut burned = false;
+            if site.job.as_ref().is_some_and(|j| bakes(&j.baked)) {
+                site.job.take();
+                burned = true;
+            }
+            if site.ready.as_ref().is_some_and(|c| bakes(&c.baked)) {
                 let c = site.ready.take().expect("checked");
                 retiring.back_mut().expect("two generations").push(c.pipeline);
+                burned = true;
             }
+            if site.promoted.as_ref().is_some_and(|c| bakes(&c.baked)) {
+                let c = site.promoted.take().expect("checked");
+                retiring.back_mut().expect("two generations").push(c.pipeline);
+                events.demotions += 1;
+                demote = true;
+                burned = true;
+            }
+            if burned {
+                site.burn_slot(s, policy);
+            }
+        }
+        if demote {
+            return NodeChange::Bind(site.universal);
         }
 
         // Collect a finished compile.
@@ -588,7 +853,7 @@ impl SchemePredictor {
             let job = site.job.take().expect("checked");
             match outcome {
                 Ok(()) => {
-                    let pipeline = variants.lock().unwrap().get(site.provenance.id(), &job.baked);
+                    let pipeline = variants.lock().unwrap().get(site.variant_key(), &job.baked);
                     match pipeline {
                         Some(pipeline) => {
                             site.ready = Some(Candidate {
@@ -607,7 +872,8 @@ impl SchemePredictor {
                     tracing::warn!(
                         node,
                         label = %site.label,
-                        baked = ?job.baked,
+                        kernel = %site.kernel(),
+                        baked = %site.describe(&job.baked),
                         failures = site.failures,
                         %err,
                         "specialization: variant compile failed"
@@ -629,7 +895,7 @@ impl SchemePredictor {
         if site
             .ready
             .as_ref()
-            .is_some_and(|c| site.all_baked_at_least(&c.baked, policy.promote_after))
+            .is_some_and(|c| site.all_baked_proven(&c.baked, now, policy.promote_after))
         {
             let next = site.ready.take().expect("checked");
             if let Some(prev) = site.promoted.take() {
@@ -637,17 +903,23 @@ impl SchemePredictor {
             }
             let handle = next.pipeline.handle;
             events.promotions += 1;
-            tracing::debug!(node, label = %site.label, baked = ?next.baked, "specialization: promoted");
+            tracing::debug!(
+                node,
+                label = %site.label,
+                kernel = %site.kernel(),
+                baked = %site.describe(&next.baked),
+                "specialization: promoted"
+            );
             site.promoted = Some(next);
             return NodeChange::Bind(handle);
         }
 
         // Nothing in flight: decide whether to warm a (wider) variant.
         if site.job.is_none() && site.ready.is_none() {
-            let target = site.bake_target(slots);
+            let target = site.bake_target(now);
             let already = site.promoted.as_ref().map(|c| c.baked.as_slice()).unwrap_or(&[]);
             if !target.is_empty() && target != already {
-                let cached = variants.lock().unwrap().get(site.provenance.id(), &target);
+                let cached = variants.lock().unwrap().get(site.variant_key(), &target);
                 match cached {
                     Some(pipeline) => {
                         site.ready = Some(Candidate {
@@ -656,24 +928,34 @@ impl SchemePredictor {
                         });
                     }
                     None => {
-                        events.warms += 1;
-                        tracing::debug!(node, label = %site.label, baked = ?target, "specialization: warming");
-                        site.job = Some(spawn_compile(device, site, target, variants));
+                        let key = site.variant_key();
+                        let joined = inflight
+                            .iter()
+                            .filter_map(std::sync::Weak::upgrade)
+                            .find(|j| j.key == key && j.baked == target && j.outcome.lock().unwrap().is_none())
+                            .and_then(|j| WarmJob::attach(&j));
+                        let (job, action) = match joined {
+                            Some(job) => (job, "specialization: joining in-flight compile"),
+                            None => {
+                                events.warms += 1;
+                                let job = spawn_compile(device, site, target, variants, workers);
+                                inflight.push(Arc::downgrade(&job.job));
+                                (job, "specialization: warming")
+                            }
+                        };
+                        tracing::debug!(
+                            node,
+                            label = %site.label,
+                            kernel = %site.kernel(),
+                            baked = %site.describe(&job.baked),
+                            "{action}"
+                        );
+                        site.job = Some(job);
                     }
                 }
             }
         }
         NodeChange::None
-    }
-}
-
-impl Drop for SchemePredictor {
-    fn drop(&mut self) {
-        for site in self.sites.values() {
-            if let Some(job) = site.job.as_ref() {
-                job.cancel();
-            }
-        }
     }
 }
 
@@ -683,73 +965,69 @@ fn spawn_compile(
     site: &SitePredictor,
     baked: BakedSlots,
     variants: &Arc<Mutex<VariantCache>>,
+    workers: &mut Vec<std::thread::JoinHandle<()>>,
 ) -> WarmJob {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let outcome: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+    let job = Arc::new(CompileJob {
+        key: site.variant_key(),
+        baked: baked.clone(),
+        holders: AtomicUsize::new(1),
+        outcome: Mutex::new(None),
+    });
 
     let device = device.clone();
     let provenance = Arc::clone(&site.provenance);
     let entry = site.entry.clone();
     let label = site.label.clone();
     let variants = Arc::clone(variants);
-    let worker_cancel = Arc::clone(&cancel);
-    let worker_outcome = Arc::clone(&outcome);
-    let worker_baked = baked.clone();
+    let worker_job = Arc::clone(&job);
 
     let thread = std::thread::Builder::new()
         .name("goldy-specialize".into())
         .spawn(move || {
-            let result = compile_variant(&device, &provenance, &entry, &label, &worker_baked, &worker_cancel);
+            let job = worker_job;
+            let result = compile_variant(&device, &provenance, &entry, &label, &job.baked, &job.holders);
             let filed = match result {
                 Ok(Some(pipeline)) => {
                     variants
                         .lock()
                         .unwrap()
-                        .insert(provenance.id(), worker_baked, Arc::new(pipeline));
+                        .insert(job.key, job.baked.clone(), Arc::new(pipeline));
                     Ok(())
                 }
-                // Cancelled before it did any work: nothing to report, nothing to cache.
+                // Abandoned before it did any work: nothing to report, nothing to cache.
                 Ok(None) => return,
                 Err(err) => Err(err),
             };
-            *worker_outcome.lock().unwrap() = Some(filed);
+            *job.outcome.lock().unwrap() = Some(filed);
         });
 
-    let thread = match thread {
-        Ok(handle) => Some(handle),
-        Err(err) => {
-            *outcome.lock().unwrap() = Some(Err(format!("spawn specialization worker: {err}")));
-            None
-        }
-    };
-
-    WarmJob {
-        baked,
-        cancel,
-        outcome,
-        thread,
+    match thread {
+        Ok(handle) => workers.push(handle),
+        Err(err) => *job.outcome.lock().unwrap() = Some(Err(format!("spawn specialization worker: {err}"))),
     }
+
+    WarmJob { baked, job }
 }
 
-/// `Ok(None)` when `cancel` was raised before the compile started.
+/// `Ok(None)` when every holder let go before the compile started.
 fn compile_variant(
     device: &Runtime,
     provenance: &ShaderProvenance,
     entry: &str,
     label: &crate::SchemeLabel,
     baked: &[(u32, u32)],
-    cancel: &AtomicBool,
+    holders: &AtomicUsize,
 ) -> Result<Option<ComputePipeline>, String> {
-    if cancel.load(Ordering::Relaxed) {
+    if holders.load(Ordering::Acquire) == 0 {
         return Ok(None);
     }
     let defines: Vec<(String, String)> = baked
         .iter()
-        .map(|&(slot, word)| (scalar_specialization_macro(entry, slot), format!("{word}u")))
+        .map(|&(slot, word)| (bake_macro(entry, slot), format!("{word}u")))
         .collect();
     let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    // Once Slang is running the cancel flag is advisory: the module compile cannot be
-    // aborted, but a result that arrives after cancellation is still worth caching.
+    // Once Slang is running, abandonment is advisory: the module compile cannot be
+    // aborted, but a result that arrives after every holder let go is still worth caching.
     let module = ShaderModule::from_provenance(device, provenance, &define_refs).map_err(|e| format!("{e:#}"))?;
     let pipeline =
         ComputePipeline::new_with_label(device, &module, Some(label.as_str())).map_err(|e| format!("{e:#}"))?;
@@ -773,19 +1051,21 @@ mod tests {
             entries: VecDeque::new(),
             capacity: 2,
         };
-        cache.insert(1, vec![(0, 1)], mk());
-        cache.insert(1, vec![(0, 2)], mk());
-        assert!(cache.get(1, &[(0, 1)]).is_some(), "touch makes (0,1) most recent");
-        cache.insert(1, vec![(0, 3)], mk());
+        let (one, two) = (VariantKey::Module(1), VariantKey::Module(2));
+        cache.insert(one, vec![(0, 1)], mk());
+        cache.insert(one, vec![(0, 2)], mk());
+        assert!(cache.get(one, &[(0, 1)]).is_some(), "touch makes (0,1) most recent");
+        cache.insert(one, vec![(0, 3)], mk());
         assert_eq!(cache.len(), 2);
-        assert!(cache.get(1, &[(0, 2)]).is_none(), "least recently used was evicted");
-        assert!(cache.get(1, &[(0, 1)]).is_some());
-        assert!(cache.get(1, &[(0, 3)]).is_some());
-        assert!(cache.get(2, &[(0, 3)]).is_none(), "keyed by provenance too");
+        assert!(cache.get(one, &[(0, 2)]).is_none(), "least recently used was evicted");
+        assert!(cache.get(one, &[(0, 1)]).is_some());
+        assert!(cache.get(one, &[(0, 3)]).is_some());
+        assert!(cache.get(two, &[(0, 3)]).is_none(), "keyed by program too");
+        let kernel = VariantKey::Kernel(goldy_shader_ir::KernelId(1));
+        assert!(cache.get(kernel, &[(0, 3)]).is_none(), "a kernel id is not a module id");
     }
 
-    #[test]
-    fn bake_target_follows_per_slot_thresholds() {
+    fn two_scalar_site(facts: &[(u32, u32)], policy: &SpecializationPolicy) -> SitePredictor {
         let dev = crate::test_support::mock_runtime();
         let shader = ShaderModule::from_slang(
             &dev,
@@ -793,28 +1073,96 @@ mod tests {
         )
         .unwrap();
         let pipeline = ComputePipeline::new(&dev, &shader).unwrap();
-        let policy = SpecializationPolicy::default();
-        let mut site = SitePredictor::new(
+        SitePredictor::new(
             pipeline.handle,
             Arc::clone(&pipeline.provenance),
             "k".into(),
             "t".into(),
             &[7, 9],
-            &policy,
-        );
-        for _ in 0..2 {
-            site.observe(&[7, 9], true);
-        }
-        assert_eq!(site.bake_target(&[7, 9]), vec![(0, 7), (1, 9)]);
-        site.observe(&[7, 4], true);
-        assert_eq!(site.streak, vec![3, 0]);
-        assert_eq!(site.bake_target(&[7, 4]), vec![(0, 7)]);
+            facts,
+            policy,
+        )
+    }
+
+    #[test]
+    fn unchanged_slots_are_certain_and_changed_ones_earn_their_threshold() {
+        let policy = SpecializationPolicy::default();
+        let (warm, promote) = (u64::from(policy.warm_after), u64::from(policy.promote_after));
+        let numel = tensor_fact_slot(1, 1);
+        let mut site = two_scalar_site(&[(numel, 4096)], &policy);
+
+        // Recorded words and layout facts bake at the first submit, already proven.
+        let all = vec![(0, 7), (1, 9), (numel, 4096)];
+        assert_eq!(site.bake_target(1), all);
+        assert!(site.all_baked_proven(&all, 1, policy.promote_after));
+
+        // A change before the first submit is still recording.
+        assert!(site.set_word(1, 8, 1));
+        assert!(site.is_certain(1));
+        site.submitted = true;
+
+        // After it, slot 1 is predicted from the submit that first runs its new word.
+        assert!(site.set_word(1, 4, 5));
+        assert!(!site.set_word(1, 4, 6), "same word is not a change");
+        assert!(!site.is_certain(1));
+        assert_eq!(site.bake_target(5), vec![(0, 7), (numel, 4096)]);
+        assert_eq!(site.next_wake(5, &policy), Some(5 + warm));
+        assert_eq!(site.bake_target(5 + warm), vec![(0, 7), (1, 4), (numel, 4096)]);
+        let widened = [(0, 7), (1, 4)];
+        assert!(!site.all_baked_proven(&widened, 5 + warm, policy.promote_after));
+        assert!(site.all_baked_proven(&widened, 5 + promote, policy.promote_after));
+
         site.burn_slot(1, &policy);
         assert_eq!(site.bake_threshold[1], policy.promote_after);
         site.burn_slot(1, &policy);
         assert_eq!(site.bake_threshold[1], policy.promote_after * 2);
-        // Not-clean submits keep but do not advance a held slot.
-        site.observe(&[7, 4], false);
-        assert_eq!(site.streak, vec![3, 0]);
+    }
+
+    #[test]
+    fn layout_facts_name_their_macros() {
+        let policy = SpecializationPolicy::default();
+        let numel = tensor_fact_slot(1, 1);
+        let site = two_scalar_site(&[(tensor_fact_slot(0, 0), 1), (numel, 4096)], &policy);
+        assert!(site.is_certain(numel));
+        assert_eq!(bake_macro("k", numel), goldy_shader_ir::tensor_fact_macro("k", 1, 1));
+        assert_eq!(site.describe(&[(numel, 16)]), "t1.numel=0x10");
+    }
+
+    #[test]
+    fn identical_warms_share_one_compile() {
+        let dev = crate::test_support::mock_runtime();
+        let shader = ShaderModule::from_slang(
+            &dev,
+            "[goldy_compute]\n[numthreads(1,1,1)]\nvoid k(Scattered<uint> d, ThreadId id, uint a) { d[id.x] = a; }",
+        )
+        .unwrap();
+        let pipeline = ComputePipeline::new(&dev, &shader).unwrap();
+        let policy = SpecializationPolicy::default();
+        let site = SitePredictor::new(
+            pipeline.handle,
+            Arc::clone(&pipeline.provenance),
+            "k".into(),
+            "t".into(),
+            &[7],
+            &[],
+            &policy,
+        );
+        let variants = Arc::new(Mutex::new(VariantCache {
+            entries: VecDeque::new(),
+            capacity: 4,
+        }));
+        let mut workers = Vec::new();
+        let first = spawn_compile(&dev, &site, vec![(0, 7)], &variants, &mut workers);
+        let second = WarmJob::attach(&first.job).expect("first still holds the compile");
+        assert!(Arc::ptr_eq(&first.job, &second.job));
+        assert_eq!(first.job.holders.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(second.job.holders.load(Ordering::Acquire), 1);
+        workers.pop().expect("worker spawned").join().unwrap();
+        assert_eq!(second.poll(), Some(Ok(())));
+        assert_eq!(variants.lock().unwrap().len(), 1);
+        let job = Arc::clone(&second.job);
+        drop(second);
+        assert!(WarmJob::attach(&job).is_none(), "nobody holds it any more");
     }
 }

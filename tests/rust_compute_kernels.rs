@@ -6,10 +6,9 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions, Runtime,
+    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
-use std::ops::Shr;
 use std::sync::Arc;
 
 #[compute(workgroup_size = [64, 1, 1])]
@@ -71,6 +70,125 @@ fn reduce_max(data: &[f32], out: goldy::gpu::Scattered<f32>) {
     if local == 0 {
         out[0] = peak;
     }
+}
+
+#[compute(workgroup_size = [32, 1, 1])]
+fn strided_reduce_32(data: &[f32], count: u32, sums: goldy::gpu::Scattered<f32>, peaks: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 32>();
+    let local = goldy::gpu::local_id().x;
+    let mut acc = 0.0;
+    let mut peak = -1e30;
+    let mut j = local;
+    while j < count {
+        acc = acc + data[j];
+        peak = goldy::gpu::max(peak, data[j]);
+        j = j + 32;
+    }
+    acc = goldy::gpu::workgroup_sum::<32>(acc, scratch);
+    peak = goldy::gpu::workgroup_max::<32>(peak, scratch);
+    sums[local] = acc;
+    peaks[local] = peak;
+}
+
+#[compute(workgroup_size = [256, 1, 1])]
+fn strided_reduce_256(data: &[f32], count: u32, sums: goldy::gpu::Scattered<f32>, peaks: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 256>();
+    let local = goldy::gpu::local_id().x;
+    let mut acc = 0.0;
+    let mut peak = -1e30;
+    let mut j = local;
+    while j < count {
+        acc = acc + data[j];
+        peak = goldy::gpu::max(peak, data[j]);
+        j = j + 256;
+    }
+    acc = goldy::gpu::workgroup_sum::<256>(acc, scratch);
+    peak = goldy::gpu::workgroup_max::<256>(peak, scratch);
+    sums[local] = acc;
+    peaks[local] = peak;
+}
+
+#[compute(workgroup_size = [1024, 1, 1])]
+fn strided_reduce_1024(data: &[f32], count: u32, sums: goldy::gpu::Scattered<f32>, peaks: goldy::gpu::Scattered<f32>) {
+    let mut scratch = goldy::gpu::workgroup_array::<f32, 1024>();
+    let local = goldy::gpu::local_id().x;
+    let mut acc = 0.0;
+    let mut peak = -1e30;
+    let mut j = local;
+    while j < count {
+        acc = acc + data[j];
+        peak = goldy::gpu::max(peak, data[j]);
+        j = j + 1024;
+    }
+    acc = goldy::gpu::workgroup_sum::<1024>(acc, scratch);
+    peak = goldy::gpu::workgroup_max::<1024>(peak, scratch);
+    sums[local] = acc;
+    peaks[local] = peak;
+}
+
+/// Values over eleven decades of both signs, so the association of a sum shows in its bits.
+fn wide_range_values(len: usize) -> Vec<f32> {
+    (0..len as u32)
+        .map(|i| {
+            let h = i.wrapping_add(1).wrapping_mul(2_654_435_761);
+            let magnitude = 10f32.powi((h >> 28) as i32 % 11 - 4);
+            let sign = if h & 1 == 0 { 1.0 } else { -1.0 };
+            sign * magnitude * (1.0 + ((h >> 8) & 0xffff) as f32 / 65536.0)
+        })
+        .collect()
+}
+
+/// Lane `l`'s left fold over `data[l], data[l + n], …`, as the strided loops compute it.
+fn lane_partials(data: &[f32], n: usize, init: f32, op: fn(f32, f32) -> f32) -> Vec<f32> {
+    (0..n)
+        .map(|l| data[l..].iter().step_by(n).fold(init, |acc, &x| op(acc, x)))
+        .collect()
+}
+
+/// The documented workgroup association: the pairwise tree over adjacent lanes.
+fn adjacent_tree(values: &[f32], op: fn(f32, f32) -> f32) -> f32 {
+    if values.len() == 1 {
+        return values[0];
+    }
+    let (lo, hi) = values.split_at(values.len() / 2);
+    op(adjacent_tree(lo, op), adjacent_tree(hi, op))
+}
+
+fn check_strided_reduce(
+    device: &goldy::Runtime,
+    n: usize,
+    record: impl FnOnce(&mut Scheme, &goldy::Buffer, u32, &goldy::Buffer, &goldy::Buffer),
+) -> Result<(), libtest_mimic::Failed> {
+    let ctx = device.create_context()?;
+    let data = wide_range_values(n + n / 2 + 3);
+    let partials = lane_partials(&data, n, 0.0, |a, b| a + b);
+    let want_sum = adjacent_tree(&partials, |a, b| a + b);
+    let sequential: f32 = partials.iter().sum();
+    assert_ne!(
+        want_sum.to_bits(),
+        sequential.to_bits(),
+        "n = {n}: data does not expose association"
+    );
+    let want_peak = adjacent_tree(&lane_partials(&data, n, -1e30, f32::max), f32::max);
+
+    let input = device.acquire_buffer_with_data(&data, BufferKind::Scattered)?;
+    let sums = device.acquire_buffer_with_data(&vec![0.0f32; n], BufferKind::Scattered)?;
+    let peaks = device.acquire_buffer_with_data(&vec![0.0f32; n], BufferKind::Scattered)?;
+    let mut scheme = Scheme::new(&ctx);
+    record(&mut scheme, &input, data.len() as u32, &sums, &peaks);
+    let mut frame = scheme.submit()?;
+    let got_sums: Vec<f32> = bytemuck::cast_slice(&(&mut frame >> &sums).take::<u8>()?).to_vec();
+    let got_peaks: Vec<f32> = bytemuck::cast_slice(&(&mut frame >> &peaks).take::<u8>()?).to_vec();
+    for lane in 0..n {
+        assert_eq!(
+            got_sums[lane].to_bits(),
+            want_sum.to_bits(),
+            "n = {n}, lane {lane}: sum {} vs {want_sum}",
+            got_sums[lane]
+        );
+        assert_eq!(got_peaks[lane], want_peak, "n = {n}, lane {lane}: max");
+    }
+    Ok(())
 }
 
 #[compute(workgroup_size = [256, 1, 1])]
@@ -151,6 +269,32 @@ fn main() {
             assert!(softmax_slice::CANONICAL_SOURCE.contains("exp(scores[(0u) + _goldy_sm_t] - _goldy_sm_max)"));
             Ok(())
         }),
+        libtest_mimic::Trial::test("rust_kernel_retained_definition_lowers_to_canonical_source", || {
+            use goldy::kernel::ir::emit_canonical_compute_source;
+            let lowered = |definition: goldy::kernel::ShaderKernel| {
+                assert!(definition.type_decls.is_empty(), "{}", definition.name);
+                emit_canonical_compute_source(&definition).source.canonical_slang
+            };
+            assert_eq!(lowered(saxpy::definition()?), saxpy::CANONICAL_SOURCE);
+            assert_eq!(lowered(double_u32::definition()?), double_u32::CANONICAL_SOURCE);
+            assert_eq!(lowered(fill_red::definition()?), fill_red::CANONICAL_SOURCE);
+            assert_eq!(
+                lowered(workgroup_sum_manual::definition()?),
+                workgroup_sum_manual::CANONICAL_SOURCE
+            );
+            assert_eq!(lowered(reduce_sum::definition()?), reduce_sum::CANONICAL_SOURCE);
+            assert_eq!(lowered(reduce_max::definition()?), reduce_max::CANONICAL_SOURCE);
+            assert_eq!(lowered(softmax_slice::definition()?), softmax_slice::CANONICAL_SOURCE);
+
+            let plasma = read_plasma_uniforms::definition()?;
+            assert_eq!(plasma.name, "read_plasma_uniforms");
+            assert_eq!(plasma.type_decls, vec![PlasmaUniforms::GPU_TYPE.to_slang_source()?]);
+            assert_eq!(
+                emit_canonical_compute_source(&plasma).source.canonical_slang,
+                format!("{}\n{}", plasma.type_decls[0], read_plasma_uniforms::CANONICAL_SOURCE)
+            );
+            Ok(())
+        }),
         libtest_mimic::Trial::test("rust_kernel_workgroup_sum_gpu", {
             let device = Arc::clone(&device);
             move || {
@@ -206,6 +350,29 @@ fn main() {
                 let got: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
                 assert!((got[0] - 42.5).abs() < 1e-4, "max {}", got[0]);
                 Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("rust_kernel_workgroup_reduce_association_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                check_strided_reduce(&device, 32, |scheme, data, count, sums, peaks| {
+                    let kernel = strided_reduce_32::Kernel::prepare(&device).expect("prepare");
+                    kernel
+                        .record(scheme, "reduce32", data, count, sums, peaks)
+                        .groups([1, 1, 1]);
+                })?;
+                check_strided_reduce(&device, 256, |scheme, data, count, sums, peaks| {
+                    let kernel = strided_reduce_256::Kernel::prepare(&device).expect("prepare");
+                    kernel
+                        .record(scheme, "reduce256", data, count, sums, peaks)
+                        .groups([1, 1, 1]);
+                })?;
+                check_strided_reduce(&device, 1024, |scheme, data, count, sums, peaks| {
+                    let kernel = strided_reduce_1024::Kernel::prepare(&device).expect("prepare");
+                    kernel
+                        .record(scheme, "reduce1024", data, count, sums, peaks)
+                        .groups([1, 1, 1]);
+                })
             }
         }),
         libtest_mimic::Trial::test("rust_kernel_workgroup_softmax_gpu", {
@@ -277,6 +444,7 @@ fn main() {
                 let y = pool.acquire_buffer_with_data(&y_data, BufferKind::Scattered)?;
 
                 let kernel = saxpy::Kernel::prepare(&device)?;
+                assert_eq!(kernel.def().definition, Some(saxpy::definition()?));
                 let mut scheme = Scheme::new(&ctx);
                 kernel
                     .record(&mut scheme, "saxpy", &x, &y, a)
@@ -300,6 +468,7 @@ fn main() {
         libtest_mimic::Trial::test("kernel_abi_roundtrip_from_canonical", || {
             let def = goldy::slang::try_kernel_def_from_source(saxpy::CANONICAL_SOURCE)
                 .expect("parse saxpy canonical source");
+            assert!(def.definition.is_none(), "parsed Slang stays opaque");
             assert_eq!(def.entry, "cs_main");
             assert_eq!(def.workgroup_size, [64, 1, 1]);
             assert_eq!(def.params.len(), 3);
@@ -431,5 +600,8 @@ fn main() {
         }),
     ];
 
-    libtest_mimic::run(&args, tests).exit();
+    let conclusion = libtest_mimic::run(&args, tests);
+    drop(device);
+    drop(instance);
+    conclusion.exit_if_failed();
 }

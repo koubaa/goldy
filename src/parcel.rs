@@ -1300,7 +1300,7 @@ impl Drop for BookkeepingGuard {
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::exchange::MemoryExchange;
+
     use crate::runtime::Runtime;
     use crate::scheme::Scheme;
     use crate::timeline::{PromiseState, Settle, TimelinePromise};

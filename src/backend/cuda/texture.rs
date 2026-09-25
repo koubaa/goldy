@@ -636,6 +636,67 @@ pub(super) fn memcpy_dtoh_array(
     )
 }
 
+/// CUDA array → pinned host (tight or pitched destination).
+pub(super) fn memcpy_array_to_host(
+    stream: &CudaStream,
+    tex: &CudaTextureResource,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    output: &mut [u8],
+    host_offset: usize,
+    dst_row_pitch: u32,
+) -> Result<()> {
+    let bpp = tex.bytes_per_pixel();
+    let tight_pitch = width.saturating_mul(bpp);
+    let pitch = if dst_row_pitch == 0 { tight_pitch } else { dst_row_pitch };
+    if pitch < tight_pitch {
+        bail!("CUDA: dst_row_pitch {pitch} < tight row bytes {tight_pitch}");
+    }
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    let needed = host_offset
+        .checked_add(pitch.saturating_mul(height.saturating_sub(1)) as usize)
+        .and_then(|n| n.checked_add(tight_pitch as usize))
+        .context("CUDA: texture→host footprint overflow")?;
+    if needed > output.len() {
+        bail!(
+            "CUDA: texture→host range [{host_offset}..{needed}] exceeds staging {}",
+            output.len()
+        );
+    }
+    if x.checked_add(width).map(|end| end > tex.width).unwrap_or(true)
+        || y.checked_add(height).map(|end| end > tex.height).unwrap_or(true)
+    {
+        bail!(
+            "CUDA: texture→host region ({x},{y},{width}x{height}) exceeds texture {}x{}",
+            tex.width,
+            tex.height
+        );
+    }
+    stream
+        .context()
+        .bind_to_thread()
+        .context("CUDA: bind context for texture→host")?;
+    let dst_host = output[host_offset..].as_mut_ptr() as *mut _;
+    let mut copy = empty_memcpy2d();
+    copy.srcMemoryType = sys::CUmemorytype::CU_MEMORYTYPE_ARRAY;
+    copy.srcArray = tex.array();
+    copy.srcXInBytes = (x * bpp) as usize;
+    copy.srcY = y as usize;
+    copy.dstMemoryType = sys::CUmemorytype::CU_MEMORYTYPE_HOST;
+    copy.dstHost = dst_host;
+    copy.dstPitch = pitch as usize;
+    copy.WidthInBytes = tight_pitch as usize;
+    copy.Height = height as usize;
+    check_cu(
+        unsafe { sys::cuMemcpy2DAsync_v2(&copy, stream.cu_stream()) },
+        "cuMemcpy2DAsync (array→host)",
+    )
+}
+
 /// CUDA array → device buffer (tight or pitched destination).
 pub(super) fn memcpy_array_to_device(
     stream: &CudaStream,

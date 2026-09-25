@@ -34,6 +34,7 @@ use crate::handles::DeviceHandle;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
+use crate::validation_env::Validation;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,11 +106,19 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Create a new Goldy instance.
+    /// Create a new Goldy instance, validating as [`Validation::from_env`] requests.
     pub fn new() -> Result<Self> {
-        let backend = backend::create_shared_backend()?;
+        Self::with_validation(Validation::from_env())
+    }
+
+    /// Create a new Goldy instance whose backend and runtimes run the checks in `validation`.
+    ///
+    /// Some API-level switches are process-wide by nature: Metal reads
+    /// `MTL_SHADER_VALIDATION` once, before its first device exists.
+    pub fn with_validation(validation: Validation) -> Result<Self> {
+        let backend = backend::create_shared_backend(validation)?;
         let backend_type = backend.lock().unwrap().backend_type();
-        tracing::info!(?backend_type, "Goldy instance created");
+        tracing::info!(?backend_type, ?validation, "Goldy instance created");
         Ok(Self { backend })
     }
 
@@ -277,6 +286,7 @@ impl Adapter {
         tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
         let handle = backend.create_device(self.inner.info.id)?;
+        let validation = backend.validation();
 
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
@@ -308,7 +318,8 @@ impl Adapter {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation,
             }),
         })
     }
@@ -418,6 +429,20 @@ pub struct RuntimeCapabilities {
     ///
     /// When `true`, [`crate::MeshPipelineDesc::amplification`] may be set.
     pub amplification_shaders: bool,
+
+    /// Threads per subgroup (warp, wave) of a compute workgroup, when every subgroup
+    /// has exactly this many and holds consecutive local invocations of a
+    /// one-dimensional workgroup. `None` when the width can vary or is unknown.
+    ///
+    /// Automatic fusion exchanges partial sums through subgroup reads when it is set.
+    pub subgroup_width: Option<u32>,
+
+    /// Whether a subgroup multiplies 16×16 f16 matrices into f32 accumulators on
+    /// matrix units (CUDA tensor cores from compute capability 8.0).
+    ///
+    /// Automatic fusion uses them only for schemes that admit
+    /// [`crate::ContractionPrecision::F16Factors`].
+    pub matrix_multiply: bool,
 }
 
 impl Default for RuntimeCapabilities {
@@ -445,6 +470,8 @@ impl Default for RuntimeCapabilities {
             ray_tracing_pipelines: false,
             mesh_shaders: false,
             amplification_shaders: false,
+            subgroup_width: None,
+            matrix_multiply: false,
         }
     }
 }
@@ -497,8 +524,10 @@ pub(crate) struct DeviceInner {
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
-    /// Lazily compiled stdlib MatMul kernel (fallback path).
-    pub(crate) stdlib_matmul: Mutex<Option<Arc<crate::compute::ComputePipeline>>>,
+    /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
+    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
+    /// The backend's [`Validation`], read once so hot paths need not lock the backend.
+    pub(crate) validation: Validation,
 }
 
 impl Clone for Runtime {
@@ -651,7 +680,8 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation: self.inner.validation,
             }),
         }
     }
@@ -821,16 +851,25 @@ impl Runtime {
         self.inner.backend.lock().unwrap().backend_type()
     }
 
-    pub(crate) fn stdlib_matmul_f32(&self) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
-        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap().clone() {
+    /// The checks this runtime's backend runs (see [`Instance::with_validation`]).
+    pub fn validation(&self) -> Validation {
+        self.inner.validation
+    }
+
+    pub(crate) fn stdlib_matmul_f32(
+        &self,
+        kind: crate::ops::matmul::MatMulFallback,
+    ) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
+        let index = kind as usize;
+        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
             return Ok(pipeline);
         }
-        let pipeline = crate::ops::matmul::prepare_stdlib(self).map_err(GoldyError::Backend)?;
-        let mut slot = self.inner.stdlib_matmul.lock().unwrap();
-        if let Some(existing) = slot.as_ref() {
+        let pipeline = crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?;
+        let mut slots = self.inner.stdlib_matmul.lock().unwrap();
+        if let Some(existing) = slots[index].as_ref() {
             return Ok(Arc::clone(existing));
         }
-        *slot = Some(Arc::clone(&pipeline));
+        slots[index] = Some(Arc::clone(&pipeline));
         Ok(pipeline)
     }
 
@@ -1194,9 +1233,9 @@ impl Runtime {
                 caps,
             }),
         };
-        let handle = {
+        let (handle, validation) = {
             let mut b = backend.lock().unwrap();
-            b.create_device(adapter.id())?
+            (b.create_device(adapter.id())?, b.validation())
         };
 
         let mut registry = ShaderLibraryRegistry::new();
@@ -1212,7 +1251,8 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation,
             }),
         })
     }
@@ -1286,10 +1326,10 @@ impl Drop for DeviceInner {
         // Wait for all GPU work on this device to complete before tearing down resources.
         // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
         // Skip if already lost: the hardware cannot make progress and destroy_device orders teardown.
-        let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
-        if !already_lost {
-            let mut backend = self.backend.lock().unwrap();
-            let _ = backend.device_wait_idle(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            if !backend.is_device_lost(self.handle) {
+                let _ = backend.device_wait_idle(self.handle);
+            }
         }
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
@@ -1297,8 +1337,9 @@ impl Drop for DeviceInner {
         // which runs before this (contexts hold a `Runtime` clone, so they outlive nothing
         // but are dropped first by users tearing down renderers before devices).
         if self.owns_backend_device {
-            let mut backend = self.backend.lock().unwrap();
-            backend.destroy_device(self.handle);
+            if let Ok(mut backend) = self.backend.lock() {
+                backend.destroy_device(self.handle);
+            }
         }
     }
 }
@@ -1324,6 +1365,30 @@ mod tests {
             device.is_valid(),
             "dropping a with_vram_allocator alias must not destroy the backend device"
         );
+    }
+
+    /// A panic while the backend lock is held must not turn later teardown into a
+    /// second panic, which aborts the process when it happens during unwinding.
+    #[test]
+    fn teardown_tolerates_poisoned_backend_lock() {
+        use std::sync::Arc;
+
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let buffer = device
+            .acquire_buffer_with_data(&[0u32; 4], crate::BufferKind::Scattered)
+            .unwrap();
+        let backend = Arc::clone(&device.inner.backend);
+        let _ = std::thread::spawn(move || {
+            let _guard = backend.lock().unwrap();
+            panic!("poison the backend lock");
+        })
+        .join();
+        assert!(device.inner.backend.is_poisoned());
+
+        drop(buffer);
+        drop(ctx);
+        drop(device);
     }
 
     #[test]

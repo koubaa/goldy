@@ -4,7 +4,6 @@ use goldy::{
     Instance, RequestAdapterOptions, RuntimeDescriptor, Scheme, Tensor, TensorDType, TensorKernels, TensorScalar,
     TensorShape,
 };
-use std::ops::Shr;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Instance::new()?

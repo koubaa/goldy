@@ -87,7 +87,7 @@ fn record_with_tables(
                 let pipelines_read = record.pipelines.read().unwrap();
                 if let Some(h) = current_pipeline_handle {
                     if let Some(pipeline) = pipelines_read.entries.get(&h) {
-                        crate::backend::with_layout_validation(|| {
+                        crate::backend::with_layout_validation(record.validation, || {
                             crate::backend::validate_bindless_slot_kinds(
                                 raw_indices,
                                 &pipeline.push_constant_slot_kinds,
@@ -129,7 +129,7 @@ fn record_with_tables(
                             &pipeline.shader_debug_name,
                         )?;
                         let indices: Vec<u32> = typed_handles.iter().map(|h| h.index()).collect();
-                        crate::backend::with_layout_validation(|| {
+                        crate::backend::with_layout_validation(record.validation, || {
                             crate::backend::validate_bindless_slot_kinds(
                                 &indices,
                                 &pipeline.push_constant_slot_kinds,

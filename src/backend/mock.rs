@@ -92,6 +92,8 @@ pub(crate) struct MockBackend {
     /// When true, fresh/replay planners fuse upload partitions with the following compute
     /// partition (Metal Scheme path tests).
     pub fuse_upload_with_compute_partitions: bool,
+    /// Reported as [`crate::RuntimeCapabilities::subgroup_width`].
+    pub subgroup_width: Option<u32>,
     /// Runtime-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     #[cfg(feature = "graphics")]
@@ -296,6 +298,7 @@ impl MockBackend {
             #[cfg(feature = "graphics")]
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             fuse_upload_with_compute_partitions: false,
+            subgroup_width: None,
             specialized_shader_creates: 0,
             fail_specialized_shader_creates: false,
             device_retired_floor: HashMap::new(),
@@ -654,6 +657,10 @@ impl GpuBackend for MockBackend {
         BackendType::Vulkan
     }
 
+    fn validation(&self) -> crate::Validation {
+        crate::Validation::from_env()
+    }
+
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         self.adapters.clone()
     }
@@ -662,6 +669,7 @@ impl GpuBackend for MockBackend {
         crate::runtime::RuntimeCapabilities {
             host_sidecar_on_submit_worker: true,
             fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
+            subgroup_width: self.subgroup_width,
             mesh_shaders: true,
             amplification_shaders: true,
             ray_query: true,

@@ -1,8 +1,7 @@
 //! Tensor matmul: checked views lowered to the semantic [`crate::ops::MatMulDesc`] node.
 
 use super::dtype::TensorDType;
-use super::kernels::OP_COPY;
-use super::ops::{encode_meta, TensorRecorder};
+use super::ops::TensorRecorder;
 use super::shape::TensorShape;
 use super::view::{Tensor, TensorView};
 use crate::error::GoldyError;
@@ -111,33 +110,13 @@ impl<'a> TensorRecorder<'a> {
             }
             return Ok(());
         }
-        let k = ad[2];
-        let mut meta = encode_meta(OP_COPY, 0, 0, k, Some(a), Some(b), Some(out))?;
-        meta.o_d2 = ad[1];
-        meta.o_d3 = bd[2];
-        meta.reduce_len = k;
-        meta.a_s0 = stride_or(a, 0);
-        meta.a_s1 = stride_or(a, 1);
-        meta.a_s2 = stride_or(a, 2);
-        meta.b_s0 = stride_or(b, 0);
-        meta.b_s1 = stride_or(b, 1);
-        meta.b_s2 = stride_or(b, 2);
-        meta.o_s0 = stride_or(out, 0);
-        meta.o_s1 = stride_or(out, 1);
-        meta.o_s2 = stride_or(out, 2);
-        let meta_buf = self.intern_meta(meta)?;
         self.kernels
             .ops
             .batched
-            .record(self.scheme, label, a.buffer(), b.buffer(), out.buffer(), &*meta_buf)
+            .record(self.scheme, label, a, b, out)?
             .over_1d(out.numel_u32().max(1));
         Ok(())
     }
-}
-
-fn stride_or(v: TensorView<'_>, axis: usize) -> u32 {
-    let layout = v.layout();
-    layout.strides().get(axis).copied().unwrap_or(0).max(0) as u32
 }
 
 fn matmul_out_shape(a: TensorShape, b: TensorShape) -> Result<TensorShape, GoldyError> {
