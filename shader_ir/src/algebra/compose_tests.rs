@@ -287,14 +287,19 @@ fn lowering_guards_an_output_spanning_part_of_the_domain() {
     // The epilogue's value and its store, each within its six elements.
     assert_eq!(guarded.len(), 2, "{then_body:?}");
 
-    // The epilogue's own lane reduction would read past its rows.
+    // A narrower product's own lane reduction would read past its rows on the
+    // epilogue's domain, so it runs beside it, on its own.
     let mut partial = add(9, [0, 1, 2]);
     partial.then(&gemv(6, 40, [3, 4, 5], GEMV_LANES)).unwrap();
-    assert!(matches!(lower(&partial, &[]), Err(LowerError::Order { .. })));
+    let siblings = lower(&partial, &[]).unwrap();
+    assert_eq!(siblings.parts, 2);
+    assert!(matches!(siblings.schedule, Schedule::Lanes { elements: 4, .. }));
+    // Nine elements a thread each, then six a lane group each: one workgroup and two.
+    assert_eq!(siblings.groups, [3, 1, 1]);
 }
 
 #[test]
-fn lowering_rejects_cross_thread_reads_and_mixed_ranks() {
+fn lowering_rejects_cross_thread_reads_and_runs_mixed_ranks_side_by_side() {
     let m = 4;
     let mut r = Region::new();
     let i = r.index("i");
@@ -322,5 +327,34 @@ fn lowering_rejects_cross_thread_reads_and_mixed_ranks() {
         Storage::packed(ParcelId(1), &[2, 3]),
     );
     matrix.then(&add(4, [2, 3, 4])).unwrap();
-    assert!(matches!(lower(&matrix, &[]), Err(LowerError::Domain { .. })));
+    let siblings = lower(&matrix, &[]).unwrap();
+    assert_eq!(siblings.parts, 2);
+    assert_eq!(siblings.groups, [2, 1, 1]);
+
+    // The same storage read in place by its own thread in one part, and at the same
+    // index by a thread of another part, which cannot see it before it is overwritten.
+    let copy_beside = |scale_in_place: bool| {
+        let mut r = Region::new();
+        let (i, j) = (r.index("i"), r.index("j"));
+        let flat = r.input("a", &[4], Storage::packed(ParcelId(0), &[4]));
+        let square = r.input("a2", &[2, 2], Storage::packed(ParcelId(0), &[2, 2]));
+        let scaled = if scale_in_place { ParcelId(0) } else { ParcelId(2) };
+        r.output(
+            "scaled",
+            &[4],
+            &[i],
+            Term::read(flat, [i]) * Term::lit(2.0),
+            Storage::packed(scaled, &[4]),
+        );
+        r.output(
+            "copy",
+            &[2, 2],
+            &[i, j],
+            Term::read(square, [i, j]),
+            Storage::packed(ParcelId(1), &[2, 2]),
+        );
+        lower(&r, &[])
+    };
+    assert_eq!(copy_beside(false).unwrap().parts, 2);
+    assert!(matches!(copy_beside(true), Err(LowerError::Race { .. })));
 }

@@ -9,7 +9,8 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, ContractionPrecision, FusionRegionStatus, FusionSchedule, FusionTier, GoldyError, NodeId,
+    compute, BackendType, ContractionPrecision, FusionRegionStatus, FusionRejection, FusionSchedule, FusionTier,
+    GoldyError, NodeId,
     RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels, TensorRecorder,
     TensorShape,
 };
@@ -111,6 +112,16 @@ impl Twin {
                 .collect();
             for (j, (fused, unfused)) in parcels[0].iter().zip(&parcels[1]).enumerate() {
                 assert!(fused == unfused, "{what}, frame {frame}: tensor {j} differs");
+            }
+        }
+    }
+
+    /// Submit `frames` frames without comparing.
+    fn submit(&mut self, frames: usize) {
+        for _ in 0..frames {
+            for (scheme, _, _) in &mut self.runs {
+                drop(scheme.submit().expect("submit"));
+                goldy::test_support::wait_for_fusion_compiles(scheme);
             }
         }
     }
@@ -256,6 +267,106 @@ fn sibling_contractions_with_a_gated_epilogue() {
     assert_eq!(schedule(&scheme), gemv_schedule(&device));
 }
 
+#[test]
+fn a_scale_updated_in_place() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    // out = x / sqrt(mean(x * x) + eps), the scale refined in place in one element.
+    let n = 100;
+    let init = [
+        Init::F32(TensorShape::vector(n), data(4, n)),
+        Init::F32(TensorShape::vector(n), vec![0.0; n as usize]),
+        Init::F32(TensorShape::vector(1), vec![0.0]),
+        Init::F32(TensorShape::vector(n), vec![0.0; n as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            let (x, square, scale, out) = (t[0].view(), t[1].view(), t[2].view(), t[3].view());
+            rec.mul_into("square", x, x, square)?;
+            rec.mean_into("mean", square, 0, scale)?;
+            rec.add_scalar_into("eps", scale, 1e-5, scale)?;
+            rec.sqrt_into("sqrt", scale, scale)?;
+            rec.reciprocal_into("scale", scale, scale)?;
+            rec.mul_into("normalize", scale, x, out)?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 6);
+}
+
+#[test]
+fn products_of_different_rows_side_by_side() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    // q = Wq @ x and k = Wk @ x into disjoint ranges of one buffer, as a query and
+    // key projection: one dispatch runs both grids.
+    let (q, k) = (48, 16);
+    let init = [
+        Init::F32(TensorShape::matrix(q, INNER), data(1, q * INNER)),
+        Init::F32(TensorShape::matrix(k, INNER), data(5, k * INNER)),
+        Init::F32(TensorShape::vector(INNER), data(2, INNER)),
+        Init::F32(TensorShape::vector(q + k), vec![-3.0; (q + k) as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            rec.matmul_into("query", t[0].view(), t[2].view(), t[3].view().narrow(0, 0, 48)?)?;
+            rec.matmul_into("key", t[1].view(), t[2].view(), t[3].view().narrow(0, 48, 16)?)?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        5,
+    );
+    assert_one_semantic_region(&scheme, 2);
+    assert_eq!(schedule(&scheme), gemv_schedule(&device));
+}
+
+#[test]
+fn normalized_input_of_a_product() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    // y = W @ (x / sqrt(mean(x * x) + eps) * g): an RMSNorm prologue, whose scale
+    // every thread of the product computes once rather than once per term.
+    let init = [
+        Init::F32(TensorShape::matrix(ROWS, INNER), data(1, ROWS * INNER)),
+        Init::F32(TensorShape::vector(INNER), data(2, INNER)),
+        Init::F32(TensorShape::vector(INNER), data(3, INNER)),
+        Init::F32(TensorShape::vector(ROWS), vec![0.0; ROWS as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            let square = rec.mul("square", t[1].view(), t[1].view())?;
+            let mean = rec.mean("mean", square.view(), 0)?;
+            let shifted = rec.add_scalar("eps", mean.view(), 1e-5)?;
+            let root = rec.sqrt("sqrt", shifted.view())?;
+            let scale = rec.reciprocal("scale", root.view())?;
+            let normalized = rec.mul("normalize", t[1].view(), scale.view())?;
+            let weighted = rec.mul("weight", normalized.view(), t[2].view())?;
+            rec.matmul_into("project", t[0].view(), weighted.view(), t[3].view())?;
+            Ok((vec![square, mean, shifted, root, scale, normalized, weighted], Vec::new()))
+        },
+        5,
+    );
+    assert_one_semantic_region(&scheme, 8);
+    let structure = structure(&scheme);
+    assert_eq!(
+        structure.lines().filter(|l| l.starts_with("contraction")).count(),
+        1,
+        "{structure}"
+    );
+}
+
 /// `C = A @ B` for `A` of `GEMM.0 × GEMM.2` and `B` of `GEMM.2 × GEMM.1`: no extent
 /// a multiple of the 16-square matrix tile.
 const GEMM: (u32, u32, u32) = (40, 72, 100);
@@ -395,6 +506,95 @@ fn matrix_product_on_matrix_units_when_rounding_is_admitted() {
         assert_one_semantic_region(&scheme, 2);
         assert_eq!(schedule(&scheme), FusionSchedule::Threads);
     }
+}
+
+/// The run's rejection for costing more fused than as recorded.
+fn cost_rejection(scheme: &Scheme) -> Option<(u64, u64)> {
+    scheme.fusion_report().rejected.iter().find_map(|r| match r.reason {
+        FusionRejection::Cost { fused_ns, unfused_ns } => Some((fused_ns, unfused_ns)),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_product_the_library_runs_faster_stays_with_it() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !library_gemm(&device) || !device.capabilities().matrix_multiply {
+        return;
+    }
+    let _specialization = goldy::test_support::SpecializationOverride::force_disabled();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let mut scheme = Scheme::new(&ctx);
+    scheme.set_automatic_fusion(true);
+    scheme.set_contraction_precision(ContractionPrecision::F16Factors);
+    let n = 512;
+    let init = [
+        Init::F32(TensorShape::matrix(n, n), data(6, n * n)),
+        Init::F32(TensorShape::matrix(n, n), data(7, n * n)),
+        Init::F32(TensorShape::matrix(n, n), vec![0.0; (n * n) as usize]),
+    ];
+    let t = tensors(&device, &init);
+    let (_relu, _) = gemm_relu(&mut kernels.recorder(&mut scheme), &t).expect("record");
+    for _ in 0..3 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+    }
+    // One tile a subgroup on matrix units is far slower than the library at this size,
+    // which saving the epilogue's dispatch does not repay.
+    assert!(scheme.fusion_report().regions.is_empty(), "{:?}", scheme.fusion_report());
+    let (fused_ns, unfused_ns) = cost_rejection(&scheme).expect("a cost rejection");
+    assert!(fused_ns > unfused_ns);
+    assert_eq!(scheme.executed_node_count(), 2);
+
+    // A device model whose matrix units match the library's rate fuses it again.
+    let mut model = scheme.fusion_cost_model();
+    model.matrix_macs_per_ns = model.library_macs_per_ns;
+    scheme.set_fusion_cost_model(model);
+    for _ in 0..3 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+    }
+    assert_one_semantic_region(&scheme, 2);
+}
+
+/// `s = sum(X, axis 1)`, then `y = W @ s`, for `X` of `ROWS × inner`.
+fn row_sums_then_product(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
+    let sums = rec.sum("row sums", t[0].view(), 1)?;
+    rec.matmul_into("project", t[1].view(), sums.view(), t[2].view())?;
+    Ok((vec![sums], Vec::new()))
+}
+
+#[test]
+fn a_factor_recomputed_for_every_row_stays_unfused_when_it_costs_more() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    // Fused, every lane of every output row sums its own elements of `s`: `ROWS`
+    // times the work, and a longest thread `inner` times longer.
+    let init = |inner: u32| {
+        [
+            Init::F32(TensorShape::matrix(INNER, inner), data(1, INNER * inner)),
+            Init::F32(TensorShape::matrix(ROWS, INNER), data(2, ROWS * INNER)),
+            Init::F32(TensorShape::vector(ROWS), vec![0.0; ROWS as usize]),
+        ]
+    };
+    let mut short = Twin::new(&device, &init(4), row_sums_then_product);
+    if device.backend_type() == BackendType::Cuda {
+        // NVRTC contracts the product's multiply and add into an FMA only when one basic
+        // block holds both, and the recomputed sum's loop separates them.
+        short.submit(3);
+    } else {
+        short.frames(3, "short rows");
+    }
+    assert_one_semantic_region(short.fused(), 2);
+    let long = fused_matches_unfused(&device, &init(1024), row_sums_then_product, 3);
+    assert!(long.fusion_report().regions.is_empty(), "{:?}", long.fusion_report());
+    let (fused_ns, unfused_ns) = cost_rejection(&long).expect("a cost rejection");
+    assert!(fused_ns > unfused_ns);
 }
 
 #[test]

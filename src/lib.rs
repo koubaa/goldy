@@ -65,6 +65,7 @@ pub(crate) mod allocation_policy;
 #[cfg(test)]
 mod buffer_alloc_tests;
 pub mod exchange;
+pub(crate) mod fusion_cost;
 pub(crate) mod fusion_plan;
 #[cfg(test)]
 mod heap_tests;
@@ -89,7 +90,11 @@ pub use error::GoldyError;
 pub use exchange::{Claim, PendingClaim, SurfaceExchange};
 pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
-pub use fusion_plan::{FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier, RejectedFusion};
+pub use fusion_cost::FusionCostModel;
+pub use fusion_plan::{
+    FusionCost, FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier, RejectedFusion,
+};
+pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;
 pub use goldy_shader_ir::algebra::ContractionPrecision;
 pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};

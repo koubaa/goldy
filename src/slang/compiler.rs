@@ -706,7 +706,6 @@ impl SlangCompiler {
                 (self.library.set_target_floating_point_mode)(request, target_index, SLANG_FLOATING_POINT_MODE_PRECISE);
             }
         }
-
         let unit_name = CString::new("shader").unwrap();
         let translation_unit = unsafe {
             (self.library.add_translation_unit)(request, SlangSourceLanguage::Slang as i32, unit_name.as_ptr())

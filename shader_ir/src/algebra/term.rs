@@ -329,6 +329,15 @@ impl Term {
         }
     }
 
+    /// Calls `f` with the order of every reduction, nested ones too.
+    pub(crate) fn for_each_reduction(&self, f: &mut dyn FnMut(ReduceOrder)) {
+        self.visit(&mut |t| {
+            if let Term::Reduce { order, .. } = t {
+                f(*order);
+            }
+        });
+    }
+
     /// Calls `f` for every read, in evaluation order.
     pub fn for_each_read(&self, f: &mut dyn FnMut(ValueId, &[Affine])) {
         self.visit(&mut |t| {

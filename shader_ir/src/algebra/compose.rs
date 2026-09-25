@@ -116,7 +116,14 @@ impl Storage {
         }
         let axes = self.long_axes(shape)?;
         let mut index = vec![Affine::constant(0); shape.len()];
-        let rest = element.clone() - self.offset.clone();
+        let mut rest = element.clone() - self.offset.clone();
+        // A symbol that takes one value, such as the index of an axis of extent one,
+        // is that value.
+        for &(sym, coefficient) in rest.clone().terms() {
+            if let Some((value, _)) = range(sym).filter(|(lo, hi)| lo == hi) {
+                rest = rest - Affine::sym(sym) * coefficient + coefficient * value;
+            }
+        }
         for &(sym, coefficient) in rest.terms() {
             let &a = axes.iter().find(|&&a| coefficient % self.strides[a] == 0)?;
             index[a] = index[a].clone() + Affine::sym(sym) * (coefficient / self.strides[a]);
