@@ -180,6 +180,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Background compiles at exit** — dropping a `Scheme` joins its specialization and
+  fusion compile threads. They were detached, so a compile still inside Slang when the
+  process exited could crash in the library's static destructors.
+
 - **CUDA strided GEMV** — native `n = 1` MatMul passes `ldb` / `ldc` as the cuBLAS
   `incx` / `incy`. It previously assumed unit strides for `x` and `y`.
 
