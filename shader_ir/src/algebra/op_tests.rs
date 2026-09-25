@@ -343,6 +343,38 @@ fn source(lowered: &Lowered) -> String {
 }
 
 #[test]
+fn an_operation_ending_in_a_product_rounds_it_for_its_readers() {
+    let m = 9;
+    let mut graph = Graph::new();
+    graph
+        .push(map(&[("x", 0)], ("sq", 1), m, Term::arg(0) * Term::arg(0)))
+        .unwrap();
+    graph
+        .push(map(&[("sq", 1), ("x", 0)], ("out", 2), m, Term::arg(0) + Term::arg(1)))
+        .unwrap();
+    graph.push(gemv(["W", "h", "y"], [3, 4, 5], m, 40)).unwrap();
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, data(1, m)),
+            (1, vec![0.0; m as usize]),
+            (2, vec![0.0; m as usize]),
+            (3, data(2, m * 40)),
+            (4, data(3, 40)),
+            (5, vec![0.0; m as usize]),
+        ]),
+    );
+    let slang = source(&lower(graph.region(), &[]).unwrap());
+    // The square the residual reads is rounded; the products inside the contraction
+    // are its own and may contract as they do unfused.
+    assert!(
+        slang.contains("(goldy_exact_mul(p0[((uint)c5)], p0[((uint)c5)]) + p0[((uint)c5)])"),
+        "{slang}"
+    );
+    assert!(slang.contains("a1 = (a1 + (x5 * x6));"), "{slang}");
+}
+
+#[test]
 fn sequential_siblings_share_a_loop() {
     let (m, k) = (6, 50);
     let sequential = |names, parcels| {

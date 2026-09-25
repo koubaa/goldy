@@ -368,6 +368,7 @@ fn builtin_fn(func: BuiltinFn) -> TokenStream {
         BuiltinFn::WorkgroupBarrier => quote! { WorkgroupBarrier },
         BuiltinFn::SubgroupLane => quote! { SubgroupLane },
         BuiltinFn::SubgroupRead => quote! { SubgroupRead },
+        BuiltinFn::ExactMul => quote! { ExactMul },
     };
     quote! { ::goldy::kernel::ir::BuiltinFn::#variant }
 }

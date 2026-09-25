@@ -249,6 +249,7 @@ impl Eval<'_> {
                     UnaryOp::Recip => 1.0 / x,
                     UnaryOp::Sin => x.sin(),
                     UnaryOp::Cos => x.cos(),
+                    UnaryOp::Round => x,
                 }
             }
             Term::Binary { op, lhs, rhs } => {
