@@ -155,9 +155,9 @@ pub use shader::{builtins, ShaderModule};
 pub use shader_library::ShaderLibrary;
 pub use signal::{OversubscribedReason, Signal};
 pub use slang::{
-    layout_validation_enabled, GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode,
-    LayoutCheck, PackedGpuField, PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface,
-    StageIoField, StructFieldLayout, StructLayout,
+    GpuField, GpuFieldType, GpuType, GraphicsPipelineInterface, InterpolationMode, LayoutCheck, PackedGpuField,
+    PackedGpuLayout, PipelineResource, PipelineResourceContract, StageInterface, StageIoField, StructFieldLayout,
+    StructLayout,
 };
 pub use task_graph::NodeAccess;
 #[cfg(feature = "tensor")]
@@ -166,6 +166,7 @@ pub use tensor::{
     TensorShape, TensorView, MAX_TENSOR_RANK,
 };
 pub use texture::TextureCopyFootprint;
+pub use validation_env::Validation;
 
 pub use handles::{SamplerHandle, TextureHandle};
 pub use types::*;
@@ -650,23 +651,5 @@ pub mod test_support {
     /// to have landed first.
     pub fn wait_for_fusion_compiles(scheme: &mut crate::Scheme) {
         scheme.wait_for_fusion_compiles();
-    }
-
-    /// Thread-local pin for `GOLDY_VALIDATION=host_access`.
-    pub struct HostAccessOverride {
-        _private: (),
-    }
-
-    impl HostAccessOverride {
-        pub fn force_enabled() -> Self {
-            crate::validation_env::set_host_access_override(true);
-            Self { _private: () }
-        }
-    }
-
-    impl Drop for HostAccessOverride {
-        fn drop(&mut self) {
-            crate::validation_env::clear_host_access_override();
-        }
     }
 }

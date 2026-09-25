@@ -1,7 +1,7 @@
 //! Graph-level validation with human-readable errors (issue #112 item 7).
 //!
 //! Always-on checks catch cycles, mesh/raster command mix-ups, and BLAS/TLAS
-//! misuse. [`crate::validation_env::scheme_validation_enabled`] adds stricter
+//! misuse. [`crate::Validation::scheme`] adds stricter
 //! lifetime/access hints (Accel must be GPU-built on this object before RayQuery /
 //! TraceRays; missing `ACCEL_INPUT`).
 
@@ -16,20 +16,21 @@ use std::collections::{HashMap, HashSet};
 /// Fail submit when the IR cannot be executed as recorded.
 #[cfg(test)]
 pub(crate) fn validate_graph(ir: &GraphIR) -> Result<(), GoldyError> {
-    validate_graph_with_prior_built_accels(ir, &HashSet::new())
+    validate_graph_with_prior_built_accels(ir, &HashSet::new(), crate::Validation::NONE)
 }
 
 /// Like [`validate_graph`], accepting Accel handles GPU-built on this object in an earlier scheme.
 pub(crate) fn validate_graph_with_prior_built_accels(
     ir: &GraphIR,
     prior_built_accels: &HashSet<u64>,
+    validation: crate::Validation,
 ) -> Result<(), GoldyError> {
     let edges = build_edges(ir);
     validate_extra_edges(ir)?;
     validate_acyclic(ir, &edges)?;
     validate_render_pass_commands(ir)?;
     validate_accel_kind_uses(ir)?;
-    if crate::validation_env::scheme_validation_enabled() {
+    if validation.scheme {
         validate_scheme_strict(ir, prior_built_accels)?;
     }
     Ok(())

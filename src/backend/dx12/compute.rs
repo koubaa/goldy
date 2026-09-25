@@ -1095,7 +1095,7 @@ fn record_gpu_command(
                 .current_compute_pipeline
                 .and_then(|h| pipelines_read.entries.get(&h))
             {
-                crate::backend::with_layout_validation(|| {
+                crate::backend::with_layout_validation(scope.record.validation, || {
                     crate::backend::validate_raw_binding_strides(
                         raw_indices,
                         &pipeline.push_constant_categories,
@@ -1124,7 +1124,7 @@ fn record_gpu_command(
                     )
                 })?;
             } else if let Some(pipeline) = ctx.current_rt.and_then(|h| rt_read.entries.get(&h)) {
-                crate::backend::with_layout_validation(|| {
+                crate::backend::with_layout_validation(scope.record.validation, || {
                     crate::backend::validate_raw_binding_strides(
                         raw_indices,
                         &pipeline.push_constant_categories,

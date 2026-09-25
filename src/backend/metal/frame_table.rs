@@ -171,13 +171,14 @@ pub(super) fn extract_staging_from_graph(commands: &[crate::backend::GraphComman
 
 /// Lower render commands and build staging for standalone render passes.
 pub(super) fn prepare_render_commands(
+    validation: crate::Validation,
     buffers: &std::collections::HashMap<super::BufferHandle, super::types::BufferState>,
     pipelines: &std::collections::HashMap<super::PipelineHandle, super::types::PipelineState>,
     commands: &[crate::backend::RenderCommand],
 ) -> Result<(Vec<u32>, Vec<crate::backend::RenderCommand>, bool)> {
     use crate::backend::RenderCommand;
 
-    crate::backend::with_layout_validation(|| {
+    crate::backend::with_layout_validation(validation, || {
         crate::backend::validate_render_pass_bind_resources(
             commands,
             |h| {

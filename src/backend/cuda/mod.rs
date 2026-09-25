@@ -85,7 +85,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use texture::{memcpy_htod_array, storage_shader_convertible, CudaSamplerKey, CudaTextureResource};
 use timeline::{EventLedger, LedgerCompletion, LedgerEntry};
@@ -129,8 +129,6 @@ enum RetainedEntry {
 
 /// Soft cap on concurrent submission contexts per CUDA device.
 const MAX_CUDA_SUBMISSION_CONTEXTS: u32 = 32;
-
-static CUDA_VALIDATION_INIT: Once = Once::new();
 
 /// Cached device launch limits queried once at [`CudaBackend::create_device`].
 #[derive(Clone, Copy, Debug)]
@@ -201,6 +199,8 @@ pub(crate) struct CudaBackend {
     next_pipeline: PipelineHandle,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     next_render_target: RenderTargetHandle,
+    /// The validation this backend was created with.
+    validation: crate::Validation,
 }
 
 struct CudaDevice {
@@ -651,6 +651,11 @@ impl CudaBackend {
         self.graph_stats.snapshot()
     }
 
+    /// Whether retainable partitions may be captured into CUDA graphs.
+    fn graph_capture_enabled(&self) -> bool {
+        !self.validation.gpu_api && !retained_graph::cuda_launch_blocking_active()
+    }
+
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
     pub(crate) fn buffer_phys_kind_for_test(&self, buffer: BufferHandle) -> Option<&'static str> {
         let buf = self.buffers.get(&buffer)?;
@@ -662,19 +667,31 @@ impl CudaBackend {
         })
     }
 
+    /// Create a CUDA backend, validating as [`crate::Validation::from_env`] requests.
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self> {
+        Self::with_validation(crate::Validation::from_env())
+    }
+
+    /// Create a CUDA backend that runs the checks in `validation`.
+    ///
+    /// GPU API validation synchronizes after every operation and never captures graphs, so a
+    /// failing launch is reported at the operation that caused it. It does not set
+    /// `CUDA_LAUNCH_BLOCKING`, which would apply to every CUDA context in the process.
+    pub(crate) fn with_validation(validation: crate::Validation) -> Result<Self> {
         let _span = goldy_span!("backend.cuda.init").entered();
         tracing::info!("Initializing CUDA backend");
+        if !validation.gpu_api && std::env::var_os("CUDA_LAUNCH_BLOCKING").is_some_and(|v| v != "0") {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "goldy::validation",
+                    "CUDA_LAUNCH_BLOCKING makes every CUDA launch synchronous and turns off graph \
+                     capture, including on backends created without GPU API validation"
+                );
+            });
+        }
         ensure_cuda_toolkit_on_path();
-        // `CUDA_LAUNCH_BLOCKING` must be set before driver work begins. Use a
-        // process-wide Once so parallel test threads do not race on `set_var`.
-        CUDA_VALIDATION_INIT.call_once(|| {
-            if crate::backend::goldy_validation_enabled() && std::env::var_os("CUDA_LAUNCH_BLOCKING").is_none() {
-                // SAFETY: called exactly once per process, before device enumeration below.
-                unsafe { std::env::set_var("CUDA_LAUNCH_BLOCKING", "1") };
-                tracing::info!("Set CUDA_LAUNCH_BLOCKING=1 (GOLDY_VALIDATION api)");
-            }
-        });
         cudarc::driver::result::init().context("CUDA: driver init failed")?;
         let driver_version = ensure_cuda_driver_at_least_13_1()?;
         let count = CudaContext::device_count().context("CUDA: enumerate devices")?;
@@ -711,6 +728,7 @@ impl CudaBackend {
         );
         let slang_compiler = crate::slang::SlangCompiler::new().context("CUDA: initialize Slang")?;
         Ok(Self {
+            validation,
             adapter_info,
             compute_capability,
             devices: HashMap::new(),
@@ -963,7 +981,7 @@ impl CudaBackend {
     fn load_compute_kernel(&self, device: DeviceHandle, ptx: &str) -> Result<CudaComputeKernel> {
         let gpu = self.device(device)?;
         let _gate = capture_gate::lock_capture_alloc_gate();
-        let module = load_ptx_module(&gpu.ctx, ptx)?;
+        let module = load_ptx_module(&gpu.ctx, ptx, self.validation.gpu_api)?;
         let function = module
             .load_function("cs_main")
             .context("CUDA: cuModuleGetFunction(cs_main) failed")?;
@@ -1057,7 +1075,7 @@ impl CudaBackend {
         } else {
             (buffer.size / stride) as usize
         };
-        if crate::backend::goldy_validation_enabled() {
+        if self.validation.gpu_api {
             if ptr == 0 {
                 anyhow::bail!("CUDA validation: StructuredBuffer device pointer is null");
             }
@@ -1336,7 +1354,13 @@ impl CudaBackend {
             .unwrap_or(false)
     }
 
-    fn write_buffer_region(stream: &Arc<CudaStream>, buffer: &CudaBuffer, offset: u64, data: &[u8]) -> Result<()> {
+    fn write_buffer_region(
+        stream: &Arc<CudaStream>,
+        buffer: &CudaBuffer,
+        offset: u64,
+        data: &[u8],
+        validate: bool,
+    ) -> Result<()> {
         if offset + data.len() as u64 > buffer.size {
             anyhow::bail!("CUDA: write exceeds logical buffer size");
         }
@@ -1355,10 +1379,19 @@ impl CudaBackend {
         stream
             .synchronize()
             .context("CUDA: sync alloc stream after host write")?;
-        pending_submit::maybe_validate_sync(stream, "immediate WriteBuffer")
+        if validate {
+            pending_submit::validate_sync(stream, "immediate WriteBuffer")?;
+        }
+        Ok(())
     }
 
-    fn clear_buffer_region(stream: &Arc<CudaStream>, buffer: &CudaBuffer, offset: u64, size: u64) -> Result<()> {
+    fn clear_buffer_region(
+        stream: &Arc<CudaStream>,
+        buffer: &CudaBuffer,
+        offset: u64,
+        size: u64,
+        validate: bool,
+    ) -> Result<()> {
         let clear_size = if size == 0 {
             buffer.size.saturating_sub(offset)
         } else {
@@ -1375,7 +1408,10 @@ impl CudaBackend {
             .try_slice_mut(start..end)
             .context("CUDA: clear range out of bounds")?;
         stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
-        pending_submit::maybe_validate_sync(stream, "immediate ClearBuffer")
+        if validate {
+            pending_submit::validate_sync(stream, "immediate ClearBuffer")?;
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -1481,6 +1517,7 @@ impl CudaBackend {
         let (module, max_threads_per_block) = self.ensure_compute_kernel(pipeline_handle, &specs)?;
         let limits = self.device(pipeline.device)?.limits;
         validate_launch_config(
+            self.validation.gpu_api,
             &limits,
             max_threads_per_block,
             workgroups,
@@ -1684,6 +1721,7 @@ impl CudaBackend {
             .all(|spec| matches!(spec, CudaStorageTextureSpec::Identity));
         let limits = self.device(pipeline.device)?.limits;
         validate_launch_config(
+            self.validation.gpu_api,
             &limits,
             max_threads_per_block,
             workgroups,
@@ -3257,6 +3295,7 @@ impl CudaBackend {
             host_waits,
             deferred_writes,
             body,
+            validate: self.validation.gpu_api,
         };
         {
             let _tz = crate::tracy_zone!("cuda.enqueue_submit.worker_enqueue");
@@ -3500,8 +3539,9 @@ fn query_device_limits(ctx: &CudaContext) -> Result<CudaDeviceLimits> {
     })
 }
 
-/// Host-side launch-config checks when `GOLDY_VALIDATION=api` (or `all`) is set.
+/// Host-side launch-config checks when `enabled` (the backend's GPU API validation).
 pub(super) fn validate_launch_config(
+    enabled: bool,
     limits: &CudaDeviceLimits,
     function_max_threads: u32,
     grid: (u32, u32, u32),
@@ -3509,7 +3549,7 @@ pub(super) fn validate_launch_config(
     shared_mem_bytes: u32,
     label: Option<&str>,
 ) -> Result<()> {
-    if !crate::backend::goldy_validation_enabled() {
+    if !enabled {
         return Ok(());
     }
     validate_launch_config_unchecked(limits, function_max_threads, grid, block, shared_mem_bytes, label)
@@ -3565,10 +3605,10 @@ fn c_string_log(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..end]).trim().to_owned()
 }
 
-/// When api validation is on: JIT with error/info logs via `cuModuleLoadDataEx`, unload, then
+/// With `validate`: JIT with error/info logs via `cuModuleLoadDataEx`, unload, then
 /// load through cudarc's safe `load_module` (no public `CudaModule` constructor).
-fn load_ptx_module(ctx: &Arc<CudaContext>, ptx: &str) -> Result<Arc<CudaModule>> {
-    if crate::backend::goldy_validation_enabled() {
+fn load_ptx_module(ctx: &Arc<CudaContext>, ptx: &str, validate: bool) -> Result<Arc<CudaModule>> {
+    if validate {
         load_ptx_module_validated(ctx, ptx)?;
     }
     ctx.load_module(Ptx::from_src(ptx.to_owned()))
@@ -3792,6 +3832,10 @@ impl GpuBackend for CudaBackend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Cuda
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.validation
     }
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
@@ -4229,7 +4273,7 @@ impl GpuBackend for CudaBackend {
         };
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
         let buffer_ref = self.buffers.get(&buffer).context("CUDA: invalid buffer handle")?;
-        Self::write_buffer_region(&stream, buffer_ref, offset, data)?;
+        Self::write_buffer_region(&stream, buffer_ref, offset, data, self.validation.gpu_api)?;
         Ok(())
     }
 
@@ -4438,9 +4482,10 @@ impl GpuBackend for CudaBackend {
         }
         self.sync_device_streams_for_immediate_api(device)?;
         let stream = Arc::clone(&self.device(device)?.alloc_stream);
+        let validate = self.validation.gpu_api;
         let target = self.buffers.get_mut(&buffer).context("CUDA: invalid buffer handle")?;
         target.bump_content_epoch();
-        Self::clear_buffer_region(&stream, target, offset, size)
+        Self::clear_buffer_region(&stream, target, offset, size, validate)
     }
 
     fn buffer_size(&self, buffer: BufferHandle) -> u64 {
@@ -5264,7 +5309,7 @@ impl GpuBackend for CudaBackend {
         // Capture when at least one graph-safe island remains. Stream segments (clears,
         // specialized kernels, present CopyTexture export + fence) stay as replayed ops
         // interleaved with island launches on the same stream.
-        if graph_islands > 0 && !retained_graph::cuda_launch_blocking_active() {
+        if graph_islands > 0 && self.graph_capture_enabled() {
             let device_handle = self.context(ctx)?.device;
             let device = self.device(device_handle)?;
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -5309,7 +5354,7 @@ impl GpuBackend for CudaBackend {
             );
             tracing::trace!(
                 key,
-                blocking = retained_graph::cuda_launch_blocking_active(),
+                capture = self.graph_capture_enabled(),
                 "CUDA: retainable partition uses pre-materialized op fallback"
             );
             self.enqueue_submit(
@@ -6789,9 +6834,28 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     }
 
     #[test]
-    fn goldy_validation_api_gate_compiles_for_cuda() {
-        // Ensures `feature = "cuda"` keeps `goldy_validation_enabled` linked.
-        let _ = crate::backend::goldy_validation_enabled();
+    fn api_validation_is_per_backend() {
+        let _exclusive = cuda_exclusive_guard();
+        let api = crate::Validation {
+            gpu_api: true,
+            ..crate::Validation::NONE
+        };
+        let (validated, plain) = match (
+            CudaBackend::with_validation(api),
+            CudaBackend::with_validation(crate::Validation::NONE),
+        ) {
+            (Ok(validated), Ok(plain)) => (validated, plain),
+            (Err(error), _) | (_, Err(error)) => {
+                eprintln!("skipping CUDA validation test: {error:#}");
+                return;
+            }
+        };
+        assert!(!validated.graph_capture_enabled());
+        assert_eq!(
+            plain.graph_capture_enabled(),
+            !retained_graph::cuda_launch_blocking_active()
+        );
+        assert_eq!(validated.validation(), api);
     }
 
     #[test]
@@ -6992,7 +7056,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     #[test]
     fn cpu_writable_copy_captures_once_then_graph_launches() -> Result<()> {
         let _exclusive = cuda_exclusive_guard();
-        let mut backend = match CudaBackend::new() {
+        let mut backend = match CudaBackend::with_validation(crate::Validation::NONE) {
             Ok(backend) => backend,
             Err(error) => {
                 eprintln!("skipping CUDA pinned capture test: {error:#}");
@@ -7331,7 +7395,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     #[test]
     fn readback_does_not_synchronize_unrelated_context() -> Result<()> {
         let _exclusive = cuda_exclusive_guard();
-        let mut backend = match CudaBackend::new() {
+        let mut backend = match CudaBackend::with_validation(crate::Validation::NONE) {
             Ok(backend) => backend,
             Err(error) => {
                 eprintln!("skipping CUDA multi-context readback test: {error:#}");
@@ -7509,7 +7573,7 @@ void cs_main(Scattered<uint> data, ThreadId id) {
     #[test]
     fn destroy_context_evicts_retained_graphs() -> Result<()> {
         let _exclusive = cuda_exclusive_guard();
-        let mut backend = match CudaBackend::new() {
+        let mut backend = match CudaBackend::with_validation(crate::Validation::NONE) {
             Ok(backend) => backend,
             Err(error) => {
                 eprintln!("skipping CUDA eviction test: {error:#}");

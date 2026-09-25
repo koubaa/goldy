@@ -79,7 +79,7 @@ pub(super) fn render_to(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
     let (staging_data, lowered_commands, has_bindings) =
-        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, commands)?;
+        super::frame_table::prepare_render_commands(state.validation, &state.buffers, &state.pipelines, commands)?;
 
     let completed = super::context::device_retired(state, device_handle);
     let prologue_row = if has_bindings {

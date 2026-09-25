@@ -657,6 +657,10 @@ impl GpuBackend for MockBackend {
         BackendType::Vulkan
     }
 
+    fn validation(&self) -> crate::Validation {
+        crate::Validation::from_env()
+    }
+
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
         self.adapters.clone()
     }

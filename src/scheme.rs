@@ -2820,6 +2820,7 @@ impl Scheme {
             crate::task_graph::validate::validate_graph_with_prior_built_accels(
                 executed_ir(&self.desc, &self.fusion),
                 &self.desc.prior_built_accels,
+                self.ctx.runtime().validation(),
             )?;
         }
 
@@ -2996,6 +2997,7 @@ impl Scheme {
             crate::task_graph::validate::validate_graph_with_prior_built_accels(
                 executed_ir(&self.desc, &self.fusion),
                 &self.desc.prior_built_accels,
+                self.ctx.runtime().validation(),
             )?;
         }
         let mut present_slots = Vec::new();

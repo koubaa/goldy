@@ -193,8 +193,8 @@ pub(crate) fn env_enable_dred() -> bool {
 /// Each instance owns independent `Dx12State` (resource tables, contexts, devices) so
 /// lock-free submit sessions never share mutable backend state across concurrent clients.
 /// DXGI factory + adapter enumeration are process-wide via `process_shared::process_shared`.
-pub(crate) fn shared_backend() -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
-    let backend = Dx12Backend::new()?;
+pub(crate) fn shared_backend(validation: crate::Validation) -> anyhow::Result<Arc<Mutex<Box<dyn super::GpuBackend>>>> {
+    let backend = Dx12Backend::with_validation(validation)?;
     Ok(Arc::new(Mutex::new(Box::new(backend) as Box<dyn super::GpuBackend>)))
 }
 
@@ -204,8 +204,8 @@ pub(crate) struct Dx12Backend {
 }
 
 impl Dx12Backend {
-    /// Create a new DX12 backend.
-    pub fn new() -> Result<Self> {
+    /// Create a new DX12 backend that runs the checks in `validation`.
+    pub fn with_validation(validation: crate::Validation) -> Result<Self> {
         tracing::info!("Initializing DX12 backend");
 
         // Initialise API call logger (GOLDY_API_LOG) as early as possible so even
@@ -214,6 +214,17 @@ impl Dx12Backend {
 
         let shared = process_shared::process_shared()?;
         install_debug_layer_exception_handler();
+        if validation.gpu_api && !is_debug_mode() {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "goldy::validation",
+                    "GPU API validation was requested but the D3D12 debug layer is off (release \
+                     build or GOLDY_DX12_NO_DEBUG); set GOLDY_DX12_DEBUG=1 before the first DX12 \
+                     instance to enable it"
+                );
+            });
+        }
 
         // Create Slang compiler
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
@@ -245,6 +256,7 @@ impl Dx12Backend {
             free_dsv_offsets: Vec::new(),
             slang_compiler,
             device_removed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            validation,
         };
 
         Ok(Self { state })
@@ -565,6 +577,10 @@ impl GpuBackend for Dx12Backend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Dx12
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.state.validation
     }
 
     fn compute_shader_target(&self) -> Option<crate::slang::ShaderTarget> {

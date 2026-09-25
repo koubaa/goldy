@@ -163,11 +163,16 @@ pub(crate) struct CpuBackend {
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     retained_graphs: HashMap<(ContextHandle, u64), Vec<GraphCommand>>,
     slang: SlangCompiler,
-    protect_host: bool,
+    validation: crate::Validation,
 }
 
 impl CpuBackend {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
+        Self::with_validation(crate::Validation::from_env())
+    }
+
+    pub fn with_validation(validation: crate::Validation) -> Result<Self> {
         Ok(Self {
             adapters: vec![AdapterInfo {
                 id: 0,
@@ -191,7 +196,7 @@ impl CpuBackend {
             device_retired_floor: HashMap::new(),
             retained_graphs: HashMap::new(),
             slang: SlangCompiler::new().context("CPU backend: failed to load Slang")?,
-            protect_host: crate::validation_env::host_access_validation_enabled(),
+            validation,
         })
     }
 
@@ -411,7 +416,7 @@ impl CpuBackend {
                 device_handle: device,
                 size,
                 alloc_size: cap,
-                data: Some(HostStorage::with_len(cap as usize, self.protect_host)?),
+                data: Some(HostStorage::with_len(cap as usize, self.validation.host_access)?),
                 parent: None,
                 bindless_index,
                 is_withdraw_staging,
@@ -785,6 +790,10 @@ impl GpuBackend for CpuBackend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Cpu
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.validation
     }
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
@@ -1536,8 +1545,12 @@ mod tests {
 
     #[test]
     fn cpu_backend_scheme_double_u32_host_access() {
-        let _guard = crate::test_support::HostAccessOverride::force_enabled();
-        let device = Runtime::from_backend(Box::new(CpuBackend::new().expect("cpu backend"))).expect("device");
+        let validation = crate::Validation {
+            host_access: true,
+            ..crate::Validation::from_env()
+        };
+        let backend = CpuBackend::with_validation(validation).expect("cpu backend");
+        let device = Runtime::from_backend(Box::new(backend)).expect("device");
         run_double(&device);
     }
 

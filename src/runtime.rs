@@ -34,6 +34,7 @@ use crate::handles::DeviceHandle;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
+use crate::validation_env::Validation;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,11 +106,19 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Create a new Goldy instance.
+    /// Create a new Goldy instance, validating as [`Validation::from_env`] requests.
     pub fn new() -> Result<Self> {
-        let backend = backend::create_shared_backend()?;
+        Self::with_validation(Validation::from_env())
+    }
+
+    /// Create a new Goldy instance whose backend and runtimes run the checks in `validation`.
+    ///
+    /// Some API-level switches are process-wide by nature: Metal reads
+    /// `MTL_SHADER_VALIDATION` once, before its first device exists.
+    pub fn with_validation(validation: Validation) -> Result<Self> {
+        let backend = backend::create_shared_backend(validation)?;
         let backend_type = backend.lock().unwrap().backend_type();
-        tracing::info!(?backend_type, "Goldy instance created");
+        tracing::info!(?backend_type, ?validation, "Goldy instance created");
         Ok(Self { backend })
     }
 
@@ -277,6 +286,7 @@ impl Adapter {
         tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
         let handle = backend.create_device(self.inner.info.id)?;
+        let validation = backend.validation();
 
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
@@ -309,6 +319,7 @@ impl Adapter {
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
                 stdlib_matmul: Mutex::default(),
+                validation,
             }),
         })
     }
@@ -515,6 +526,8 @@ pub(crate) struct DeviceInner {
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
     /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
     pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
+    /// The backend's [`Validation`], read once so hot paths need not lock the backend.
+    pub(crate) validation: Validation,
 }
 
 impl Clone for Runtime {
@@ -668,6 +681,7 @@ impl Runtime {
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
                 stdlib_matmul: Mutex::default(),
+                validation: self.inner.validation,
             }),
         }
     }
@@ -835,6 +849,11 @@ impl Runtime {
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
     pub fn backend_type(&self) -> BackendType {
         self.inner.backend.lock().unwrap().backend_type()
+    }
+
+    /// The checks this runtime's backend runs (see [`Instance::with_validation`]).
+    pub fn validation(&self) -> Validation {
+        self.inner.validation
     }
 
     pub(crate) fn stdlib_matmul_f32(
@@ -1214,9 +1233,9 @@ impl Runtime {
                 caps,
             }),
         };
-        let handle = {
+        let (handle, validation) = {
             let mut b = backend.lock().unwrap();
-            b.create_device(adapter.id())?
+            (b.create_device(adapter.id())?, b.validation())
         };
 
         let mut registry = ShaderLibraryRegistry::new();
@@ -1233,6 +1252,7 @@ impl Runtime {
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
                 stdlib_matmul: Mutex::default(),
+                validation,
             }),
         })
     }

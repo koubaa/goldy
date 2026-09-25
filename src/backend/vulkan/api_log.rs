@@ -4,7 +4,7 @@
 //! The LunarG api_dump layer intercepts every Vulkan call and writes structured
 //! JSON to the given path — no manual `vk*` hooks in Goldy.
 //!
-//! Must be configured before `vkCreateInstance` (called from `VulkanBackend::new`).
+//! Must be configured before `vkCreateInstance` (called from `VulkanBackend::with_validation`).
 
 use ash::Entry;
 use std::ffi::c_char;

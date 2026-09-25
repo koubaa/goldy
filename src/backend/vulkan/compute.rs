@@ -1070,7 +1070,7 @@ pub(super) fn submit_with_scope(
                 } => {
                     let pipelines_read = compute_pipelines.read().unwrap();
                     if let Some(pipeline) = current_pipeline.and_then(|h| pipelines_read.entries.get(&h)) {
-                        crate::backend::with_layout_validation(|| {
+                        crate::backend::with_layout_validation(view.validation, || {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
                                 &pipeline.push_constant_categories,
@@ -1105,7 +1105,7 @@ pub(super) fn submit_with_scope(
                     } else if let Some(h) = current_rt {
                         let rt_read = view.rt_pipelines.read().unwrap();
                         if let Some(pipeline) = rt_read.entries.get(&h) {
-                            crate::backend::with_layout_validation(|| {
+                            crate::backend::with_layout_validation(view.validation, || {
                                 crate::backend::validate_raw_binding_strides(
                                     raw_indices,
                                     &pipeline.push_constant_categories,
@@ -2155,7 +2155,7 @@ pub(super) fn submit_graph_with_scope(
                 } => {
                     let pipelines_read = compute_pipelines.read().unwrap();
                     if let Some(pipeline) = current_compute_pipeline.and_then(|p| pipelines_read.entries.get(&p)) {
-                        crate::backend::with_layout_validation(|| {
+                        crate::backend::with_layout_validation(view.validation, || {
                             crate::backend::validate_raw_binding_strides(
                                 raw_indices,
                                 &pipeline.push_constant_categories,
@@ -2793,7 +2793,7 @@ pub(super) fn submit_graph_with_scope(
                 }
 
                 let (staging_data, lowered, has_render_bindings) =
-                    super::frame_table::prepare_render_commands(buffers, view.pipelines, render_cmds)?;
+                    super::frame_table::prepare_render_commands(view.validation, buffers, view.pipelines, render_cmds)?;
                 if has_render_bindings {
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)

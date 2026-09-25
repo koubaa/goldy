@@ -2058,6 +2058,8 @@ handle_table!(
 /// Consolidated Vulkan backend state.
 /// This holds all the resources and state for the Vulkan backend.
 pub(super) struct VulkanState {
+    /// The validation this backend was created with.
+    pub validation: crate::Validation,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_devices: Vec<PhysicalDeviceInfo>,
