@@ -505,13 +505,19 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 ///
 /// Using the batched form reduces Objective-C msg_send overhead from O(N) per encoder open
 /// to O(1) regardless of how many resources the device owns.
+///
+/// `pass` carries counter sample attachments when dispatch timing is on.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
+    pass: Option<&mtl::ComputePassDescriptorRef>,
     state: &MetalState,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
-    let encoder = command_buffer.new_compute_command_encoder();
+    let encoder = match pass {
+        Some(pass) => command_buffer.compute_command_encoder_with_descriptor(pass),
+        None => command_buffer.new_compute_command_encoder(),
+    };
     logical_device
         .heap_allocator
         .lock()
@@ -646,6 +652,19 @@ pub(super) fn record_commands_to_buffer(
     let mut blit_touched_bufs: Vec<super::BufferHandle> = Vec::new();
     let mut blit_touched_texs: Vec<super::TextureHandle> = Vec::new();
 
+    // `GOLDY_METAL_DISPATCH_TIMING`: one encoder per dispatch, so the frame-table push
+    // bytes must be re-applied whenever a new encoder opens.
+    let mut timer = if super::dispatch_timing::enabled() {
+        let dispatches = commands
+            .iter()
+            .filter(|c| matches!(c, GpuCommand::Dispatch { .. }))
+            .count();
+        super::dispatch_timing::DispatchTimer::new(&logical_device.device, dispatches)
+    } else {
+        None
+    };
+    let mut last_push_bytes: Option<Vec<u8>> = None;
+
     macro_rules! end_compute {
         () => {
             if let Some(enc) = guard.compute.take() {
@@ -677,9 +696,19 @@ pub(super) fn record_commands_to_buffer(
                 if super::api_log::enabled() {
                     super::api_log::log_encoder_open("compute");
                 }
-                let enc = begin_compute_encoder(command_buffer, state, logical_device, device_handle);
+                let pass = timer.as_mut().and_then(|t| t.next_pass());
+                let enc = begin_compute_encoder(
+                    command_buffer,
+                    pass.as_deref(),
+                    state,
+                    logical_device,
+                    device_handle,
+                );
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
+                }
+                if let (Some(_), Some(bytes)) = (&timer, &last_push_bytes) {
+                    enc.set_bytes(RESOURCE_SLOT_BUFFER, bytes.len() as u64, bytes.as_ptr() as *const _);
                 }
                 guard.compute = Some(enc);
             }
@@ -1003,6 +1032,9 @@ pub(super) fn record_commands_to_buffer(
                         layout_bytes.len() as u64,
                         layout_bytes.as_ptr() as *const _,
                     );
+                if timer.is_some() {
+                    last_push_bytes = Some(layout_bytes.to_vec());
+                }
             }
             GpuCommand::Dispatch {
                 label,
@@ -1032,6 +1064,10 @@ pub(super) fn record_commands_to_buffer(
                     enc.dispatch_thread_groups(threadgroups, threads_per_group);
                     if label.is_some() {
                         enc.pop_debug_group();
+                    }
+                    if let Some(t) = timer.as_mut() {
+                        t.label_current(label.as_deref());
+                        end_compute!();
                     }
                 }
             }
@@ -1337,6 +1373,9 @@ pub(super) fn record_commands_to_buffer(
     // Explicit cleanup (guard's Drop also handles early-return paths).
     end_blit!();
     end_compute!();
+    if let Some(t) = timer {
+        t.attach(command_buffer);
+    }
     Ok(())
 }
 

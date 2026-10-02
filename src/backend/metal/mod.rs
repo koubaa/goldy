@@ -17,6 +17,7 @@ mod buffer;
 mod compute;
 mod context;
 mod device;
+mod dispatch_timing;
 mod frame_table;
 mod matmul;
 pub(super) mod metal_capture;

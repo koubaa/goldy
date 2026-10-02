@@ -226,7 +226,7 @@ public typealias DirectSpatialFloat4Rgba8View = DirectSpatial<float4, uint8_t4>;
 //
 // =============================================================================
 
-static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 512;
+static const uint GOLDY_FRAME_TABLE_ROW_STRIDE = 4096;
 
 /// Resolve bindless index `slot_k` for dispatch table base `dispatch_base`.
 ///

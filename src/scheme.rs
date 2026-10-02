@@ -2119,6 +2119,10 @@ impl Scheme {
         self.ctx.runtime().backend_type()
     }
 
+    pub(crate) fn adapter_name(&self) -> String {
+        self.ctx.runtime().adapter().get_info().name
+    }
+
     pub(crate) fn register_stamp(&mut self, resource: ResourceId, stamp: std::sync::Arc<crate::parcel::ParcelStamp>) {
         self.desc.register_stamp_parts(resource, stamp);
     }

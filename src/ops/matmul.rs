@@ -180,7 +180,7 @@ pub(crate) struct MatMulOperand {
 /// `GOLDY_MATMUL` override. Unset uses [`MatMulPolicy::Default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatMulPolicy {
-    /// Library GEMM; Goldy GEMV where the library's is slower (CUDA).
+    /// Per-hardware routing from [`MatMulTuning`].
     Default,
     /// Library for every shape (cuBLAS / MPS).
     Library,
@@ -222,22 +222,125 @@ impl MatMulFallback {
     }
 }
 
-/// Whether `desc` runs on the backend library rather than a Goldy stdlib kernel.
-///
-/// cuBLAS picks split-K `gemvx` plus a reduce launch for decode-sized GEMVs, which
-/// the single-pass Goldy GEMV beats, so CUDA GEMVs default to the stdlib kernel.
-pub(crate) fn use_native(backend: BackendType, fallback: MatMulFallback) -> bool {
-    use_native_with(env_policy(), backend, fallback)
+/// GPU family the default matmul routing is tuned for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatMulHardware {
+    Cuda,
+    /// Apple GPU; `generation` is the M-series number parsed from the adapter name.
+    AppleSilicon { generation: Option<u32> },
+    Other,
 }
 
-fn use_native_with(policy: MatMulPolicy, backend: BackendType, fallback: MatMulFallback) -> bool {
+impl MatMulHardware {
+    pub(crate) fn detect(backend: BackendType, adapter_name: &str) -> Self {
+        match backend {
+            BackendType::Cuda => Self::Cuda,
+            BackendType::Metal => Self::AppleSilicon {
+                generation: apple_m_generation(adapter_name),
+            },
+            _ => Self::Other,
+        }
+    }
+}
+
+/// `"Apple M2 Pro"` → `2`.
+fn apple_m_generation(adapter_name: &str) -> Option<u32> {
+    let rest = adapter_name.strip_prefix("Apple M")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Where the backend library loses to the Goldy stdlib kernels on one GPU family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MatMulTuning {
+    /// Stdlib-eligible GEMVs (`n = 1`) run on `gemv_f32`.
+    pub stdlib_gemv: bool,
+    /// GEMMs with `n` below this run on `matmul_f32` when its constraints hold.
+    pub library_min_n: u32,
+}
+
+/// Apple M1 (T8103), from `llama3.goldy/tools/gemv_bench`: `MPSMatrixMultiplication`
+/// costs about `n × 0.7 ms` at 768×768 for `n ≤ 3` (6–18× slower than `gemv_f32` at
+/// `n = 1`) and switches to a real GEMM at `n = 4`, where it beats `matmul_f32`.
+const APPLE_M1: MatMulTuning = MatMulTuning {
+    stdlib_gemv: true,
+    library_min_n: 4,
+};
+
+impl MatMulTuning {
+    pub(crate) fn for_hardware(hardware: MatMulHardware) -> Self {
+        match hardware {
+            // cuBLAS picks split-K `gemvx` plus a reduce launch for decode-sized GEMVs,
+            // which the single-pass stdlib GEMV beats.
+            MatMulHardware::Cuda => Self {
+                stdlib_gemv: true,
+                library_min_n: 1,
+            },
+            MatMulHardware::AppleSilicon { generation: Some(1) } => APPLE_M1,
+            // Unmeasured generations start from M1; retune with `tools/gemv_bench gemm`.
+            MatMulHardware::AppleSilicon { .. } => APPLE_M1,
+            MatMulHardware::Other => Self {
+                stdlib_gemv: false,
+                library_min_n: 1,
+            },
+        }
+    }
+
+    /// Hardware defaults with `GOLDY_MATMUL_GEMV=stdlib|library` and
+    /// `GOLDY_MATMUL_LIBRARY_MIN_N=<n>` applied.
+    pub(crate) fn resolve(hardware: MatMulHardware) -> Self {
+        let mut tuning = Self::for_hardware(hardware);
+        if let Ok(v) = std::env::var("GOLDY_MATMUL_GEMV") {
+            match v.to_ascii_lowercase().as_str() {
+                "stdlib" | "goldy" | "fallback" => tuning.stdlib_gemv = true,
+                "library" | "native" => tuning.stdlib_gemv = false,
+                _ => {}
+            }
+        }
+        if let Some(n) = std::env::var("GOLDY_MATMUL_LIBRARY_MIN_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            tuning.library_min_n = n;
+        }
+        tuning
+    }
+}
+
+/// Whether a matmul runs on the backend library rather than a Goldy stdlib kernel.
+///
+/// `stdlib_gemm_ok` says `matmul_f32` can realize a node that is not a stdlib GEMV
+/// (identity epilogue, packed operands); the default policy never routes a node to
+/// a stdlib kernel that cannot run it.
+pub(crate) fn use_native(
+    backend: BackendType,
+    adapter_name: &str,
+    desc: &MatMulDesc,
+    fallback: MatMulFallback,
+    stdlib_gemm_ok: bool,
+) -> bool {
+    let tuning = MatMulTuning::resolve(MatMulHardware::detect(backend, adapter_name));
+    use_native_with(env_policy(), tuning, backend, desc, fallback, stdlib_gemm_ok)
+}
+
+fn use_native_with(
+    policy: MatMulPolicy,
+    tuning: MatMulTuning,
+    backend: BackendType,
+    desc: &MatMulDesc,
+    fallback: MatMulFallback,
+    stdlib_gemm_ok: bool,
+) -> bool {
     if !backend_has_native(backend) {
         return false;
     }
     match policy {
         MatMulPolicy::Fallback => false,
         MatMulPolicy::Library => true,
-        MatMulPolicy::Default => !(fallback == MatMulFallback::Gemv && backend == BackendType::Cuda),
+        MatMulPolicy::Default => match fallback {
+            MatMulFallback::Gemv => !tuning.stdlib_gemv,
+            MatMulFallback::Gemm => !(stdlib_gemm_ok && desc.n < tuning.library_min_n),
+        },
     }
 }
 
@@ -429,7 +532,20 @@ impl<'a> MatMulBuilder<'a> {
             return;
         };
         let fallback = MatMulFallback::for_node(&self.desc, &a.operand, &b.operand, &c.operand);
-        let native = use_native(self.scheme.backend_type(), fallback);
+        let operands = [
+            ("A", &a.operand, packed_leading_dim(&self.desc, OperandKind::A)),
+            ("B", &b.operand, packed_leading_dim(&self.desc, OperandKind::B)),
+            ("C", &c.operand, packed_leading_dim(&self.desc, OperandKind::C)),
+        ];
+        let stdlib_gemm_ok = self.desc.requires_stdlib_identity_epilogue()
+            && operands.iter().all(|(_, op, packed)| op.leading_dim == *packed);
+        let native = use_native(
+            self.scheme.backend_type(),
+            &self.scheme.adapter_name(),
+            &self.desc,
+            fallback,
+            stdlib_gemm_ok,
+        );
         if !native && !self.desc.requires_stdlib_identity_epilogue() {
             self.scheme.push_record_error(format!(
                 "matmul `{}`: stdlib fallback requires alpha=1 and beta=0",
@@ -438,11 +554,7 @@ impl<'a> MatMulBuilder<'a> {
             return;
         }
         if !native && fallback == MatMulFallback::Gemm {
-            for (name, op, packed) in [
-                ("A", &a.operand, packed_leading_dim(&self.desc, OperandKind::A)),
-                ("B", &b.operand, packed_leading_dim(&self.desc, OperandKind::B)),
-                ("C", &c.operand, packed_leading_dim(&self.desc, OperandKind::C)),
-            ] {
+            for (name, op, packed) in operands {
                 if op.leading_dim != packed {
                     self.scheme.push_record_error(format!(
                         "matmul `{}`: stdlib fallback requires packed leading dim {packed} for {name}, got {}",
@@ -585,14 +697,31 @@ mod tests {
     }
 
     #[test]
-    fn cuda_gemv_defaults_to_goldy_kernel_and_gemm_to_library() {
+    fn default_routing_follows_hardware_tuning() {
         use MatMulFallback::{Gemm, Gemv};
         use MatMulPolicy::{Default, Fallback, Library};
-        assert!(!use_native_with(Default, BackendType::Cuda, Gemv));
-        assert!(use_native_with(Default, BackendType::Cuda, Gemm));
-        assert!(use_native_with(Default, BackendType::Metal, Gemv));
-        assert!(use_native_with(Library, BackendType::Cuda, Gemv));
-        assert!(!use_native_with(Fallback, BackendType::Cuda, Gemm));
-        assert!(!use_native_with(Library, BackendType::Vulkan, Gemm));
+        let route = |policy, backend, name: &str, n, fallback, stdlib_ok| {
+            let tuning = MatMulTuning::for_hardware(MatMulHardware::detect(backend, name));
+            use_native_with(policy, tuning, backend, &MatMulDesc::gemm(768, n, 768), fallback, stdlib_ok)
+        };
+        let (cuda, metal, m1) = (BackendType::Cuda, BackendType::Metal, "Apple M1");
+        assert!(!route(Default, cuda, "RTX", 1, Gemv, true));
+        assert!(route(Default, cuda, "RTX", 2, Gemm, true));
+        assert!(!route(Default, metal, m1, 1, Gemv, true));
+        assert!(!route(Default, metal, m1, 3, Gemm, true));
+        assert!(route(Default, metal, m1, 3, Gemm, false), "stdlib cannot run it");
+        assert!(route(Default, metal, m1, 4, Gemm, true));
+        assert!(!route(Default, metal, "Apple M4 Max", 1, Gemv, true));
+        assert!(route(Library, metal, m1, 1, Gemv, true));
+        assert!(!route(Fallback, cuda, "RTX", 64, Gemm, true));
+        assert!(!route(Library, BackendType::Vulkan, "any", 64, Gemm, true));
+    }
+
+    #[test]
+    fn apple_generation_parses_adapter_names() {
+        assert_eq!(apple_m_generation("Apple M1"), Some(1));
+        assert_eq!(apple_m_generation("Apple M2 Pro"), Some(2));
+        assert_eq!(apple_m_generation("Apple M10 Ultra"), Some(10));
+        assert_eq!(apple_m_generation("AMD Radeon Pro 5500M"), None);
     }
 }
