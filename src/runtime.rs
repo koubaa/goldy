@@ -123,7 +123,8 @@ impl Instance {
     }
 
     fn adapter_from_info(&self, info: AdapterInfo) -> Adapter {
-        let caps = self.backend.lock().unwrap().adapter_capabilities(info.id);
+        let mut caps = self.backend.lock().unwrap().adapter_capabilities(info.id);
+        caps.compute_partition_split = caps.compute_partition_split.with_env_override();
         Adapter {
             inner: Arc::new(AdapterInner {
                 backend: Arc::clone(&self.backend),
@@ -345,6 +346,58 @@ impl Adapter {
     }
 }
 
+/// How a large pure-compute partition is subdivided into separate submissions.
+///
+/// Present, render-pass, CPU-dispatch, and retainability boundaries always split a
+/// schedule; this policy only refines the pure-compute partitions between them.
+/// Every choice is a function of the schedule's shape alone, so a retained scheme
+/// splits identically on every submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputePartitionSplit {
+    /// One submission per partition.
+    None,
+    /// Split once at the wave boundary with the most barriered resources (typically
+    /// coarse→fine), so the two halves can overlap in the GPU pipeline.
+    BarrierCost,
+    /// Commit a short head early so the GPU executes it while the CPU encodes the
+    /// rest. Chunks are counted in schedule nodes: the first holds `head`, and each
+    /// later chunk holds `growth` times the previous one, so each chunk can be encoded
+    /// while the GPU runs the one before it. A remainder smaller than `head` joins the
+    /// last chunk, and partitions under `2 * head` nodes stay whole.
+    EncodeOverlap { head: u32, growth: u32 },
+}
+
+impl ComputePartitionSplit {
+    /// Metal default. On an M1 llama decode step (about 63 dispatches), heads of 4–16
+    /// nodes and growth from 2 up to a plain two-way split all measured within noise.
+    pub const ENCODE_OVERLAP_DEFAULT: Self = Self::EncodeOverlap { head: 8, growth: 2 };
+
+    /// Apply `GOLDY_PARTITION_SPLIT=none|barrier|overlap|overlap:<head>,<growth>`.
+    ///
+    /// Unset or unparsable values keep `self`.
+    pub fn with_env_override(self) -> Self {
+        std::env::var("GOLDY_PARTITION_SPLIT")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(self)
+    }
+
+    fn parse(v: &str) -> Option<Self> {
+        match v {
+            "none" => Some(Self::None),
+            "barrier" => Some(Self::BarrierCost),
+            "overlap" => Some(Self::ENCODE_OVERLAP_DEFAULT),
+            _ => {
+                let (head, growth) = v.strip_prefix("overlap:")?.split_once(',')?;
+                Some(Self::EncodeOverlap {
+                    head: head.trim().parse().ok().filter(|&h| h > 0)?,
+                    growth: growth.trim().parse().ok().filter(|&g| g > 0)?,
+                })
+            }
+        }
+    }
+}
+
 /// Runtime capabilities and format preferences.
 ///
 /// Use this to query the optimal formats and limits for your use case.
@@ -389,12 +442,13 @@ pub struct RuntimeCapabilities {
     /// writes and render-thread reuse gates.
     pub host_sidecar_on_submit_worker: bool,
 
-    /// Whether large pure-compute partitions may be subdivided at their heaviest
-    /// barrier boundary to expose GPU-pipeline overlap between submissions.
+    /// How large pure-compute partitions are subdivided into separate submissions.
     ///
-    /// Enabled on Vulkan/DX12. Disabled on Metal: cross-CB `MTLSharedEvent` waits
-    /// serialize consecutive partitions and dominate any overlap gains.
-    pub split_compute_partitions_on_barrier_cost: bool,
+    /// [`ComputePartitionSplit::BarrierCost`] on Vulkan/DX12,
+    /// [`ComputePartitionSplit::EncodeOverlap`] on Metal, and
+    /// [`ComputePartitionSplit::None`] elsewhere. `GOLDY_PARTITION_SPLIT` overrides
+    /// it (see [`ComputePartitionSplit::with_env_override`]).
+    pub compute_partition_split: ComputePartitionSplit,
 
     /// Whether the fresh Scheme submit path may fuse an upload-only partition with
     /// the immediately following compute partition into one command buffer.
@@ -464,7 +518,7 @@ impl Default for RuntimeCapabilities {
             buffer_page_size: 64 * 1024,
             buffer_decommit_supported: false,
             host_sidecar_on_submit_worker: false,
-            split_compute_partitions_on_barrier_cost: true,
+            compute_partition_split: ComputePartitionSplit::BarrierCost,
             fuse_upload_with_compute_partitions: false,
             ray_query: false,
             ray_tracing_pipelines: false,
@@ -1351,6 +1405,18 @@ mod tests {
 
     fn test_device() -> Runtime {
         Runtime::from_backend(Box::new(MockBackend::new())).unwrap()
+    }
+
+    #[test]
+    fn partition_split_override_parses() {
+        use ComputePartitionSplit as S;
+        assert_eq!(S::parse("none"), Some(S::None));
+        assert_eq!(S::parse("barrier"), Some(S::BarrierCost));
+        assert_eq!(S::parse("overlap"), Some(S::ENCODE_OVERLAP_DEFAULT));
+        assert_eq!(S::parse("overlap:4, 3"), Some(S::EncodeOverlap { head: 4, growth: 3 }));
+        assert_eq!(S::parse("overlap:0,2"), None);
+        assert_eq!(S::parse("overlap:4"), None);
+        assert_eq!(S::parse("fast"), None);
     }
 
     #[test]

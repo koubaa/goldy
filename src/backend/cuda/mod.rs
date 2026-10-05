@@ -3881,7 +3881,7 @@ impl GpuBackend for CudaBackend {
             buffer_resize_cost: BufferResizeCost::Copy,
             buffer_decommit_supported: false,
             host_sidecar_on_submit_worker: true,
-            split_compute_partitions_on_barrier_cost: false,
+            compute_partition_split: crate::runtime::ComputePartitionSplit::None,
             fuse_upload_with_compute_partitions: true,
             subgroup_width: Some(32),
             // `mma.sync` m16n8k16 with f16 operands, as Slang emits for 16×16 tiles.

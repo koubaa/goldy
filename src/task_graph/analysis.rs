@@ -33,6 +33,7 @@ use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
 use crate::frame_table::FrameTableStaging;
+use crate::runtime::ComputePartitionSplit;
 #[cfg(test)]
 use anyhow::Result;
 
@@ -602,6 +603,14 @@ pub(crate) fn waves_have_cpu_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
     })
 }
 
+pub(crate) fn waves_have_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::Dispatch { .. }))
+    })
+}
+
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
@@ -1158,7 +1167,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 /// Partition the compiled schedule into multiple command streams for pipelined
 /// backend submission.
 ///
-/// When `split_on_barrier_cost` is true, the partitioning heuristic selects the
+/// With [`ComputePartitionSplit::BarrierCost`], the partitioning heuristic selects the
 /// single wave boundary (wave index > 0) that has the largest `barriers_before`
 /// cost (sum of buffers and textures that need synchronisation), which
 /// corresponds to the heaviest cross-phase data dependency — typically the
@@ -1167,9 +1176,9 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 /// Returns a `Vec` of one or two partitions:
 ///
 /// - **Single partition**: returned when the schedule has fewer than 3 waves,
-///   every wave boundary has zero barrier cost, or `split_on_barrier_cost` is
-///   false (Metal). The result is equivalent to calling [`emit_commands`] and
-///   wrapping it.
+///   every wave boundary has zero barrier cost, or `split` is
+///   [`ComputePartitionSplit::None`]. The result is equivalent to calling
+///   [`emit_commands`] and wrapping it.
 ///
 /// - **Two partitions**: `[early_cmds, late_cmds]`.  Waves `0..split` go into
 ///   `early_cmds` and waves `split..` go into `late_cmds`.  The leading
@@ -1184,9 +1193,9 @@ pub fn emit_partitioned_commands(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
     resolver: Option<&SlotResolver>,
-    split_on_barrier_cost: bool,
+    split: ComputePartitionSplit,
 ) -> Vec<Vec<GpuCommand>> {
-    partition_wave_ranges(ir, schedule, split_on_barrier_cost)
+    partition_wave_ranges(ir, schedule, split)
         .into_iter()
         .map(|range| {
             let waves = &schedule.waves[range];
@@ -1480,17 +1489,66 @@ fn split_wave_range_at_retainability(
     out
 }
 
-/// Push `wave_range` into `ranges`, optionally splitting at the heaviest barrier boundary
-/// when the slice is a large pure-compute partition.
+/// Push `wave_range` into `ranges`, splitting a large pure-compute slice per `split`.
+fn push_split_partition(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+    split: ComputePartitionSplit,
+) {
+    match split {
+        ComputePartitionSplit::None => ranges.push(wave_range),
+        ComputePartitionSplit::BarrierCost => push_partition_with_barrier_heuristic(ranges, schedule, wave_range),
+        ComputePartitionSplit::EncodeOverlap { head, growth } => {
+            push_encode_overlap_chunks(ranges, schedule, wave_range, head as usize, growth as usize)
+        }
+    }
+}
+
+/// Chunk `wave_range` at wave boundaries for [`ComputePartitionSplit::EncodeOverlap`].
+fn push_encode_overlap_chunks(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+    head: usize,
+    growth: usize,
+) {
+    let head = head.max(1);
+    let mut remaining: usize = schedule.waves[wave_range.clone()]
+        .iter()
+        .map(|w| w.node_indices.len())
+        .sum();
+    if remaining < 2 * head {
+        ranges.push(wave_range);
+        return;
+    }
+    let mut start = wave_range.start;
+    let mut budget = head;
+    let mut taken = 0usize;
+    for i in wave_range.clone() {
+        let n = schedule.waves[i].node_indices.len();
+        taken += n;
+        remaining -= n;
+        if taken >= budget && remaining >= head {
+            ranges.push(start..i + 1);
+            start = i + 1;
+            taken = 0;
+            budget = budget.saturating_mul(growth.max(1));
+        }
+    }
+    ranges.push(start..wave_range.end);
+}
+
+/// Push `wave_range` into `ranges`, splitting once at the heaviest barrier boundary
+/// when the slice has at least 3 waves.
 fn push_partition_with_barrier_heuristic(
     ranges: &mut Vec<std::ops::Range<usize>>,
     schedule: &CompiledSchedule,
     wave_range: std::ops::Range<usize>,
-    enable: bool,
 ) {
     let waves = &schedule.waves[wave_range.clone()];
     let len = waves.len();
-    if enable && len >= 3 {
+    if len >= 3 {
         let (split_offset, max_cost) = waves
             .iter()
             .enumerate()
@@ -1514,19 +1572,19 @@ fn push_partition_with_barrier_heuristic(
 /// Actualized partitions refine the logical partition layout produced by
 /// [`describe_logical_partitions`] with:
 /// - retainability splits (buffer-only upload waves vs texture upload waves), and
-/// - an optional barrier-cost heuristic (`split_on_barrier_cost`): large pure-compute
-///   logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided at their
-///   heaviest wave boundary to expose GPU-pipeline overlap between submissions.
-///   Disabled on Metal (see [`crate::runtime::RuntimeCapabilities::split_compute_partitions_on_barrier_cost`]).
+/// - the [`ComputePartitionSplit`] policy (see
+///   [`crate::runtime::RuntimeCapabilities::compute_partition_split`]).
+///   [`ComputePartitionSplit::BarrierCost`] also applies to the remaining logical
+///   partitions; [`ComputePartitionSplit::EncodeOverlap`] only chunks pure-compute ones.
 ///
 /// The present-boundary and render-kind splits from the logical layer are always
-/// respected; the heuristics are applied only *within* pure-compute non-present partitions.
+/// respected.
 ///
 /// This function always returns at least one range covering all waves.
 pub(crate) fn partition_wave_ranges(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
-    split_on_barrier_cost: bool,
+    split: ComputePartitionSplit,
 ) -> Vec<std::ops::Range<usize>> {
     let logical = describe_logical_partitions(ir, schedule);
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(logical.len());
@@ -1534,10 +1592,12 @@ pub(crate) fn partition_wave_ranges(
     for lp in &logical {
         if lp.is_pure_compute() && lp.wave_range.len() >= 2 {
             for sub in split_wave_range_at_retainability(ir, schedule, lp.wave_range.clone()) {
-                push_partition_with_barrier_heuristic(&mut ranges, schedule, sub, split_on_barrier_cost);
+                push_split_partition(&mut ranges, schedule, sub, split);
             }
+        } else if split == ComputePartitionSplit::BarrierCost {
+            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone());
         } else {
-            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone(), split_on_barrier_cost);
+            ranges.push(lp.wave_range.clone());
         }
     }
 
@@ -2113,7 +2173,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let ranges = partition_wave_ranges(&ir, &schedule, true);
+        let ranges = partition_wave_ranges(&ir, &schedule, ComputePartitionSplit::BarrierCost);
         assert_eq!(
             ranges.len(),
             2,
@@ -3585,7 +3645,7 @@ mod tests {
     fn partitions(ir: &GraphIR) -> Vec<Vec<GpuCommand>> {
         let edges = build_edges(ir);
         let schedule = schedule_waves(ir, &edges);
-        emit_partitioned_commands(ir, &schedule, None, true)
+        emit_partitioned_commands(ir, &schedule, None, ComputePartitionSplit::BarrierCost)
     }
 
     /// Helper: run the full analysis pipeline and return flat commands.
@@ -3682,13 +3742,69 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let parts = emit_partitioned_commands(&ir, &schedule, None, false);
-        assert_eq!(
-            parts.len(),
-            1,
-            "Metal-style disabled barrier split must keep one compute partition"
-        );
+        let parts = emit_partitioned_commands(&ir, &schedule, None, ComputePartitionSplit::None);
+        assert_eq!(parts.len(), 1, "a disabled split must keep one compute partition");
         assert_eq!(parts[0], flat_commands(&ir));
+    }
+
+    /// `n` dispatches where each reads its predecessor's output: one node per wave.
+    fn linear_chain(n: u64) -> GraphIR {
+        GraphIR {
+            nodes: (0..n)
+                .map(|i| {
+                    let mut bindings = vec![(buf(i + 1), NodeAccess::Write)];
+                    if i > 0 {
+                        bindings.push((buf(i), NodeAccess::Read));
+                    }
+                    node_bound("N", i + 1, bindings, 1)
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn encode_overlap_ranges(ir: &GraphIR, head: u32, growth: u32) -> Vec<std::ops::Range<usize>> {
+        let schedule = schedule_waves(ir, &build_edges(ir));
+        partition_wave_ranges(ir, &schedule, ComputePartitionSplit::EncodeOverlap { head, growth })
+    }
+
+    #[test]
+    fn encode_overlap_chunks_grow_geometrically() {
+        assert_eq!(
+            encode_overlap_ranges(&linear_chain(20), 2, 2),
+            vec![0..2, 2..6, 6..14, 14..20]
+        );
+    }
+
+    #[test]
+    fn encode_overlap_folds_a_short_remainder_into_the_last_chunk() {
+        assert_eq!(encode_overlap_ranges(&linear_chain(7), 2, 2), vec![0..2, 2..7]);
+    }
+
+    #[test]
+    fn encode_overlap_keeps_a_small_partition_whole() {
+        assert_eq!(encode_overlap_ranges(&linear_chain(3), 2, 2), vec![0..3]);
+    }
+
+    #[test]
+    fn encode_overlap_chunks_flatten_to_the_unsplit_stream() {
+        let ir = linear_chain(20);
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let split = ComputePartitionSplit::EncodeOverlap { head: 2, growth: 2 };
+        let parts = emit_partitioned_commands(&ir, &schedule, None, split);
+        assert_eq!(parts.len(), 4);
+        fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
+            cmds.iter()
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }
+                    )
+                })
+                .collect()
+        }
+        let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
+        assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
     }
 
     #[test]

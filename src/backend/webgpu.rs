@@ -4195,7 +4195,7 @@ impl GpuBackend for WebGpuBackend {
             // No dedicated worker thread: deferred host writes run at enqueue via
             // queue-ordered `Queue::write_buffer`. Ekrano keys nonblocking reuse off this flag.
             host_sidecar_on_submit_worker: true,
-            split_compute_partitions_on_barrier_cost: false,
+            compute_partition_split: crate::runtime::ComputePartitionSplit::None,
             fuse_upload_with_compute_partitions: true,
             // Slang WGSL has no TraceRayInline; do not advertise ray_query until shaders work.
             ray_query: false,

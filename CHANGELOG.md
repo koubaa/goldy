@@ -116,6 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Metal commits large compute partitions in chunks** — `RuntimeCapabilities::compute_partition_split`
+  (a `ComputePartitionSplit`) replaces `split_compute_partitions_on_barrier_cost`. Metal now
+  uses `EncodeOverlap`: a pure-compute partition is committed in command buffers of 8, 16,
+  32, … schedule nodes, so the GPU runs each chunk while the CPU encodes the next. The
+  chunk boundaries depend only on the schedule's shape. On an M1 this cuts a 15M llama decode step
+  from 2.40 ms to 1.81 ms, and a 110M one by about 5%. Vulkan/DX12 keep `BarrierCost`; CUDA
+  and WebGPU keep one partition. `GOLDY_PARTITION_SPLIT=none|barrier|overlap|overlap:<head>,<growth>`
+  overrides the choice. Upload fusion now folds only upload-only partitions into the next
+  compute partition, so it no longer undoes a split.
+
 - **CUDA compiles compute pipelines off the backend lock** — Slang lowering, the PTX
   compile and the module load run before `ComputePipeline::new` takes the backend mutex, as
   the Vulkan and DX12 compiles already did. A specialization or fusion compile on a worker

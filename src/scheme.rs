@@ -5870,7 +5870,11 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
             "cpu→consumer edge yields a barrier on B"
         );
 
-        let parts = analysis::partition_wave_ranges(&scheme.desc.ir, &schedule, true);
+        let parts = analysis::partition_wave_ranges(
+            &scheme.desc.ir,
+            &schedule,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+        );
         assert_eq!(parts, vec![0..1, 1..2, 2..3], "cpu wave is its own partition");
     }
 

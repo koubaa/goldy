@@ -946,6 +946,9 @@ fn merged_compute_render_fp(fp0: u64, fp1: u64) -> u64 {
 
 /// When the next partition is pure compute, merge upload and compute into one
 /// standalone command buffer so Metal records blit→compute in a single CB.
+///
+/// Only an upload-only partition merges. One that also dispatches came from a
+/// [`crate::runtime::ComputePartitionSplit`] and stays its own submission.
 fn try_merge_upload_compute_range(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
@@ -969,6 +972,7 @@ fn try_merge_upload_compute_range(
         || !analysis::partition_waves_have_upload_slots(ir, w0)
         || analysis::partition_waves_have_upload_slots(ir, w1)
         || !partition_waves_can_retain(ir, w1)
+        || analysis::waves_have_dispatch(ir, w0)
     {
         return None;
     }
@@ -1606,7 +1610,7 @@ fn submit_resolved_ir_partitions_fresh(
             cache,
             ir,
             fp,
-            caps.split_compute_partitions_on_barrier_cost,
+            caps.compute_partition_split,
             caps.fuse_upload_with_compute_partitions,
         );
     }
@@ -1807,11 +1811,8 @@ fn submit_resolved_ir_partitions_replay(
         get_or_build_schedule(cache, ir, fp);
     }
 
-    let split_on_barrier_cost = context
-        .runtime()
-        .capabilities()
-        .split_compute_partitions_on_barrier_cost;
-    ensure_replay_static_plan(cache, ir, split_on_barrier_cost, resource_stamps);
+    let split = context.runtime().capabilities().compute_partition_split;
+    ensure_replay_static_plan(cache, ir, split, resource_stamps);
     let static_plan = Arc::clone(
         cache
             .as_ref()
@@ -1855,7 +1856,7 @@ fn submit_resolved_ir_partitions_replay(
 
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.build_partitions");
-        get_or_build_partitioned_commands(cache, ir, fp, split_on_barrier_cost, ir_clean);
+        get_or_build_partitioned_commands(cache, ir, fp, split, ir_clean);
     }
 
     let mut resolver = SlotResolver::new();
@@ -2486,14 +2487,14 @@ struct ReplayStaticPlan {
 fn ensure_replay_static_plan(
     cache: &mut Option<CompiledCacheEntry>,
     ir: &GraphIR,
-    split_on_barrier_cost: bool,
+    split: crate::runtime::ComputePartitionSplit,
     resource_stamps: &ResourceKeyMap<Arc<crate::parcel::ParcelStamp>>,
 ) {
     if cache.as_ref().is_some_and(|entry| entry.replay_static.is_some()) {
         return;
     }
     let schedule = &cache.as_ref().expect("schedule cache").schedule;
-    let wave_ranges = analysis::partition_wave_ranges(ir, schedule, split_on_barrier_cost);
+    let wave_ranges = analysis::partition_wave_ranges(ir, schedule, split);
     let partitions = wave_ranges
         .iter()
         .map(|range| {
@@ -2556,7 +2557,7 @@ fn get_or_build_fresh_plan(
     cache: &mut Option<CompiledCacheEntry>,
     ir: &GraphIR,
     fp: u64,
-    split_on_barrier_cost: bool,
+    split: crate::runtime::ComputePartitionSplit,
     fuse_upload_with_compute: bool,
 ) {
     let _tz = crate::tracy_zone!("goldy.compile_fresh_plan");
@@ -2568,7 +2569,7 @@ fn get_or_build_fresh_plan(
     }
     tracing::trace!(target: "goldy::schedule_cache", hit = false, fp, "fresh_plan");
     let entry = cache.as_mut().unwrap();
-    let ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
+    let ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split);
     let mut plan = Vec::with_capacity(ranges.len());
     for range in ranges {
         let waves = &entry.schedule.waves[range.clone()];
@@ -2598,7 +2599,7 @@ fn get_or_build_partitioned_commands(
     cache: &mut Option<CompiledCacheEntry>,
     ir: &GraphIR,
     fp: u64,
-    split_on_barrier_cost: bool,
+    split: crate::runtime::ComputePartitionSplit,
     ir_clean: bool,
 ) {
     let _tz = crate::tracy_zone!("goldy.compile_partitioned");
@@ -2668,7 +2669,7 @@ fn get_or_build_partitioned_commands(
     // stored so the slot indices remain aligned with wave_ranges.
     let _tz = crate::tracy_zone!("goldy.compile_partitioned.miss_emit");
     let entry = cache.as_mut().unwrap();
-    let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split_on_barrier_cost);
+    let wave_ranges = analysis::partition_wave_ranges(ir, &entry.schedule, split);
 
     let mut compute_partitions: Vec<Vec<GpuCommand>> = Vec::with_capacity(wave_ranges.len());
     let mut graph_partitions: Vec<Option<Vec<GraphCommand>>> = Vec::with_capacity(wave_ranges.len());
@@ -3569,7 +3570,8 @@ mod slice_retention_tests {
     fn compute_render_merge(ir: &GraphIR, separate_graphics: bool) -> Option<std::ops::Range<usize>> {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        let wave_ranges = analysis::partition_wave_ranges(ir, &schedule, true);
+        let wave_ranges =
+            analysis::partition_wave_ranges(ir, &schedule, crate::runtime::ComputePartitionSplit::BarrierCost);
         try_merge_compute_render_range(ir, &schedule, &wave_ranges, 0, separate_graphics)
     }
 
@@ -3814,7 +3816,11 @@ mod slice_retention_tests {
         let compute_deposit_render = compute_then_deposit_and_render_ir(1, 1, 2, 10);
         let edges = analysis::build_edges(&compute_deposit_render);
         let schedule = analysis::schedule_waves(&compute_deposit_render, &edges);
-        let ranges = analysis::partition_wave_ranges(&compute_deposit_render, &schedule, true);
+        let ranges = analysis::partition_wave_ranges(
+            &compute_deposit_render,
+            &schedule,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+        );
         assert!(
             ranges.len() >= 2,
             "expected compute | deposit+render partitions, got {ranges:?}"
@@ -4552,7 +4558,13 @@ mod partitioning_tests {
     fn build_cache(ir: &GraphIR) -> CompiledCacheEntry {
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(ir);
-        get_or_build_partitioned_commands(&mut cache, ir, fp, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            ir,
+            fp,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
         cache.unwrap()
     }
 
@@ -4608,7 +4620,7 @@ mod partitioning_tests {
     fn assert_cache_kind_invariant(ir: &GraphIR, entry: &CompiledCacheEntry) {
         let edges = analysis::build_edges(ir);
         let schedule = analysis::schedule_waves(ir, &edges);
-        let ranges = analysis::partition_wave_ranges(ir, &schedule, true);
+        let ranges = analysis::partition_wave_ranges(ir, &schedule, crate::runtime::ComputePartitionSplit::BarrierCost);
         let parts = entry.partitioned_commands.as_ref().unwrap();
 
         for (i, range) in ranges.iter().enumerate() {
@@ -5055,10 +5067,22 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir,
+            fp,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
         let ptr_before = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
 
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir,
+            fp,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
         let ptr_after = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap().as_ptr();
         assert_eq!(
             ptr_before, ptr_after,
@@ -5082,10 +5106,22 @@ mod partitioning_tests {
         assert_ne!(fp1, fp2, "test requires distinct binding fingerprints");
 
         let mut cache: Option<CompiledCacheEntry> = None;
-        get_or_build_partitioned_commands(&mut cache, &ir_v1, fp1, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir_v1,
+            fp1,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
         assert_eq!(cache.as_ref().unwrap().fp, fp1);
 
-        get_or_build_partitioned_commands(&mut cache, &ir_v2, fp2, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir_v2,
+            fp2,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
         assert_eq!(
             cache.as_ref().unwrap().fp,
             fp2,
@@ -5163,7 +5199,13 @@ mod partitioning_tests {
         };
         let mut cache: Option<CompiledCacheEntry> = None;
         let fp = binding_fingerprint(&ir);
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir,
+            fp,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
 
         let ptr_before = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();
@@ -5177,7 +5219,13 @@ mod partitioning_tests {
         if let NodeKind::WriteBuffer { data, .. } = &mut ir.nodes[0].kind {
             *data = Arc::from(vec![9u8; 4]);
         }
-        get_or_build_partitioned_commands(&mut cache, &ir, fp, true, false);
+        get_or_build_partitioned_commands(
+            &mut cache,
+            &ir,
+            fp,
+            crate::runtime::ComputePartitionSplit::BarrierCost,
+            false,
+        );
 
         let ptr_after = {
             let parts = cache.as_ref().unwrap().partitioned_commands.as_ref().unwrap();

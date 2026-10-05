@@ -128,8 +128,8 @@ pub use goldy_derive::GpuType;
 pub use goldy_derive::LayoutCheckable;
 pub use goldy_derive::StructuredBufferElement;
 pub use runtime::{
-    Adapter, AdapterInfo, BufferHeapStats, Instance, PowerPreference, RequestAdapterOptions, Runtime,
-    RuntimeCapabilities, RuntimeDescriptor, TextureHeapStats, VideoMemoryInfo,
+    Adapter, AdapterInfo, BufferHeapStats, ComputePartitionSplit, Instance, PowerPreference, RequestAdapterOptions,
+    Runtime, RuntimeCapabilities, RuntimeDescriptor, TextureHeapStats, VideoMemoryInfo,
 };
 
 #[doc(hidden)]
