@@ -227,7 +227,9 @@ impl MatMulFallback {
 pub(crate) enum MatMulHardware {
     Cuda,
     /// Apple GPU; `generation` is the M-series number parsed from the adapter name.
-    AppleSilicon { generation: Option<u32> },
+    AppleSilicon {
+        generation: Option<u32>,
+    },
     Other,
 }
 
@@ -702,7 +704,14 @@ mod tests {
         use MatMulPolicy::{Default, Fallback, Library};
         let route = |policy, backend, name: &str, n, fallback, stdlib_ok| {
             let tuning = MatMulTuning::for_hardware(MatMulHardware::detect(backend, name));
-            use_native_with(policy, tuning, backend, &MatMulDesc::gemm(768, n, 768), fallback, stdlib_ok)
+            use_native_with(
+                policy,
+                tuning,
+                backend,
+                &MatMulDesc::gemm(768, n, 768),
+                fallback,
+                stdlib_ok,
+            )
         };
         let (cuda, metal, m1) = (BackendType::Cuda, BackendType::Metal, "Apple M1");
         assert!(!route(Default, cuda, "RTX", 1, Gemv, true));

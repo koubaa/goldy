@@ -708,7 +708,11 @@ pub(super) fn record_commands_to_buffer(
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
                 }
                 if let (Some(_), Some(bytes)) = (&timer, &last_push_bytes) {
-                    enc.set_bytes(RESOURCE_SLOT_BUFFER, bytes.len() as u64, bytes.as_ptr() as *const _);
+                    enc.set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        bytes.len() as u64,
+                        bytes.as_ptr() as *const _,
+                    );
                 }
                 guard.compute = Some(enc);
             }

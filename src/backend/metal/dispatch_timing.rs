@@ -123,13 +123,23 @@ impl DispatchTimer {
         let valid = |t: u64| t != 0 && t != u64::MAX;
         let lo = ticks.iter().copied().filter(|&t| valid(t)).min().unwrap_or(0);
         let hi = ticks.iter().copied().filter(|&t| valid(t)).max().unwrap_or(0);
-        let us_per_tick = if hi > lo { (gpu_end - gpu_start) * 1e6 / (hi - lo) as f64 } else { 0.0 };
+        let us_per_tick = if hi > lo {
+            (gpu_end - gpu_start) * 1e6 / (hi - lo) as f64
+        } else {
+            0.0
+        };
         let mut out = String::new();
         for (i, label) in self.labels.iter().enumerate() {
             let (s, e) = (ticks[2 * i], ticks[2 * i + 1]);
-            let us = if valid(s) && valid(e) && e >= s { (e - s) as f64 * us_per_tick } else { -1.0 };
+            let us = if valid(s) && valid(e) && e >= s {
+                (e - s) as f64 * us_per_tick
+            } else {
+                -1.0
+            };
             let label = label.replace('\\', "\\\\").replace('"', "\\\"");
-            out.push_str(&format!("{{\"cb\":{cb_index},\"i\":{i},\"label\":\"{label}\",\"us\":{us:.3}}}\n"));
+            out.push_str(&format!(
+                "{{\"cb\":{cb_index},\"i\":{i},\"label\":\"{label}\",\"us\":{us:.3}}}\n"
+            ));
         }
         if let Ok(mut f) = file.lock() {
             let _ = f.write_all(out.as_bytes());
