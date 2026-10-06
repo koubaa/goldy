@@ -2025,7 +2025,7 @@ fn submit_resolved_ir_partitions_replay(
 
             let part_fp = partition_fps[part_idx];
             let range = wave_ranges[part_idx].clone();
-            let waves = cache.as_ref().unwrap().schedule.waves[range].to_vec();
+            let waves = &cache.as_ref().unwrap().schedule.waves[range];
             let static_partition = &static_plan.partitions[part_idx];
             let can_retain = static_partition.can_retain;
             let has_render = static_partition.has_render;
@@ -2040,7 +2040,7 @@ fn submit_resolved_ir_partitions_replay(
                     &mut cross_scratch,
                     resource_stamps,
                     &static_partition.net_access,
-                    static_plan.registry.as_slice(),
+                    &static_partition.registry,
                     stamp_ctx,
                     separate,
                 )
@@ -2468,6 +2468,9 @@ pub(crate) struct CompiledCacheEntry {
 
 struct ReplayStaticPartition {
     net_access: Arc<ResourceKeyMap<NetAccess>>,
+    /// The stamps whose ledger cross-submit sync for `net_access` reads: each key in
+    /// it or aliasing one in it.
+    registry: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     has_unkeyed_bindings: bool,
     can_retain: bool,
     has_render: bool,
@@ -2479,7 +2482,6 @@ struct ReplayStaticPartition {
 }
 
 struct ReplayStaticPlan {
-    registry: Arc<Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>>,
     wave_ranges: Vec<std::ops::Range<usize>>,
     partitions: Vec<ReplayStaticPartition>,
 }
@@ -2495,13 +2497,26 @@ fn ensure_replay_static_plan(
     }
     let schedule = &cache.as_ref().expect("schedule cache").schedule;
     let wave_ranges = analysis::partition_wave_ranges(ir, schedule, split);
+    let registry = super::cross_submit::resource_stamps_from_ir(ir, resource_stamps);
     let partitions = wave_ranges
         .iter()
         .map(|range| {
             let waves = &schedule.waves[range.clone()];
             let deposit_ids = analysis::partition_deposit_ids(ir, waves);
+            let net_access = net_access_for_waves(ir, waves);
+            let registry = registry
+                .iter()
+                .filter(|(key, _)| {
+                    net_access.contains_key(key)
+                        || net_access
+                            .keys()
+                            .any(|net| super::cross_submit::resource_keys_alias(*key, *net))
+                })
+                .cloned()
+                .collect();
             ReplayStaticPartition {
-                net_access: Arc::new(net_access_for_waves(ir, waves)),
+                net_access: Arc::new(net_access),
+                registry,
                 has_unkeyed_bindings: partition_has_unkeyed_bindings(ir, waves),
                 can_retain: partition_waves_can_retain(ir, waves),
                 has_render: partition_waves_have_render(ir, waves),
@@ -2513,9 +2528,7 @@ fn ensure_replay_static_plan(
             }
         })
         .collect();
-    let registry = Arc::new(super::cross_submit::resource_stamps_from_ir(ir, resource_stamps));
     cache.as_mut().expect("schedule cache").replay_static = Some(Arc::new(ReplayStaticPlan {
-        registry,
         wave_ranges,
         partitions,
     }));

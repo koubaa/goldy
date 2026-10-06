@@ -91,6 +91,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             device,
             timeline_event,
             timeline_waiter,
+            host_wait_estimate_ns: Arc::default(),
             signal_queue,
             last_submitted_seq: 0,
             in_flight_command_buffers: VecDeque::new(),
@@ -148,7 +149,7 @@ fn finish_destroy(work: Box<MetalContextDestroyWork>) {
     {
         let mut registry = ld.descriptors.lock().unwrap();
         for (_, graph) in sc.retained_graphs.drain() {
-            registry.unpin_retained_slots(graph.used_slots);
+            registry.unpin_retained_slots(graph.used_slots.iter().copied());
         }
     }
 

@@ -126,6 +126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overrides the choice. Upload fusion now folds only upload-only partitions into the next
   compute partition, so it no longer undoes a split.
 
+- **Less host time per Metal submit and wait** — a commit with no host-side wait or write
+  runs on the submitting thread when the submission worker is idle, so the GPU starts without
+  a thread handoff. A host wait whose length the context's last wait predicts sleeps until
+  shortly before then and polls the timeline event with `wfe`, observing completion about
+  50 µs after the GPU finishes instead of the 100 µs `waitUntilCompleted` takes on M1; a wait
+  that outlasts its prediction falls back to `waitUntilCompleted`. Dispatch labels become
+  encoder debug groups only under GPU capture or `GOLDY_METAL_DEBUG_GROUPS=1`. Encoding no
+  longer clones a partition's commands, `useResources` lists each `MTLBuffer` once and leaves
+  out withdraw staging, retained graphs keep their slot sets, and cross-submit sync reads only
+  the stamps a partition touches. Host claims read into the returned view directly instead of
+  through a second buffer. Together these cut a 15M llama decode step on an M1 from 1.80 to
+  1.65 ms.
+
 - **CUDA compiles compute pipelines off the backend lock** — Slang lowering, the PTX
   compile and the module load run before `ComputePipeline::new` takes the backend mutex, as
   the Vulkan and DX12 compiles already did. A specialization or fusion compile on a worker

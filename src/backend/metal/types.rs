@@ -619,6 +619,8 @@ pub(crate) struct MetalSubmissionContext {
     pub device: super::DeviceHandle,
     pub timeline_event: SharedEvent,
     pub timeline_waiter: TimelineWaiter,
+    /// How long, in nanoseconds, the last host wait for a command buffer took.
+    pub host_wait_estimate_ns: Arc<std::sync::atomic::AtomicU64>,
     pub signal_queue: std::sync::Arc<crate::signal::SignalQueue>,
     /// Last device-global seq value submitted on this context.
     pub last_submitted_seq: u64,
@@ -651,11 +653,12 @@ pub(crate) struct MetalSubmissionContext {
 /// Retained graph IR plus bindless slots baked at record time.
 pub(crate) struct MetalRetainedGraph {
     pub commands: std::sync::Arc<[super::super::GraphCommand]>,
-    pub used_slots: Vec<MetalSlotKey>,
+    /// Each slot `commands` binds, once.
+    pub used_slots: std::sync::Arc<[MetalSlotKey]>,
 }
 
 /// Bindless slot identity for retained-graph pin tracking and last-use stamping.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum MetalSlotKey {
     StorageBuffer(u32),
     UniformBuffer(u32),

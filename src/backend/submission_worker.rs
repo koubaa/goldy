@@ -55,6 +55,8 @@ impl SubmissionEpochWait {
 
 pub(crate) struct SubmissionWorker {
     submitted_epoch: Arc<AtomicU64>,
+    /// Submits enqueued and not yet executed.
+    pending: Arc<AtomicU64>,
     latched_error: Arc<Mutex<Option<anyhow::Error>>>,
     wait_notify: Arc<(Mutex<()>, Condvar)>,
     sender: std::sync::mpsc::SyncSender<WorkerMessage>,
@@ -65,22 +67,31 @@ impl SubmissionWorker {
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = std::sync::mpsc::sync_channel(capacity.max(1));
         let submitted_epoch = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(AtomicU64::new(0));
         let latched_error: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
         let wait_notify = Arc::new((Mutex::new(()), Condvar::new()));
         let epoch_worker = Arc::clone(&submitted_epoch);
+        let pending_worker = Arc::clone(&pending);
         let err_worker = Arc::clone(&latched_error);
         let notify_worker = Arc::clone(&wait_notify);
         let thread = thread::Builder::new()
             .name("goldy-submit".into())
-            .spawn(move || worker_loop(receiver, epoch_worker, err_worker, notify_worker))
+            .spawn(move || worker_loop(receiver, epoch_worker, pending_worker, err_worker, notify_worker))
             .expect("spawn goldy submission worker");
         Self {
             submitted_epoch,
+            pending,
             latched_error,
             wait_notify,
             sender,
             thread: Mutex::new(Some(thread)),
         }
+    }
+
+    /// Whether every submit enqueued so far has executed. A submit run on the calling
+    /// thread while this holds keeps FIFO order with everything enqueued before it.
+    pub fn is_idle(&self) -> bool {
+        self.pending.load(Ordering::Acquire) == 0
     }
 
     #[allow(dead_code)]
@@ -111,9 +122,11 @@ impl SubmissionWorker {
     )]
     pub fn enqueue(&self, tv: u64, work: Box<dyn PendingSubmit>) -> Result<()> {
         self.check_error()?;
-        self.sender
-            .send(WorkerMessage::Submit { tv, work })
-            .map_err(|e| anyhow::anyhow!("submission worker channel closed: {e}"))
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        self.sender.send(WorkerMessage::Submit { tv, work }).map_err(|e| {
+            self.pending.fetch_sub(1, Ordering::Relaxed);
+            anyhow::anyhow!("submission worker channel closed: {e}")
+        })
     }
 
     /// Run one submit job on the calling thread and advance the submitted epoch.
@@ -168,6 +181,9 @@ impl SubmissionWorker {
     }
 
     pub fn flush(&self) -> Result<()> {
+        if self.is_idle() {
+            return self.check_error();
+        }
         self.check_error()?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.sender
@@ -264,6 +280,7 @@ fn wait_for_submitted_epoch(
 fn worker_loop(
     receiver: std::sync::mpsc::Receiver<WorkerMessage>,
     submitted_epoch: Arc<AtomicU64>,
+    pending: Arc<AtomicU64>,
     latched_error: Arc<Mutex<Option<anyhow::Error>>>,
     wait_notify: Arc<(Mutex<()>, Condvar)>,
 ) {
@@ -305,6 +322,7 @@ fn worker_loop(
                         notify_waiters(&wait_notify);
                     }
                 }
+                pending.fetch_sub(1, Ordering::Release);
             }
             WorkerMessage::Flush { done } => {
                 let _flush = crate::tracy_zone!("goldy.submit_worker.flush");

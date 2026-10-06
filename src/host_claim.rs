@@ -149,14 +149,13 @@ impl HostSinkReadRequest {
         for (context, value) in last_write.iter() {
             self.ctx.wait_until_epoch(Epoch { context, value })?;
         }
-        let mut bytes = vec![0u8; self.byte_size as usize];
+        let mut values = zeroed_elements::<T>(self.byte_size as usize);
         {
             let backend = self.ctx.runtime().inner.backend.lock().unwrap();
             backend
-                .read_readback_buffer(self.handle, &mut bytes)
+                .read_readback_buffer(self.handle, bytemuck::cast_slice_mut(&mut values))
                 .map_err(|e| self.ctx.classify(e))?;
         }
-        let values = cast_bytes::<T>(bytes)?;
         self.claimed = false;
         Ok(HostView {
             stamp: Arc::clone(&self.stamp),
@@ -441,10 +440,10 @@ impl HostReadRequest {
         };
         ctx.advance_high_water_timeline(copy_tv);
         ctx.wait_until(copy_tv)?;
-        let mut bytes = vec![0u8; byte_size as usize];
+        let mut values = zeroed_elements::<T>(byte_size as usize);
         let read_result = {
             let backend = ctx.runtime().inner.backend.lock().unwrap();
-            backend.read_readback_buffer(staging, &mut bytes)
+            backend.read_readback_buffer(staging, bytemuck::cast_slice_mut(&mut values))
         };
         pool.return_handle(staging, copy_tv, byte_size, false);
         if let Err(e) = read_result {
@@ -456,7 +455,7 @@ impl HostReadRequest {
             stamp,
             ctx: None,
             mapped_handle: None,
-            backing: HostViewBacking::Owned(cast_bytes::<T>(bytes)?),
+            backing: HostViewBacking::Owned(values),
             _ty: PhantomData,
         })
     }
@@ -500,10 +499,10 @@ impl HostReadRequest {
         };
         ctx.advance_high_water_timeline(copy_tv);
         ctx.wait_until(copy_tv)?;
-        let mut bytes = vec![0u8; layout.logical_bytes as usize];
+        let mut values = zeroed_elements::<T>(layout.logical_bytes as usize);
         let read_result = {
             let backend = ctx.runtime().inner.backend.lock().unwrap();
-            backend.read_texture_readback_staging(staging, layout, &mut bytes)
+            backend.read_texture_readback_staging(staging, layout, bytemuck::cast_slice_mut(&mut values))
         };
         pool.return_handle(staging, copy_tv, layout.staging_bytes, true);
         if let Err(e) = read_result {
@@ -514,17 +513,15 @@ impl HostReadRequest {
             stamp,
             ctx: None,
             mapped_handle: None,
-            backing: HostViewBacking::Owned(cast_bytes::<T>(bytes)?),
+            backing: HostViewBacking::Owned(values),
             _ty: PhantomData,
         })
     }
 }
 
-fn cast_bytes<T: bytemuck::Pod>(bytes: Vec<u8>) -> Result<Vec<T>, GoldyError> {
-    let n = bytes.len() / std::mem::size_of::<T>();
-    let mut out = vec![T::zeroed(); n];
-    out.copy_from_slice(bytemuck::cast_slice(&bytes));
-    Ok(out)
+/// Room for `byte_size` bytes of `T`, which a readback fills in place.
+fn zeroed_elements<T: bytemuck::Pod>(byte_size: usize) -> Vec<T> {
+    vec![T::zeroed(); byte_size / std::mem::size_of::<T>()]
 }
 
 enum HostViewBacking<T> {

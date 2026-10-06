@@ -97,6 +97,21 @@ pub fn enabled() -> bool {
     CONFIG.is_some()
 }
 
+static DEBUG_GROUPS: LazyLock<bool> = LazyLock::new(|| {
+    enabled()
+        || ["GOLDY_METAL_DEBUG_GROUPS", "METAL_CAPTURE_ENABLED", "MTL_CAPTURE_ENABLED"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|v| v != "0"))
+});
+
+/// Whether dispatches carry their labels as encoder debug groups. Only a GPU capture
+/// shows them, and each costs an `NSString` and two encoder calls per dispatch, so they
+/// are on only when capture is enabled or `GOLDY_METAL_DEBUG_GROUPS` is set.
+#[inline]
+pub fn debug_groups() -> bool {
+    *DEBUG_GROUPS
+}
+
 /// Call immediately before `new_command_buffer` on a capture-eligible submit.
 ///
 /// Returns `true` if a capture session was started for this submit.
