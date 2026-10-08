@@ -1589,6 +1589,10 @@ pub(crate) struct SurfaceState {
     /// re-encodes a slot that the GPU is still reading from a previous frame.
     /// Released back to the device's `ResourceRegistry` free list on surface destroy.
     pub bindless_storage_slots: [u32; MAX_FRAMES_IN_FLIGHT],
+    /// Device timeline value of the last present that used each slot's drawable.
+    /// `acquire` must wait for it before re-encoding the slot: retained schemes can
+    /// put the CPU more than `MAX_FRAMES_IN_FLIGHT` frames ahead of the GPU.
+    pub bindless_slot_last_use: [TimelineValue; MAX_FRAMES_IN_FLIGHT],
     /// Current present mode
     pub present_mode: crate::types::PresentMode,
     /// Frame-scoped GPU commands submitted with the surface frame.

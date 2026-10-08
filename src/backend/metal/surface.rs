@@ -35,6 +35,11 @@
 //! The fix: reserve `MAX_FRAMES_IN_FLIGHT` (3) storage-image slots per surface
 //! and rotate through them. Frame N writes to slot `N % 3` while the GPU reads
 //! slot `(N-1) % 3` — the slots never alias across concurrent frames.
+//!
+//! Rotation alone is not enough when the CPU runs three or more frames ahead
+//! (e.g. replaying a retained scheme costs far less CPU than the GPU frame), so
+//! each slot records the present timeline that last used it and `acquire()`
+//! waits for that value to retire before re-encoding the slot.
 
 use super::super::{DeviceHandle, FrameToken, SurfaceHandle, SwapchainImageHandle, TextureHandle};
 use super::compute;
@@ -189,6 +194,7 @@ pub(super) fn create(
             drawable_texture_handles: std::array::from_fn(|_| None),
             current_texture_handle: None,
             bindless_storage_slots,
+            bindless_slot_last_use: [0; MAX_FRAMES_IN_FLIGHT],
             present_mode: PresentMode::Auto,
             frame_pending_gpu_commands: Vec::new(),
             pending_acquire_count: 0,
@@ -283,6 +289,27 @@ pub(super) fn acquire(
             ss.bindless_storage_slots[frame_slot],
         )
     };
+
+    // The slot's argument-buffer entry is rewritten below; wait until the GPU work that
+    // last wrote through it has retired. An unpresented drawable has no present
+    // timeline, so fall back to everything committed on this context.
+    let slot_busy_until = {
+        let ss = state.surfaces.get(&surface).context("Invalid surface handle")?;
+        let mut tv = ss.bindless_slot_last_use[frame_slot];
+        if ss.drawable_slots[frame_slot].is_some() {
+            if let Some(sc_arc) = state.contexts.get(&ctx) {
+                tv = tv.max(sc_arc.lock().unwrap().last_committed_timeline.unwrap_or(0));
+            }
+        }
+        tv
+    };
+    if slot_busy_until > super::context::device_retired(state, device_handle) {
+        let _wz = crate::tracy_zone!("mtl.surface.acquire.wait_slot");
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        if !super::context::wait_until_device_seq_at_least(state, device_handle, slot_busy_until, TIMEOUT) {
+            anyhow::bail!("surface acquire timed out waiting for timeline {slot_busy_until} to free bindless slot");
+        }
+    }
 
     // Clean up any previously acquired drawable in this slot that wasn't presented.
     if let Some(tex_handle) = state
@@ -470,6 +497,8 @@ pub(super) fn finish_present(
         if let Some(surface_state) = state.surfaces.get_mut(&surface) {
             surface_state.drawable_slots[present_slot] = None;
             surface_state.drawable_texture_handles[present_slot] = None;
+            let last_use = &mut surface_state.bindless_slot_last_use[present_slot];
+            *last_use = (*last_use).max(finish.present_timeline);
         }
     }
 
