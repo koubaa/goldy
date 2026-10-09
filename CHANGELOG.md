@@ -116,15 +116,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Compute partitions split — `RuntimeDescriptor::compute_partition_split`
+  selects the policy for that runtime. Unset keeps the backend default: `None` on Metal, CUDA,
+  and WebGPU (one submission per partition) and `BarrierCost` on Vulkan, DX12, and CPU.
+  `GOLDY_PARTITION_SPLIT=none|barrier|overlap|overlap:<head>,<growth>` overrides both when it
+  parses; an unrecognized value is logged and ignored. The choice is fixed when the runtime
+  is created.
+
 - **Metal commits large compute partitions in chunks** — `RuntimeCapabilities::compute_partition_split`
-  (a `ComputePartitionSplit`) replaces `split_compute_partitions_on_barrier_cost`. Metal now
-  uses `EncodeOverlap`: a pure-compute partition is committed in command buffers of 8, 16,
-  32, … schedule nodes, so the GPU runs each chunk while the CPU encodes the next. The
-  chunk boundaries depend only on the schedule's shape. On an M1 this cuts a 15M llama decode step
-  from 2.40 ms to 1.81 ms, and a 110M one by about 5%. Vulkan/DX12 keep `BarrierCost`; CUDA
-  and WebGPU keep one partition. `GOLDY_PARTITION_SPLIT=none|barrier|overlap|overlap:<head>,<growth>`
-  overrides the choice. Upload fusion now folds only upload-only partitions into the next
-  compute partition, so it no longer undoes a split.
+  (a `ComputePartitionSplit`) replaces `split_compute_partitions_on_barrier_cost`.
+  `EncodeOverlap` commits a pure-compute partition in command buffers of 8, 16, 32, …
+  schedule nodes, so the GPU runs each chunk while the CPU encodes the next. The chunk
+  boundaries depend only on the schedule's shape. Vulkan/DX12 keep `BarrierCost`; CUDA and
+  WebGPU keep one partition. Upload fusion now folds only upload-only partitions into the
+  next compute partition, so it no longer undoes a split.
 
 - **Less host time per Metal submit and wait** — a commit with no host-side wait or write
   runs on the submitting thread when the submission worker is idle, so the GPU starts without

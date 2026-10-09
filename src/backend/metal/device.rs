@@ -60,8 +60,11 @@ pub(super) fn adapter_capabilities(
         buffer_page_size: 16 * 1024,
         buffer_decommit_supported: true,
         host_sidecar_on_submit_worker: true,
-        // Commit a short head early so the GPU runs it while the CPU encodes the rest.
-        compute_partition_split: crate::runtime::ComputePartitionSplit::ENCODE_OVERLAP_DEFAULT,
+        // One command buffer per partition. Encode overlap is opt-in
+        // (`RuntimeDescriptor::compute_partition_split`): a command-buffer boundary
+        // waits on the shared event, which helps a latency-bound decode and costs
+        // a renderer that already keeps the GPU busy.
+        compute_partition_split: crate::runtime::ComputePartitionSplit::None,
         // Fuse upload blits with the following compute partition so Scheme matches
         // Classic's single-CB structure and avoids an extra commit + event wait.
         fuse_upload_with_compute_partitions: true,

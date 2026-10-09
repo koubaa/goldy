@@ -123,8 +123,7 @@ impl Instance {
     }
 
     fn adapter_from_info(&self, info: AdapterInfo) -> Adapter {
-        let mut caps = self.backend.lock().unwrap().adapter_capabilities(info.id);
-        caps.compute_partition_split = caps.compute_partition_split.with_env_override();
+        let caps = self.backend.lock().unwrap().adapter_capabilities(info.id);
         Adapter {
             inner: Arc::new(AdapterInner {
                 backend: Arc::clone(&self.backend),
@@ -248,6 +247,14 @@ pub enum PowerPreference {
 pub struct RuntimeDescriptor {
     /// Optional debug label for the logical device.
     pub label: Option<String>,
+
+    /// How large pure-compute partitions are subdivided into submissions.
+    ///
+    /// `None` keeps the backend default ([`ComputePartitionSplit::None`] on Metal, CUDA,
+    /// and WebGPU; [`ComputePartitionSplit::BarrierCost`] on Vulkan, DX12, and CPU).
+    /// `GOLDY_PARTITION_SPLIT` overrides this when it parses as `none`, `barrier`,
+    /// `overlap`, or `overlap:<head>,<growth>`. An unrecognized value is logged and ignored.
+    pub compute_partition_split: Option<ComputePartitionSplit>,
 }
 
 pub(crate) struct AdapterInner {
@@ -283,7 +290,8 @@ impl Adapter {
 
     /// Create a logical [`Runtime`] on this adapter.
     pub fn request_runtime(&self, desc: &RuntimeDescriptor) -> Result<Runtime> {
-        let _ = desc;
+        let compute_partition_split =
+            resolve_compute_partition_split(self.inner.caps.compute_partition_split, desc.compute_partition_split);
         tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
         let handle = backend.create_device(self.inner.info.id)?;
@@ -306,6 +314,7 @@ impl Adapter {
         tracing::info!(
             adapter_id = self.inner.info.id,
             device_type = ?self.inner.info.device_type,
+            ?compute_partition_split,
             "GPU device created"
         );
 
@@ -321,6 +330,7 @@ impl Adapter {
                 slang: Arc::new(OnceLock::new()),
                 stdlib_matmul: Mutex::default(),
                 validation,
+                compute_partition_split,
             }),
         })
     }
@@ -368,19 +378,10 @@ pub enum ComputePartitionSplit {
 }
 
 impl ComputePartitionSplit {
-    /// Metal default. On an M1 llama decode step (about 63 dispatches), heads of 4–16
-    /// nodes and growth from 2 up to a plain two-way split all measured within noise.
+    /// Preset for [`Self::EncodeOverlap`]. On an M1 llama decode step (about 63
+    /// dispatches), heads of 4–16 nodes and growth from 2 up to a plain two-way split
+    /// all measured within noise.
     pub const ENCODE_OVERLAP_DEFAULT: Self = Self::EncodeOverlap { head: 8, growth: 2 };
-
-    /// Apply `GOLDY_PARTITION_SPLIT=none|barrier|overlap|overlap:<head>,<growth>`.
-    ///
-    /// Unset or unparsable values keep `self`.
-    pub fn with_env_override(self) -> Self {
-        std::env::var("GOLDY_PARTITION_SPLIT")
-            .ok()
-            .and_then(|v| Self::parse(&v))
-            .unwrap_or(self)
-    }
 
     fn parse(v: &str) -> Option<Self> {
         match v {
@@ -394,6 +395,39 @@ impl ComputePartitionSplit {
                     growth: growth.trim().parse().ok().filter(|&g| g > 0)?,
                 })
             }
+        }
+    }
+}
+
+/// `GOLDY_PARTITION_SPLIT`, when it parses, wins over `requested` and `backend`.
+///
+/// An unrecognized value is logged once per runtime and ignored. The result is fixed
+/// when the runtime is created: retained partition plans are cached against it.
+fn resolve_compute_partition_split(
+    backend: ComputePartitionSplit,
+    requested: Option<ComputePartitionSplit>,
+) -> ComputePartitionSplit {
+    let env = std::env::var("GOLDY_PARTITION_SPLIT").ok();
+    select_compute_partition_split(backend, requested, env.as_deref())
+}
+
+fn select_compute_partition_split(
+    backend: ComputePartitionSplit,
+    requested: Option<ComputePartitionSplit>,
+    env: Option<&str>,
+) -> ComputePartitionSplit {
+    let fallback = requested.unwrap_or(backend);
+    let Some(value) = env else {
+        return fallback;
+    };
+    match ComputePartitionSplit::parse(value) {
+        Some(split) => split,
+        None => {
+            tracing::warn!(
+                %value,
+                "unrecognized GOLDY_PARTITION_SPLIT; using the runtime's partition split"
+            );
+            fallback
         }
     }
 }
@@ -444,10 +478,11 @@ pub struct RuntimeCapabilities {
 
     /// How large pure-compute partitions are subdivided into separate submissions.
     ///
-    /// [`ComputePartitionSplit::BarrierCost`] on Vulkan/DX12,
-    /// [`ComputePartitionSplit::EncodeOverlap`] on Metal, and
-    /// [`ComputePartitionSplit::None`] elsewhere. `GOLDY_PARTITION_SPLIT` overrides
-    /// it (see [`ComputePartitionSplit::with_env_override`]).
+    /// On an [`Adapter`] this is the backend default: [`ComputePartitionSplit::None`] on
+    /// Metal, CUDA, and WebGPU, and [`ComputePartitionSplit::BarrierCost`] on Vulkan,
+    /// DX12, and CPU. On a [`Runtime`] it is that default, then
+    /// [`RuntimeDescriptor::compute_partition_split`], then `GOLDY_PARTITION_SPLIT`
+    /// when the variable parses.
     pub compute_partition_split: ComputePartitionSplit,
 
     /// Whether the fresh Scheme submit path may fuse an upload-only partition with
@@ -582,6 +617,8 @@ pub(crate) struct DeviceInner {
     pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
     /// The backend's [`Validation`], read once so hot paths need not lock the backend.
     pub(crate) validation: Validation,
+    /// Partition policy for this runtime. See [`resolve_compute_partition_split`].
+    compute_partition_split: ComputePartitionSplit,
 }
 
 impl Clone for Runtime {
@@ -736,6 +773,7 @@ impl Runtime {
                 slang: Arc::clone(&self.inner.slang),
                 stdlib_matmul: Mutex::default(),
                 validation: self.inner.validation,
+                compute_partition_split: self.inner.compute_partition_split,
             }),
         }
     }
@@ -1092,7 +1130,9 @@ impl Runtime {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> RuntimeCapabilities {
-        self.inner.adapter.capabilities()
+        let mut caps = self.inner.adapter.capabilities();
+        caps.compute_partition_split = self.inner.compute_partition_split;
+        caps
     }
 
     // --- Shader Library Management ---
@@ -1280,6 +1320,7 @@ impl Runtime {
             })
         };
         let caps = backend.lock().unwrap().adapter_capabilities(adapter_info.id);
+        let compute_partition_split = resolve_compute_partition_split(caps.compute_partition_split, None);
         let adapter = Adapter {
             inner: Arc::new(AdapterInner {
                 backend: Arc::clone(&backend),
@@ -1307,6 +1348,7 @@ impl Runtime {
                 slang: Arc::new(OnceLock::new()),
                 stdlib_matmul: Mutex::default(),
                 validation,
+                compute_partition_split,
             }),
         })
     }
@@ -1417,6 +1459,27 @@ mod tests {
         assert_eq!(S::parse("overlap:0,2"), None);
         assert_eq!(S::parse("overlap:4"), None);
         assert_eq!(S::parse("fast"), None);
+    }
+
+    #[test]
+    fn partition_split_selection_prefers_env_then_descriptor_then_backend() {
+        use ComputePartitionSplit as S;
+        let backend = S::BarrierCost;
+        let requested = Some(S::None);
+        assert_eq!(select_compute_partition_split(backend, requested, None), S::None);
+        assert_eq!(select_compute_partition_split(backend, None, None), backend);
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("overlap")),
+            S::ENCODE_OVERLAP_DEFAULT
+        );
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("overlap:4,3")),
+            S::EncodeOverlap { head: 4, growth: 3 }
+        );
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("fast")),
+            S::None
+        );
     }
 
     #[test]
