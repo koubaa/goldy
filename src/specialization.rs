@@ -184,7 +184,7 @@ impl WarmJob {
     /// Hold `job` too, unless every holder has already let it go.
     fn attach(job: &Arc<CompileJob>) -> Option<Self> {
         job.holders
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n > 0).then_some(n + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n > 0).then_some(n + 1))
             .ok()?;
         Some(Self {
             baked: job.baked.clone(),

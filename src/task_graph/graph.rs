@@ -2062,7 +2062,7 @@ fn submit_resolved_ir_partitions_replay(
             {
                 last_tv = replay.partition_last_tv[part_idx].unwrap();
                 boundary.record(separate, has_render, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, waves, last_tv);
                 consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                 *partial_tv = last_tv;
                 *partial = result.clone();
@@ -2080,7 +2080,7 @@ fn submit_resolved_ir_partitions_replay(
                     partition_standalone_commands(
                         ir,
                         cache_entry,
-                        &waves,
+                        waves,
                         part_idx,
                         has_render,
                         needs_resolver,
@@ -2091,7 +2091,7 @@ fn submit_resolved_ir_partitions_replay(
                 last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
                 replay.record_last_tv(part_idx, last_tv);
                 boundary.record(separate, has_render, last_tv);
-                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, waves, last_tv);
                 consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                 if has_present {
                     result.note_present_bindings(present_bindings, last_tv);
@@ -2118,7 +2118,7 @@ fn submit_resolved_ir_partitions_replay(
                         partition_standalone_commands(
                             ir,
                             cache_entry,
-                            &waves,
+                            waves,
                             part_idx,
                             has_render,
                             true,
@@ -2129,7 +2129,7 @@ fn submit_resolved_ir_partitions_replay(
                     last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
                     replay.record_last_tv(part_idx, last_tv);
                     boundary.record(separate, has_render, last_tv);
-                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, &waves, last_tv);
+                    apply_partition_epoch_stamps(resource_stamps, stamp_targets, stamp_ctx, ir, waves, last_tv);
                     consume_partition_deposits(&static_partition.deposit_ids, &mut deposit_claims, last_tv);
                     result.note_present_bindings(present_bindings, last_tv);
                     *partial_tv = last_tv;
@@ -2185,7 +2185,7 @@ fn submit_resolved_ir_partitions_replay(
                     partition_graph_commands_for_retain(
                         ir,
                         cache.as_ref().unwrap(),
-                        &waves,
+                        waves,
                         part_idx,
                         has_render,
                         Some(&resolver),
@@ -2246,7 +2246,7 @@ fn submit_resolved_ir_partitions_replay(
 
             let graph_cmds = {
                 let _tz = crate::tracy_zone!("goldy.partition_loop.retain_cmds");
-                partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), &waves, part_idx, has_render, None)
+                partition_graph_commands_for_retain(ir, cache.as_ref().unwrap(), waves, part_idx, has_render, None)
             };
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
             ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
