@@ -34,8 +34,9 @@ pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
 /// A coarse/fine pipeline can exceed 256 indices in a single submission
-/// (longpathdash peaks at ~269); keep shader and Rust constants in sync.
-pub const FRAME_TABLE_ROW_STRIDE: u32 = 512;
+/// (longpathdash peaks at ~269), and an unfused 12-layer transformer decode step
+/// needs ~700; keep shader and Rust constants in sync.
+pub const FRAME_TABLE_ROW_STRIDE: u32 = 4096;
 /// Pipeline depth — number of row-groups in the staging/table buffers.
 pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
 
@@ -110,9 +111,21 @@ impl FrameTableStaging {
     }
 
     /// Reserve a contiguous run of table slots for one dispatch; returns the base offset.
+    ///
+    /// Past [`FRAME_TABLE_ROW_STRIDE`] the dispatch's indices are dropped and it binds
+    /// whatever the row already holds, so overflow is reported rather than silent.
     pub fn alloc_dispatch(&mut self, slot_count: u32) -> u32 {
         let base = self.next_dispatch_base;
         let end = base.saturating_add(slot_count);
+        if end > FRAME_TABLE_ROW_STRIDE {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::error!(
+                    "frame table overflow: submission needs more than {FRAME_TABLE_ROW_STRIDE} bindless \
+                     indices; later dispatches will bind wrong resources"
+                );
+            });
+        }
         self.next_dispatch_base = end.min(FRAME_TABLE_ROW_STRIDE);
         base
     }

@@ -11,7 +11,6 @@ use goldy::{
 };
 #[cfg(feature = "graphics")]
 use goldy::{RenderPipeline, RenderPipelineDesc, TextureFormat};
-use std::ops::Shr;
 
 fn mock_ctx(device: &Runtime) -> Context {
     device.create_context().expect("context")

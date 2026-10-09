@@ -6,8 +6,6 @@
 use goldy::{
     Context, DepthFormat, Parcel, Runtime, Scheme, Submission, Texture, TextureFlags, TextureFormat, TextureKind,
 };
-use std::ops::Shr;
-use std::sync::Arc;
 
 /// Acquire a texture parcel suitable as a copy destination and host-claim source.
 pub fn acquire_readback_texture(pool: &goldy::Runtime, width: u32, height: u32, format: TextureFormat) -> Texture {

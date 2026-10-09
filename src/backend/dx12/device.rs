@@ -62,6 +62,7 @@ pub(super) struct AdapterGpuFeatures {
     pub ray_tracing_pipelines: bool,
     pub mesh_shaders: bool,
     pub amplification_shaders: bool,
+    pub subgroup_width: Option<u32>,
 }
 
 pub(super) fn query_adapter_gpu_features(adapter: &IDXGIAdapter1) -> AdapterGpuFeatures {
@@ -119,6 +120,23 @@ pub(super) fn query_adapter_gpu_features(adapter: &IDXGIAdapter1) -> AdapterGpuF
         }
     }
 
+    let mut options1 = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    unsafe {
+        if device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                &mut options1 as *mut _ as *mut _,
+                std::mem::size_of_val(&options1) as u32,
+            )
+            .is_ok()
+            && options1.WaveOps.as_bool()
+            && options1.WaveLaneCountMin == options1.WaveLaneCountMax
+            && options1.WaveLaneCountMin > 0
+        {
+            features.subgroup_width = Some(options1.WaveLaneCountMin);
+        }
+    }
+
     features
 }
 
@@ -144,6 +162,7 @@ pub(super) fn adapter_capabilities(
     caps.ray_tracing_pipelines = adapter.ray_tracing_pipelines;
     caps.mesh_shaders = adapter.mesh_shaders;
     caps.amplification_shaders = adapter.amplification_shaders;
+    caps.subgroup_width = adapter.subgroup_width;
     caps
 }
 

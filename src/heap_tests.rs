@@ -20,7 +20,7 @@ mod heap_tests {
     use crate::parcel::Parcel;
     use crate::test_support::{scheme_advance_timeline, SerialGpuRuntime};
     use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
-    use crate::{BufferKind, MemoryExchange, Scheme};
+    use crate::{BufferKind, Scheme};
     use std::sync::Arc;
 
     fn submission_context(device: &crate::Runtime) -> crate::Context {

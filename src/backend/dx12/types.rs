@@ -559,6 +559,8 @@ pub(crate) struct DxgiAdapterInfo {
     pub mesh_shaders: bool,
     /// Amplification shaders ship with mesh-shader tier 1.
     pub amplification_shaders: bool,
+    /// See [`crate::runtime::RuntimeCapabilities::subgroup_width`].
+    pub subgroup_width: Option<u32>,
 }
 
 /// A slot in the compute command allocator pool.
@@ -1806,4 +1808,6 @@ pub(super) struct Dx12State {
     /// or `GetDeviceRemovedReason` returns a non-ok HRESULT).
     /// Polled by [`GpuBackend::is_device_lost`] without holding any lock.
     pub device_removed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The validation this backend was created with.
+    pub validation: crate::Validation,
 }

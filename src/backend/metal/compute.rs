@@ -12,6 +12,7 @@ use super::types::{ComputePipelineState, MetalState, PushLayout};
 use crate::slang::parse_numthreads;
 use crate::slang::SlangStage;
 use crate::tracy_zone;
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 /// Fallback workgroup size used when a compute shader's `[numthreads]` annotation
@@ -26,10 +27,10 @@ use objc::rc::autoreleasepool;
 /// CPU-mapped `WriteBuffer` fast paths are only sound when a dispatch (or other GPU
 /// command) in the *same* command buffer follows the write. Upload-only submissions
 /// must use the blit slow path so a later submission on the queue observes the data.
-fn submission_has_gpu_encoder_work(commands: &[GpuCommand]) -> bool {
+fn submission_has_gpu_encoder_work<C: Borrow<GpuCommand>>(commands: &[C]) -> bool {
     commands.iter().any(|c| {
         !matches!(
-            c,
+            c.borrow(),
             GpuCommand::WriteBuffer { .. } | GpuCommand::FrameTableStaging { .. } | GpuCommand::ResourceBarrier { .. }
         )
     })
@@ -108,6 +109,13 @@ fn collect_metal_slots_from_graph_commands(state: &MetalState, commands: &[Graph
     slots
 }
 
+fn graph_slot_set(state: &MetalState, commands: &[GraphCommand]) -> Arc<[MetalSlotKey]> {
+    let mut slots = collect_metal_slots_from_graph_commands(state, commands);
+    slots.sort_unstable();
+    slots.dedup();
+    slots.into()
+}
+
 fn collect_metal_slots_from_gpu_commands(state: &MetalState, commands: &[GpuCommand]) -> Vec<MetalSlotKey> {
     let mut slots = Vec::new();
     let mut current_pipeline = None;
@@ -161,8 +169,11 @@ fn remove_retained_graph(state: &MetalState, ctx: ContextHandle, key: u64) -> Op
     let removed = state.contexts.get(&ctx)?.lock().unwrap().retained_graphs.remove(&key);
     if let Some(graph) = removed {
         if let Some(device) = state.devices.get(&device_handle) {
-            let used_slots = graph.used_slots.clone();
-            device.descriptors.lock().unwrap().unpin_retained_slots(used_slots);
+            device
+                .descriptors
+                .lock()
+                .unwrap()
+                .unpin_retained_slots(graph.used_slots.iter().copied());
         }
         Some(graph)
     } else {
@@ -505,13 +516,19 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 ///
 /// Using the batched form reduces Objective-C msg_send overhead from O(N) per encoder open
 /// to O(1) regardless of how many resources the device owns.
+///
+/// `pass` carries counter sample attachments when dispatch timing is on.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
+    pass: Option<&mtl::ComputePassDescriptorRef>,
     state: &MetalState,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
-    let encoder = command_buffer.new_compute_command_encoder();
+    let encoder = match pass {
+        Some(pass) => command_buffer.compute_command_encoder_with_descriptor(pass),
+        None => command_buffer.new_compute_command_encoder(),
+    };
     logical_device
         .heap_allocator
         .lock()
@@ -527,14 +544,19 @@ pub(super) fn begin_compute_encoder<'a>(
     // replacing one ObjC msg_send per resource with at most three total.
     // Safety: BufferRef/TextureRef are subclasses of Resource in the Metal ObjC
     // hierarchy, so transmuting the reference type is sound (same pointer, same layout).
-    let mut rw_refs: Vec<&mtl::ResourceRef> = Vec::new();
+    // Withdraw staging is only ever a blit operand, bound directly. A view shares its
+    // parent's `MTLBuffer`, so the list is deduplicated by object: the driver's cost is
+    // per entry.
+    let mut rw_refs: Vec<&mtl::ResourceRef> = Vec::with_capacity(state.buffers.len());
     let mut ro_refs: Vec<&mtl::ResourceRef> = Vec::new();
     for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle {
+        if buf_state.device_handle == device_handle && !buf_state.is_withdraw_staging {
             let buf_ref: &mtl::BufferRef = &buf_state.buffer;
             rw_refs.push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
         }
     }
+    rw_refs.sort_unstable_by_key(|r| std::ptr::from_ref(*r));
+    rw_refs.dedup_by_key(|r| std::ptr::from_ref(*r));
     for tex_state in state.textures.values() {
         if tex_state.device_handle == device_handle {
             let tex_ref: &mtl::TextureRef = &tex_state.texture;
@@ -610,12 +632,12 @@ impl Drop for EncoderGuard<'_> {
 /// `gpu_idle` must equal `last_committed_timeline.map(|l| signaled >= l).unwrap_or(true)`
 /// as computed by the caller before the pre-pass.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn record_commands_to_buffer(
+pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
-    commands: &[GpuCommand],
+    commands: &[C],
     belt_slices: &[(mtl::Buffer, u64)],
     texture_scratches: &[TextureStagingEntry],
     belt_idx: &mut usize,
@@ -629,6 +651,7 @@ pub(super) fn record_commands_to_buffer(
         blit: None,
     };
     let mut current_pipeline: Option<&ComputePipelineState> = None;
+    let debug_groups = super::metal_capture::debug_groups();
 
     // Set to true once any GPU command (blit or compute) has been recorded
     // into the current command buffer. The WriteBuffer CPU memcpy fast path
@@ -645,6 +668,19 @@ pub(super) fn record_commands_to_buffer(
     // share the encoder and avoid the per-command encoder-open overhead.
     let mut blit_touched_bufs: Vec<super::BufferHandle> = Vec::new();
     let mut blit_touched_texs: Vec<super::TextureHandle> = Vec::new();
+
+    // `GOLDY_METAL_DISPATCH_TIMING`: one encoder per dispatch, so the frame-table push
+    // bytes must be re-applied whenever a new encoder opens.
+    let mut timer = if super::dispatch_timing::enabled() {
+        let dispatches = commands
+            .iter()
+            .filter(|c| matches!((*c).borrow(), GpuCommand::Dispatch { .. }))
+            .count();
+        super::dispatch_timing::DispatchTimer::new(&logical_device.device, dispatches)
+    } else {
+        None
+    };
+    let mut last_push_bytes: Option<Vec<u8>> = None;
 
     macro_rules! end_compute {
         () => {
@@ -677,9 +713,23 @@ pub(super) fn record_commands_to_buffer(
                 if super::api_log::enabled() {
                     super::api_log::log_encoder_open("compute");
                 }
-                let enc = begin_compute_encoder(command_buffer, state, logical_device, device_handle);
+                let pass = timer.as_mut().and_then(|t| t.next_pass());
+                let enc = begin_compute_encoder(
+                    command_buffer,
+                    pass.as_deref(),
+                    state,
+                    logical_device,
+                    device_handle,
+                );
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
+                }
+                if let (Some(_), Some(bytes)) = (&timer, &last_push_bytes) {
+                    enc.set_bytes(
+                        RESOURCE_SLOT_BUFFER,
+                        bytes.len() as u64,
+                        bytes.as_ptr() as *const _,
+                    );
                 }
                 guard.compute = Some(enc);
             }
@@ -724,7 +774,7 @@ pub(super) fn record_commands_to_buffer(
         };
     }
 
-    for cmd in commands {
+    for cmd in commands.iter().map(Borrow::borrow) {
         match cmd {
             GpuCommand::FrameTableStaging { .. } => {}
             GpuCommand::ClearBuffer { buffer, offset, size } => {
@@ -972,7 +1022,7 @@ pub(super) fn record_commands_to_buffer(
             } => {
                 ensure_compute!();
                 if let Some(pipeline) = current_pipeline {
-                    crate::backend::with_layout_validation(|| {
+                    crate::backend::with_layout_validation(state.validation, || {
                         crate::backend::validate_raw_binding_strides(
                             raw_indices,
                             &pipeline.push_constant_categories,
@@ -1003,6 +1053,9 @@ pub(super) fn record_commands_to_buffer(
                         layout_bytes.len() as u64,
                         layout_bytes.as_ptr() as *const _,
                     );
+                if timer.is_some() {
+                    last_push_bytes = Some(layout_bytes.to_vec());
+                }
             }
             GpuCommand::Dispatch {
                 label,
@@ -1026,12 +1079,17 @@ pub(super) fn record_commands_to_buffer(
                         super::api_log::log_dispatch(label.as_deref(), *workgroups_x, *workgroups_y, *workgroups_z);
                     }
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                    if let Some(name) = label.as_deref() {
+                    let group = label.as_deref().filter(|_| debug_groups);
+                    if let Some(name) = group {
                         enc.push_debug_group(name);
                     }
                     enc.dispatch_thread_groups(threadgroups, threads_per_group);
-                    if label.is_some() {
+                    if group.is_some() {
                         enc.pop_debug_group();
+                    }
+                    if let Some(t) = timer.as_mut() {
+                        t.label_current(label.as_deref());
+                        end_compute!();
                     }
                 }
             }
@@ -1061,7 +1119,8 @@ pub(super) fn record_commands_to_buffer(
                     };
                     let row_offset = prologue_row.map_or(0, |r| r * crate::frame_table::FRAME_TABLE_ROW_STRIDE);
                     let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                    if let Some(name) = label.as_deref() {
+                    let group = label.as_deref().filter(|_| debug_groups);
+                    if let Some(name) = group {
                         enc.push_debug_group(name);
                     }
                     for i in 0..entry_count {
@@ -1100,7 +1159,7 @@ pub(super) fn record_commands_to_buffer(
                         };
                         enc.dispatch_thread_groups(threadgroups, threads_per_group);
                     }
-                    if label.is_some() {
+                    if group.is_some() {
                         enc.pop_debug_group();
                     }
                 }
@@ -1121,11 +1180,12 @@ pub(super) fn record_commands_to_buffer(
                     super::api_log::log_dispatch_indirect(label.as_deref(), *buffer, *offset);
                 }
                 let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
-                if let Some(name) = label.as_deref() {
+                let group = label.as_deref().filter(|_| debug_groups);
+                if let Some(name) = group {
                     enc.push_debug_group(name);
                 }
                 enc.dispatch_thread_groups_indirect(&buf_state.buffer, *offset, threads_per_group);
-                if label.is_some() {
+                if group.is_some() {
                     enc.pop_debug_group();
                 }
             }
@@ -1337,6 +1397,9 @@ pub(super) fn record_commands_to_buffer(
     // Explicit cleanup (guard's Drop also handles early-return paths).
     end_blit!();
     end_compute!();
+    if let Some(t) = timer {
+        t.attach(command_buffer);
+    }
     Ok(())
 }
 
@@ -1357,15 +1420,15 @@ type StagedUploads = (Vec<StagedBufferUpload>, Vec<TextureStagingEntry>, bool);
 /// (i.e. the GPU timeline has caught up to `last_committed_timeline`).  It is
 /// forwarded to `record_commands_to_buffer` so the fast-path check there uses the
 /// same value computed here — keeping the pre-pass and command loop in sync.
-fn stage_uploads(
+fn stage_uploads<C: Borrow<GpuCommand>>(
     state: &mut MetalState,
     ctx: ContextHandle,
     device_handle: super::super::DeviceHandle,
-    commands: &[GpuCommand],
+    commands: &[C],
 ) -> Result<StagedUploads> {
     let has_upload = commands.iter().any(|c| {
         matches!(
-            c,
+            c.borrow(),
             GpuCommand::WriteBuffer { .. }
                 | GpuCommand::WriteTexture { .. }
                 | GpuCommand::WriteTextureRegion { .. }
@@ -1417,7 +1480,7 @@ fn stage_uploads(
 
     const SMALL_WRITE_THRESHOLD: usize = 4096;
 
-    for cmd in commands {
+    for cmd in commands.iter().map(Borrow::borrow) {
         match cmd {
             GpuCommand::WriteBuffer {
                 buffer: buf_handle,
@@ -1716,7 +1779,19 @@ pub(super) fn submit_graph(
     retain_key: Option<u64>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
-    let result = autoreleasepool(|| submit_graph_inner(state, ctx, commands, retain_key, sync));
+    submit_graph_with_slots(state, ctx, commands, retain_key, None, sync)
+}
+
+/// [`submit_graph`] given `slots`, the [`graph_slot_set`] of `commands` when known.
+fn submit_graph_with_slots(
+    state: &mut MetalState,
+    ctx: ContextHandle,
+    commands: &[super::super::GraphCommand],
+    retain_key: Option<u64>,
+    slots: Option<Arc<[MetalSlotKey]>>,
+    sync: Option<&SubmitSync>,
+) -> Result<TimelineValue> {
+    let result = autoreleasepool(|| submit_graph_inner(state, ctx, commands, retain_key, slots, sync));
     result
 }
 
@@ -1725,6 +1800,7 @@ fn submit_graph_inner(
     ctx: ContextHandle,
     commands: &[super::super::GraphCommand],
     retain_key: Option<u64>,
+    slots: Option<Arc<[MetalSlotKey]>>,
     sync: Option<&SubmitSync>,
 ) -> Result<TimelineValue> {
     let _tz = tracy_zone!("mtl.submit_graph");
@@ -1792,11 +1868,11 @@ fn submit_graph_inner(
     // Pre-pass: collect all compute commands across the entire graph into a flat
     // list, run the staging pre-pass once, then replay the graph using shared
     // belt/tex indices that advance across compute batches.
-    let all_compute_cmds: Vec<GpuCommand> = commands
+    let all_compute_cmds: Vec<&GpuCommand> = commands
         .iter()
         .filter_map(|c| {
             if let GraphCommand::Compute(gpu_cmd) = c {
-                Some(gpu_cmd.clone())
+                Some(gpu_cmd)
             } else {
                 None
             }
@@ -1814,7 +1890,7 @@ fn submit_graph_inner(
     let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
 
-        let mut compute_batch: Vec<GpuCommand> = Vec::new();
+        let mut compute_batch: Vec<&GpuCommand> = Vec::with_capacity(all_compute_cmds.len());
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
         let mut accel_uploads = Vec::new();
@@ -1822,7 +1898,7 @@ fn submit_graph_inner(
         for cmd in commands {
             match cmd {
                 GraphCommand::Compute(c) => {
-                    compute_batch.push(c.clone());
+                    compute_batch.push(c);
                 }
                 GraphCommand::Render {
                     target,
@@ -1849,7 +1925,12 @@ fn submit_graph_inner(
                     }
 
                     let (render_staging, lowered_render, has_render_bindings) =
-                        super::frame_table::prepare_render_commands(&state.buffers, &state.pipelines, render_cmds)?;
+                        super::frame_table::prepare_render_commands(
+                            state.validation,
+                            &state.buffers,
+                            &state.pipelines,
+                            render_cmds,
+                        )?;
                     if has_render_bindings {
                         if let Some(row) = prologue_row {
                             let graph_staging = super::frame_table::extract_staging_from_graph(commands)
@@ -1914,7 +1995,7 @@ fn submit_graph_inner(
     let timeline_event = sc_arc.lock().unwrap().timeline_event.clone();
 
     let signal_value = super::pending_submit::preallocate_device_timeline(&ld);
-    let used_slots = collect_metal_slots_from_graph_commands(state, commands);
+    let used_slots = slots.unwrap_or_else(|| graph_slot_set(state, commands));
     ld.descriptors
         .lock()
         .unwrap()
@@ -1964,7 +2045,6 @@ fn submit_graph_inner(
     }
 
     if let Some(key) = retain_key {
-        let used_slots = collect_metal_slots_from_graph_commands(state, commands);
         let graph = super::types::MetalRetainedGraph {
             commands: commands.into(),
             used_slots: used_slots.clone(),
@@ -1973,11 +2053,19 @@ fn submit_graph_inner(
             let replaced = sc_arc.lock().unwrap().retained_graphs.insert(key, graph);
             if let Some(old) = replaced {
                 if let Some(device) = state.devices.get(&device_handle) {
-                    device.descriptors.lock().unwrap().unpin_retained_slots(old.used_slots);
+                    device
+                        .descriptors
+                        .lock()
+                        .unwrap()
+                        .unpin_retained_slots(old.used_slots.iter().copied());
                 }
             }
             if let Some(device) = state.devices.get(&device_handle) {
-                device.descriptors.lock().unwrap().pin_retained_slots(used_slots);
+                device
+                    .descriptors
+                    .lock()
+                    .unwrap()
+                    .pin_retained_slots(used_slots.iter().copied());
             }
         }
     }
@@ -2012,19 +2100,19 @@ pub(super) fn try_resubmit_retained(
     key: u64,
     sync: Option<&SubmitSync>,
 ) -> Result<Option<TimelineValue>> {
-    let commands = {
+    let retained = {
         let sc_arc = state.contexts.get(&ctx).context("Invalid context handle")?;
         sc_arc
             .lock()
             .unwrap()
             .retained_graphs
             .get(&key)
-            .map(|g| g.commands.clone())
+            .map(|g| (g.commands.clone(), g.used_slots.clone()))
     };
-    let Some(commands) = commands else {
+    let Some((commands, slots)) = retained else {
         return Ok(None);
     };
-    let tv = submit_graph(state, ctx, &commands, None, sync)?;
+    let tv = submit_graph_with_slots(state, ctx, &commands, None, Some(slots), sync)?;
     Ok(Some(tv))
 }
 

@@ -53,9 +53,8 @@ pub mod virtual_main;
 pub mod yielding;
 
 pub use compiler::{
-    layout_validation_enabled, CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck,
-    OwnedLayoutCheck, ParameterBlockLayout, ResourceKind, ShaderReflection, ShaderTarget, SlangCompiler,
-    StructFieldLayout, StructLayout,
+    CompiledShader, CompiledShaderWithReflection, FieldLayout, LayoutCheck, OwnedLayoutCheck, ParameterBlockLayout,
+    ResourceKind, ShaderReflection, ShaderTarget, SlangCompiler, StructFieldLayout, StructLayout,
 };
 pub use ffi::SlangStage;
 pub use gpu_type::{GpuField, GpuFieldType, GpuType, PackedGpuField, PackedGpuLayout};

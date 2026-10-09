@@ -5,7 +5,6 @@ use goldy::{
     PrimitiveTopology, RenderPipeline, RenderPipelineDesc, RequestAdapterOptions, Runtime, Scheme, ShaderModule,
     TargetLoad, TextureFormat, Vertex2D, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use std::sync::Arc;
 
 use super::scheme_render::{acquire_readback_texture, scheme_render_and_readback};
 use crate::gol_state::{create_gol_initial_state, GOL_GRID_HEIGHT, GOL_GRID_WIDTH};

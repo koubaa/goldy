@@ -16,8 +16,9 @@ pub(crate) struct ComputePipelineGpu {
 impl Drop for ComputePipelineGpu {
     fn drop(&mut self) {
         tracing::trace!("Destroying compute pipeline");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_compute_pipeline(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_compute_pipeline(self.handle);
+        }
     }
 }
 
@@ -92,10 +93,25 @@ impl ComputePipeline {
             let _st = crate::shader_timing::scope("compute.slang_unlocked", label.unwrap_or(""));
             compile_compute_stage_unlocked(device, compute_shader)?
         };
+        let prepared = match seeded {
+            Some(_) => None,
+            None => {
+                let job = device
+                    .inner
+                    .backend
+                    .lock()
+                    .unwrap()
+                    .unlocked_compute_prepare(compute_shader.handle);
+                job.map(|job| job()).transpose()?
+            }
+        };
 
         let mut backend = device.inner.backend.lock().unwrap();
         if let Some((bytecode, reflection)) = seeded {
             backend.seed_compute_stage(compute_shader.handle, &bytecode, reflection)?;
+        }
+        if let Some(prepared) = prepared {
+            backend.seed_compute_pipeline(compute_shader.handle, prepared)?;
         }
 
         let handle = {

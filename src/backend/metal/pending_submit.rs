@@ -198,20 +198,28 @@ pub(super) fn enqueue_metal_commit(
     if let Some(ref sc_arc) = sc_arc {
         track_in_flight_cb(sc_arc, signal_value, &command_buffer);
     }
-    match ld.submission_worker.enqueue(
+    // A commit with no host-side wait or write cannot block, so with nothing queued
+    // ahead of it the caller commits it and the GPU starts without a thread handoff.
+    let inline = host_sidecar.host_observed.is_empty()
+        && host_sidecar.deferred_writes.is_empty()
+        && ld.submission_worker.is_idle();
+    let work = Box::new(MetalCommitPendingSubmit {
+        logical_device: std::sync::Arc::clone(ld),
+        command_buffer,
         signal_value,
-        Box::new(MetalCommitPendingSubmit {
-            logical_device: std::sync::Arc::clone(ld),
-            command_buffer,
-            signal_value,
-            timeline_event,
-            waiter,
-            host_sidecar,
-            log_kind,
-            api_log_commit,
-            compute_commit_instant,
-        }),
-    ) {
+        timeline_event,
+        waiter,
+        host_sidecar,
+        log_kind,
+        api_log_commit,
+        compute_commit_instant,
+    });
+    let submitted = if inline {
+        ld.submission_worker.execute_immediately(signal_value, work)
+    } else {
+        ld.submission_worker.enqueue(signal_value, work)
+    };
+    match submitted {
         Ok(()) => Ok(()),
         Err(e) => {
             if let Some(ref sc_arc) = sc_arc {

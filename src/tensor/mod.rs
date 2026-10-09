@@ -16,6 +16,7 @@ mod kernels;
 mod layout;
 mod matmul;
 mod ops;
+mod semantic;
 mod shape;
 mod view;
 

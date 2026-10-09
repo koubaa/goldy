@@ -12,8 +12,8 @@ mod imp {
     use crate::submission::submission_context;
     use goldy::{
         types::{BackendType, BufferFlags},
-        Buffer, BufferKind, ComputePipeline, Instance, MemoryExchange, NodeAccess, RequestAdapterOptions, Runtime,
-        RuntimeDescriptor, Scheme, ShaderModule,
+        Buffer, BufferKind, ComputePipeline, Instance, NodeAccess, RequestAdapterOptions, Runtime, RuntimeDescriptor,
+        Scheme, ShaderModule,
     };
     use std::sync::Arc;
 

@@ -59,6 +59,34 @@ pub enum BuiltinFn {
     Float4,
     Uint2,
     WorkgroupBarrier,
+    /// The calling thread's lane in its subgroup, as `uint`.
+    SubgroupLane,
+    /// `(value, lane)`: `value` as subgroup lane `lane` holds it. Convergent: every
+    /// lane of the subgroup must execute the call.
+    SubgroupRead,
+    /// `(a, b)`: the f32 product `a * b`, rounded on its own, so the device does not
+    /// contract it with the operation that reads it.
+    ExactMul,
+    /// `(a, b)`: the f32 quotient `a / b`, rounded on its own, so the device does not
+    /// rewrite it (a constant divisor into a multiply by its reciprocal, say).
+    ExactDiv,
+}
+
+/// Rows, columns and summed extent of every [`Stmt::Matrix`] tile.
+pub const MATRIX_TILE: u32 = 16;
+
+/// Subgroup-scope matrix-unit operations on [`MATRIX_TILE`]-square tiles.
+///
+/// Operand tiles are row-major `half` workgroup arrays and accumulators hold `float`.
+/// Every lane of the subgroup must execute each operation (convergent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatrixOp {
+    /// Declare the local accumulator `name`, zeroed.
+    Accumulator { name: String },
+    /// `acc += a · b`.
+    MulAdd { acc: String, a: String, b: String },
+    /// Store `acc` row-major into the `float` workgroup array `dest`.
+    Store { acc: String, dest: String },
 }
 
 /// Tree-reduce operator for [`Stmt::WorkgroupReduce`].
@@ -157,9 +185,16 @@ pub enum Stmt {
     },
     /// Tree-reduce `val` across `n` lanes; every lane receives the result in `dest`.
     ///
-    /// `n` must be a power of two. Emitted Slang includes a trailing barrier, so
-    /// `dest` is immediately readable. All workgroup threads must execute this
-    /// statement (convergent).
+    /// `n` must be a power of two and the workgroup `[n, 1, 1]`. Emitted Slang includes
+    /// a trailing barrier, so `dest` is immediately readable. All workgroup threads must
+    /// execute this statement (convergent).
+    ///
+    /// The association is the pairwise tree over adjacent local ids: `T(a, b) =
+    /// T(a, m) ⊕ T(m, b)` with `m` the midpoint and the lower half on the left, on every
+    /// target and for every lowering.
+    ///
+    /// [`SUBGROUP_WIDTH_DEFINE`](crate::SUBGROUP_WIDTH_DEFINE) selects the lowering
+    /// with subgroup reads when the width `w` satisfies `w ≤ n ≤ w²`.
     WorkgroupReduce {
         op: WorkgroupReduceOp,
         n: u32,
@@ -179,10 +214,14 @@ pub enum Stmt {
         count: Expr,
         scratch: String,
     },
+    Matrix(MatrixOp),
     Expr(Expr),
 }
 
-/// A lowered compute kernel body plus signature metadata used for emission.
+/// Structured definition of a virtual compute entry.
+///
+/// Retained beside the canonical source so the entry can be lowered on its own or
+/// composed with other definitions before physical entry-point generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderKernel {
     pub name: String,
@@ -191,4 +230,7 @@ pub struct ShaderKernel {
     pub builtins: crate::BuiltinMask,
     pub body: Vec<Stmt>,
     pub source_map: crate::SourceMap,
+    /// Slang declarations of `#[goldy::gpu]` types named by `params`, emitted ahead
+    /// of the import. Resolved at prepare time, so empty in proc-macro output.
+    pub type_decls: Vec<String>,
 }

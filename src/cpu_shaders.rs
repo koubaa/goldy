@@ -428,7 +428,8 @@ pub(crate) fn compile_shader(
     let launch = extract_cuda_compute_launch_layout(source, defines).map_err(|e| anyhow::anyhow!("{e}"))?;
     for kind in &launch {
         match kind {
-            CudaLaunchArgKind::Buffer | CudaLaunchArgKind::Scalar => {}
+            // Host-callable kernels read tensor offsets from the metadata parcel.
+            CudaLaunchArgKind::Buffer | CudaLaunchArgKind::Scalar | CudaLaunchArgKind::LaunchWord { .. } => {}
             CudaLaunchArgKind::SampledTexture { element } => {
                 anyhow::bail!("CPU backend is compute-only: Interpolated<{element}> is not supported")
             }
@@ -447,9 +448,10 @@ pub(crate) fn compile_shader(
     } else {
         launch
             .iter()
-            .map(|kind| match kind {
-                CudaLaunchArgKind::Buffer => CpuParamSlot::Buffer { stride: 4 },
-                CudaLaunchArgKind::Scalar => CpuParamSlot::Scalar,
+            .filter_map(|kind| match kind {
+                CudaLaunchArgKind::Buffer => Some(CpuParamSlot::Buffer { stride: 4 }),
+                CudaLaunchArgKind::Scalar => Some(CpuParamSlot::Scalar),
+                CudaLaunchArgKind::LaunchWord { .. } => None,
                 _ => unreachable!(),
             })
             .collect()

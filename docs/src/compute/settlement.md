@@ -59,7 +59,7 @@ let mut submission = scheme.submit()?;
 // Present
 (&mut submission >> &transaction).take()?;
 
-// Host claim — wait + mapped pointer or staged copy
+// Host claim — wait + mapped pointer or staged copy.
 let view = (&mut submission >> &parcel).take::<u32>()?;
 ```
 

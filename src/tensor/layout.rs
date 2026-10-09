@@ -187,13 +187,18 @@ impl TensorLayout {
             shape = [1; MAX_TENSOR_RANK];
             stride = [0; MAX_TENSOR_RANK];
         }
+        let flags = if self.is_contiguous() {
+            GoldyTensorLayout::FLAG_CONTIGUOUS
+        } else {
+            0
+        };
         Ok(GoldyTensorLayout {
             offset,
             rank: self.shape.rank() as u32,
             numel,
             shape,
             stride,
-            pad: 0,
+            flags,
         })
     }
 }
@@ -239,7 +244,13 @@ pub struct GoldyTensorLayout {
     pub numel: u32,
     pub shape: [u32; MAX_TENSOR_RANK],
     pub stride: [u32; MAX_TENSOR_RANK],
-    pub pad: u32,
+    pub flags: u32,
+}
+
+impl GoldyTensorLayout {
+    /// Packed row-major storage: logical index `i` is element `offset + i`, so shaders
+    /// skip delinearization.
+    pub const FLAG_CONTIGUOUS: u32 = 1;
 }
 
 impl crate::buffer::StructuredBufferElement for GoldyTensorLayout {}

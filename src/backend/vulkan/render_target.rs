@@ -431,6 +431,7 @@ pub(super) struct RenderToResources<'a> {
     pub(super) frame_table: &'a super::types::SharedContextFrameTable,
     pub(super) buffers: &'a super::types::SharedBufferTable,
     pub(super) pipelines: &'a super::types::SharedPipelineTable,
+    pub(super) validation: crate::Validation,
 }
 
 pub(super) fn render_to<F>(
@@ -447,8 +448,12 @@ where
 {
     let logical_device = resources.devices.get(&device_handle).context("Invalid device handle")?;
 
-    let (staging_data, lowered, has_bindings) =
-        super::frame_table::prepare_render_commands(resources.buffers, resources.pipelines, commands)?;
+    let (staging_data, lowered, has_bindings) = super::frame_table::prepare_render_commands(
+        resources.validation,
+        resources.buffers,
+        resources.pipelines,
+        commands,
+    )?;
 
     let cmd = render_targets
         .read()

@@ -81,11 +81,10 @@ fn render_reflection_data(
 /// `VK_LAYER_KHRONOS_validation` so the loader does not warn.
 const VULKAN_TARGET_API: u32 = vk::make_api_version(0, 1, 4, 0);
 
-/// Khronos instance validation when GPU API validation is requested (`GOLDY_VALIDATION=1`,
-/// `api`, `all`, … — see `validation_env`), or when the loader forces
-/// `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
-fn vulkan_instance_validation_enabled() -> bool {
-    if super::goldy_validation_enabled() {
+/// Khronos instance validation when `validation` requests GPU API checks, or when the loader
+/// forces `VK_LAYER_KHRONOS_validation` via `VK_INSTANCE_LAYERS`.
+fn vulkan_instance_validation_enabled(validation: crate::Validation) -> bool {
+    if validation.gpu_api {
         return true;
     }
     std::env::var("VK_INSTANCE_LAYERS")
@@ -174,8 +173,8 @@ impl Drop for VulkanBackend {
 }
 
 impl VulkanBackend {
-    /// Create a new Vulkan backend.
-    pub fn new() -> Result<Self> {
+    /// Create a new Vulkan backend that runs the checks in `validation`.
+    pub fn with_validation(validation: crate::Validation) -> Result<Self> {
         tracing::info!("Initializing Vulkan backend");
 
         // Load Vulkan library
@@ -192,7 +191,17 @@ impl VulkanBackend {
 
         // Create instance with surface extensions. Physical devices are filtered
         // to 1.4+; instance apiVersion is clamped if Khronos validation is older.
-        let enable_validation = vulkan_instance_validation_enabled();
+        let enable_validation = vulkan_instance_validation_enabled(validation);
+        if enable_validation && !validation.gpu_api {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "goldy::validation",
+                    "VK_INSTANCE_LAYERS enables VK_LAYER_KHRONOS_validation for every Vulkan \
+                     instance, including ones created without GPU API validation"
+                );
+            });
+        }
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"goldy")
             .application_version(vk::make_api_version(0, 0, 1, 0))
@@ -225,11 +234,7 @@ impl VulkanBackend {
             enabled_layers.push(layer);
         }
 
-        let validation_sink = enable_validation.then(|| {
-            Arc::new(debug_utils::ValidationSink::new(
-                crate::validation_env::validation_fatal_enabled(),
-            ))
-        });
+        let validation_sink = enable_validation.then(|| Arc::new(debug_utils::ValidationSink::new(validation.fatal)));
         let mut debug_ci = validation_sink
             .as_ref()
             .map(|sink| debug_utils::messenger_create_info(debug_utils::sink_user_data(sink)));
@@ -311,6 +316,7 @@ impl VulkanBackend {
                         ray_tracing_pipelines: rt_mesh.ray_tracing_pipelines,
                         mesh_shaders: rt_mesh.mesh_shaders,
                         amplification_shaders: rt_mesh.amplification_shaders,
+                        subgroup_width: device::query_subgroup_width(&instance, handle),
                     })
                 } else {
                     rejected.push(format!("{}: {}.{}", name.to_string_lossy(), major, minor));
@@ -336,6 +342,7 @@ impl VulkanBackend {
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
         let state = VulkanState {
+            validation,
             entry,
             instance,
             physical_devices,
@@ -367,7 +374,7 @@ impl VulkanBackend {
         Ok(Self { state })
     }
 
-    fn with_validation<T>(&self, result: Result<T>) -> Result<T> {
+    fn with_validation_errors<T>(&self, result: Result<T>) -> Result<T> {
         debug_utils::combine_validation(self.state.validation_sink.as_ref(), result)
     }
 
@@ -474,7 +481,7 @@ impl crate::backend::GpuBackendTimelineWait for VulkanBackend {
                 registry.drain_ready_slot_reclamations(&completed_values);
             }
         }
-        self.with_validation(Ok(()))
+        self.with_validation_errors(Ok(()))
     }
 }
 
@@ -504,6 +511,10 @@ impl GpuBackend for VulkanBackend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Vulkan
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.state.validation
     }
 
     fn compute_shader_target(&self) -> Option<crate::slang::ShaderTarget> {
@@ -559,7 +570,7 @@ impl GpuBackend for VulkanBackend {
             .context("Invalid device handle")?;
         ld.synchronized_device_wait_idle()
             .map_err(|e| anyhow::anyhow!("device_wait_idle: {:?}", e))?;
-        self.with_validation(Ok(()))
+        self.with_validation_errors(Ok(()))
     }
 
     fn create_context(&mut self, device: DeviceHandle) -> Result<ContextHandle> {
@@ -1011,6 +1022,7 @@ impl GpuBackend for VulkanBackend {
             frame_table: &frame_table,
             buffers: &self.state.buffers,
             pipelines: &self.state.pipelines,
+            validation: self.state.validation,
         };
         render_target::render_to(
             render_resources,
@@ -1458,7 +1470,7 @@ impl GpuBackend for VulkanBackend {
             }
         }
         context::wait_until_device_seq_at_least(&self.state, device, value);
-        self.with_validation(Ok(()))
+        self.with_validation_errors(Ok(()))
     }
 
     fn poll_signals(
@@ -1500,7 +1512,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GpuCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.with_validation(compute::submit(&self.state, ctx, commands, sync))
+        self.with_validation_errors(compute::submit(&self.state, ctx, commands, sync))
     }
 
     fn submit_graph(
@@ -1509,7 +1521,7 @@ impl GpuBackend for VulkanBackend {
         commands: &[GraphCommand],
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.with_validation(compute::submit_graph(&self.state, ctx, commands, sync))
+        self.with_validation_errors(compute::submit_graph(&self.state, ctx, commands, sync))
     }
 
     fn submit_graph_and_retain(
@@ -1519,7 +1531,7 @@ impl GpuBackend for VulkanBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<crate::timeline::TimelineValue> {
-        self.with_validation(compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync))
+        self.with_validation_errors(compute::submit_graph_and_retain(&self.state, ctx, commands, key, sync))
     }
 
     fn try_resubmit_retained(
@@ -1528,7 +1540,7 @@ impl GpuBackend for VulkanBackend {
         key: u64,
         sync: Option<&SubmitSync>,
     ) -> Result<Option<crate::timeline::TimelineValue>> {
-        self.with_validation(compute::try_resubmit_retained(&self.state, ctx, key, sync))
+        self.with_validation_errors(compute::try_resubmit_retained(&self.state, ctx, key, sync))
     }
 
     fn evict_retained(&mut self, ctx: ContextHandle, key: u64) {
@@ -1764,7 +1776,7 @@ mod validation_fatal_tests {
             return;
         }
 
-        let mut backend = match VulkanBackend::new() {
+        let mut backend = match VulkanBackend::with_validation(crate::Validation::from_env()) {
             Ok(backend) => backend,
             Err(e) => {
                 eprintln!("GOLDY_SKIP_VK_VALIDATION_FATAL: {e:#}");
@@ -1790,7 +1802,7 @@ mod validation_fatal_tests {
         }
         device::destroy(&mut backend.state, handle);
         let err = backend
-            .with_validation(Ok(()))
+            .with_validation_errors(Ok(()))
             .expect_err("zero-size VkBuffer should record a fatal validation ERROR");
         let msg = format!("{err:#}");
         println!("{msg}");

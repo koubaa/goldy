@@ -25,14 +25,20 @@ those epilogue values; native libraries honor other alpha/beta).
 
 | Backend | Default | Override |
 |---------|---------|----------|
-| CUDA | cuBLAS (`cublasSgemv` when `n = 1`, otherwise `cublasSgemm`) | `GOLDY_MATMUL=fallback` |
+| CUDA | Goldy `gemv_f32` for GEMV, cuBLAS `cublasSgemm` otherwise | `GOLDY_MATMUL=library` / `fallback` |
 | Metal | Metal Performance Shaders | `GOLDY_MATMUL=fallback` |
-| Vulkan, DX12, WebGPU, CPU | Goldy stdlib kernel | — |
+| Vulkan, DX12, WebGPU, CPU | Goldy stdlib kernels | — |
 
-There is no public `prepare()`. The stdlib pipeline is compiled on first submit
-when the backend has no native library (or when fallback is forced). Subsequent
-clean submits reuse the realized command list / CUDA graph.
+A GEMV here is `n = 1`, no transposes, `alpha = 1`, `beta = 0`. On CUDA, cuBLAS
+`sgemv` picks a split-K kernel plus a separate reduction for decode-sized matrices
+(a few hundred rows and columns). Goldy's `gemv_f32` reduces each row with one
+32-lane group in a single pass, which is faster there and matches cuBLAS on large
+bandwidth-bound shapes. `GOLDY_MATMUL=library` restores cuBLAS for every shape.
 
-Custom leading dimensions are honored by native libraries. The stdlib kernel
-requires packed row-major storage (`lda`/`ldb`/`ldc` derived from `m`/`n`/`k` and
-the transpose flags).
+There is no public `prepare()`. Each stdlib pipeline is compiled on first submit
+by the first node that needs it. Subsequent clean submits reuse the realized
+command list / CUDA graph.
+
+Custom leading dimensions are honored by native libraries and by `gemv_f32`. The
+general stdlib GEMM kernel requires packed row-major storage (`lda`/`ldb`/`ldc`
+derived from `m`/`n`/`k` and the transpose flags).

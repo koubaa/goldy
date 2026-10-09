@@ -1,8 +1,9 @@
-//! Runtime-side updater kernel for CUDA graph indirect dispatch.
+//! Runtime-side helper kernels for CUDA graphs.
 //!
 //! Compiles (via NVRTC) and loads a tiny kernel that reads a [`DispatchShape`]
 //! and updates a device-updatable CUDA graph kernel node via
-//! `cudaGraphKernelNodeSetGridDim` / `cudaGraphKernelNodeSetEnabled`.
+//! `cudaGraphKernelNodeSetGridDim` / `cudaGraphKernelNodeSetEnabled`, and a
+//! small host→device copy kernel for graph-captured uploads.
 
 use anyhow::{Context as _, Result};
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
@@ -87,11 +88,49 @@ pub(super) fn cuda_include_path() -> Result<PathBuf> {
     )
 }
 
-/// Compile and load the indirect-dispatch updater for `ctx`.
-pub(super) fn load_indirect_updater(ctx: &Arc<CudaContext>, compute_capability: (i32, i32)) -> Result<IndirectUpdater> {
-    let include = cuda_include_path()?;
+/// Source for graph-captured small uploads from device-mapped pinned host memory.
+///
+/// A kernel node keeps the upload on the compute engine. An HtoD memcpy node runs on
+/// a copy engine, and the handoff to the first kernel costs tens of microseconds.
+pub(super) const COPY_FROM_HOST_SRC: &str = r#"
+extern "C" __global__ void goldy_copy_from_host(
+    const unsigned char* src,
+    unsigned char* dst,
+    unsigned int len
+) {
+    unsigned int i = threadIdx.x;
+    if (((((unsigned long long)src) | ((unsigned long long)dst) | len) & 3ull) == 0) {
+        const unsigned int* s = (const unsigned int*)src;
+        unsigned int* d = (unsigned int*)dst;
+        for (unsigned int w = i; w < len / 4; w += blockDim.x) {
+            d[w] = s[w];
+        }
+    } else {
+        for (unsigned int b = i; b < len; b += blockDim.x) {
+            dst[b] = src[b];
+        }
+    }
+}
+"#;
+
+pub(super) const COPY_FROM_HOST_FN: &str = "goldy_copy_from_host";
+
+/// Largest graph-captured upload read by [`HostCopyKernel`]. Larger uploads keep the
+/// memcpy node, where copy-engine bandwidth beats reading host memory from a kernel.
+pub(super) const COPY_FROM_HOST_MAX_BYTES: usize = 4096;
+
+/// Threads per [`HostCopyKernel`] launch (one block).
+pub(super) const COPY_FROM_HOST_THREADS: u32 = 256;
+
+/// Loaded host-copy module + entry point, pinned for the device lifetime.
+pub(super) struct HostCopyKernel {
+    pub module: Arc<CudaModule>,
+    pub function: CudaFunction,
+}
+
+fn nvrtc_arch(compute_capability: (i32, i32)) -> &'static str {
     let (major, minor) = compute_capability;
-    let arch: &'static str = match (major, minor) {
+    match (major, minor) {
         (7, 5) => "sm_75",
         (8, 0) => "sm_80",
         (8, 6) => "sm_86",
@@ -103,7 +142,31 @@ pub(super) fn load_indirect_updater(ctx: &Arc<CudaContext>, compute_capability: 
             // Leak a formatted arch string once per unseen CC (device init is rare).
             Box::leak(format!("sm_{major}{minor}").into_boxed_str())
         }
-    };
+    }
+}
+
+/// Compile and load the graph-capture host-copy kernel for `ctx`.
+pub(super) fn load_host_copy(ctx: &Arc<CudaContext>, compute_capability: (i32, i32)) -> Result<HostCopyKernel> {
+    let arch = nvrtc_arch(compute_capability);
+    let ptx = compile_ptx_with_opts(
+        COPY_FROM_HOST_SRC,
+        CompileOptions {
+            arch: Some(arch),
+            ..Default::default()
+        },
+    )
+    .with_context(|| format!("CUDA: NVRTC failed compiling {COPY_FROM_HOST_FN} for {arch}"))?;
+    let module = ctx.load_module(ptx).context("CUDA: load host-copy PTX module failed")?;
+    let function = module
+        .load_function(COPY_FROM_HOST_FN)
+        .with_context(|| format!("CUDA: cuModuleGetFunction({COPY_FROM_HOST_FN}) failed"))?;
+    Ok(HostCopyKernel { module, function })
+}
+
+/// Compile and load the indirect-dispatch updater for `ctx`.
+pub(super) fn load_indirect_updater(ctx: &Arc<CudaContext>, compute_capability: (i32, i32)) -> Result<IndirectUpdater> {
+    let include = cuda_include_path()?;
+    let arch = nvrtc_arch(compute_capability);
     let ptx = compile_ptx_with_opts(
         APPLY_DISPATCH_SHAPE_SRC,
         CompileOptions {

@@ -43,7 +43,7 @@
 
 use crate::backend::{GpuBackend, ShaderHandle};
 use crate::runtime::Runtime;
-use crate::slang::{layout_validation_enabled, GpuType, LayoutCheck, OwnedLayoutCheck};
+use crate::slang::{GpuType, LayoutCheck, OwnedLayoutCheck};
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -69,6 +69,18 @@ pub(crate) struct ShaderProvenance {
     /// Present when the author's source is a yielding script; `source` is then the
     /// lowered *prologue* translation unit.
     pub(crate) yielding: Option<Arc<YieldScript>>,
+    /// Content identity shared by every module compiled from the same kernel program.
+    kernel: Option<Arc<KernelIdentity>>,
+}
+
+/// Stable identity of a kernel program, beyond the module that compiled it.
+///
+/// Modules carrying one id bind alike, so their specialized variants are interchangeable.
+#[derive(Debug)]
+pub(crate) struct KernelIdentity {
+    pub(crate) id: goldy_shader_ir::KernelId,
+    /// Logical name of each scalar wire slot, for diagnostics.
+    pub(crate) scalars: Vec<String>,
 }
 
 /// The yielding-script structure of a [`ShaderModule`] whose source used
@@ -102,7 +114,12 @@ impl ShaderProvenance {
             layout_checks,
             compute_entry: OnceLock::new(),
             yielding,
+            kernel: None,
         }
+    }
+
+    pub(crate) fn kernel(&self) -> Option<&Arc<KernelIdentity>> {
+        self.kernel.as_ref()
     }
 
     /// Yielding-script structure, when this module's source is a yielding script.
@@ -139,6 +156,21 @@ impl ShaderProvenance {
         }
         merged
     }
+}
+
+/// `defines` plus the facts of `device` that generated kernels test at compile time,
+/// unless the caller already set them.
+fn with_device_defines(device: &Runtime, defines: Arc<[(String, String)]>) -> Arc<[(String, String)]> {
+    let width_define = goldy_shader_ir::SUBGROUP_WIDTH_DEFINE;
+    let Some(width) = device.capabilities().subgroup_width else {
+        return defines;
+    };
+    if defines.iter().any(|(k, _)| k == width_define) {
+        return defines;
+    }
+    let mut merged = defines.to_vec();
+    merged.push((width_define.to_string(), width.to_string()));
+    merged.into()
 }
 
 /// A compiled shader module.
@@ -225,9 +257,9 @@ impl ShaderModule {
     /// Create a shader module with full control over compilation options.
     ///
     /// `layout_checks` declares Rust struct layouts to validate against Slang reflection.
-    /// Validation only runs when layout validation is enabled (`GOLDY_VALIDATE_LAYOUTS`,
-    /// `GOLDY_VALIDATION=layout`, etc. — see `validation_env`); otherwise the checks
-    /// are ignored (zero cost). Pass `&[]` when no validation is needed.
+    /// Validation only runs when the runtime's [`crate::Validation`] enables layout checks
+    /// (by default `GOLDY_VALIDATE_LAYOUTS` or `GOLDY_VALIDATION=layout`); otherwise the
+    /// checks are ignored (zero cost). Pass `&[]` when no validation is needed.
     ///
     /// Use `OptimizationLevel::None` to disable compiler optimizations for
     /// shaders that hit driver bugs on software renderers (e.g. lavapipe).
@@ -322,7 +354,7 @@ impl ShaderModule {
             effective_source.as_str()
         };
 
-        let validate_authored = layout_validation_enabled() && !layout_checks.is_empty();
+        let validate_authored = device.validation().layout && !layout_checks.is_empty();
         let validate = validate_authored || !generated_checks.is_empty();
 
         tracing::debug!(
@@ -450,6 +482,7 @@ impl ShaderModule {
         layout_checks: Arc<[OwnedLayoutCheck]>,
         yielding: Option<Arc<YieldScript>>,
     ) -> Result<Self> {
+        let defines = with_device_defines(device, defines);
         let path_refs: Vec<&str> = search_paths.iter().map(|s| s.as_str()).collect();
         let define_refs: Vec<(&str, &str)> = defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
@@ -497,6 +530,14 @@ impl ShaderModule {
         &self.provenance
     }
 
+    /// Declare the kernel program this module compiles, before any pipeline is built from it.
+    pub(crate) fn with_kernel_identity(mut self, identity: KernelIdentity) -> Self {
+        Arc::get_mut(&mut self.provenance)
+            .expect("a module's provenance is shared only once pipelines are built")
+            .kernel = Some(Arc::new(identity));
+        self
+    }
+
     pub(crate) fn source(&self) -> &str {
         &self.provenance.source
     }
@@ -539,8 +580,9 @@ impl ShaderModule {
 impl Drop for ShaderModule {
     fn drop(&mut self) {
         tracing::trace!("Destroying shader module");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_shader(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_shader(self.handle);
+        }
     }
 }
 
@@ -635,6 +677,35 @@ mod tests {
         );
         assert_eq!(variant.source(), base.source());
         assert_eq!(variant.search_paths(), base.search_paths());
+    }
+
+    #[test]
+    fn modules_carry_the_device_subgroup_width() {
+        let width = |defines: &[(String, String)]| {
+            defines
+                .iter()
+                .filter(|(k, _)| k == goldy_shader_ir::SUBGROUP_WIDTH_DEFINE)
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>()
+        };
+        let base = ShaderModule::from_slang(&mock_runtime(), "void main() {}").expect("shader");
+        assert!(width(base.defines()).is_empty());
+
+        let mut backend = MockBackend::new();
+        backend.subgroup_width = Some(32);
+        let device = Runtime::from_backend(Box::new(backend)).expect("mock device");
+        let base = ShaderModule::from_slang(&device, "void main() {}").expect("shader");
+        assert_eq!(width(base.defines()), ["32"]);
+        let variant = base.variant(&[("A", "1")]).expect("variant");
+        assert_eq!(width(variant.defines()), ["32"]);
+        let pinned = ShaderModule::from_slang_with_paths_and_defines(
+            &device,
+            "void main() {}",
+            &[],
+            &[("GOLDY_SUBGROUP_WIDTH", "16")],
+        )
+        .expect("shader");
+        assert_eq!(width(pinned.defines()), ["16"]);
     }
 
     #[test]

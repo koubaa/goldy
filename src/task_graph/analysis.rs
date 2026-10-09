@@ -33,6 +33,7 @@ use super::{ResourceId, SlotResolver};
 use crate::backend::shared::DISPATCH_BATCH_STRIDE;
 use crate::backend::{GpuCommand, GraphCommand, TextureHandle};
 use crate::frame_table::FrameTableStaging;
+use crate::runtime::ComputePartitionSplit;
 #[cfg(test)]
 use anyhow::Result;
 
@@ -41,13 +42,14 @@ fn push_compute_resource_bind(
     staging: &mut FrameTableStaging,
     slots: &[u32],
     user_slots: &[u32],
+    launch_words: &[u32],
 ) {
-    if !slots.is_empty() || !user_slots.is_empty() {
+    if !slots.is_empty() || !user_slots.is_empty() || !launch_words.is_empty() {
         let frame_table_base = staging.alloc_dispatch(slots.len() as u32);
         staging.write_dispatch_indices(frame_table_base, slots);
         commands.push(GpuCommand::BindResourcesRaw {
             indices: slots.to_vec(),
-            user: user_slots.to_vec(),
+            user: crate::backend::shared::pack_bind_words(user_slots, launch_words),
             frame_table_base,
         });
     }
@@ -84,16 +86,17 @@ fn emit_matmul_node(
         Some(r) => r.resolve_slots(&matmul.resource_slots, &node.bindings),
         None => matmul.resource_slots.clone(),
     };
-    let user = match crate::ops::matmul::fallback_user_slots(&matmul.desc, &matmul.a, &matmul.b, &matmul.c) {
-        Ok(words) => words.to_vec(),
-        Err(e) => {
-            tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
-            return;
-        }
-    };
-    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc);
+    let user =
+        match crate::ops::matmul::fallback_user_slots(&matmul.desc, matmul.fallback, &matmul.a, &matmul.b, &matmul.c) {
+            Ok(words) => words,
+            Err(e) => {
+                tracing::error!(target: "goldy::matmul", error = %e, "matmul fallback user slots");
+                return;
+            }
+        };
+    let (x, y, z) = crate::ops::matmul::fallback_workgroups(&matmul.desc, matmul.fallback);
     commands.push(GpuCommand::SetPipeline(pipeline));
-    push_compute_resource_bind(commands, staging, &slots, &user);
+    push_compute_resource_bind(commands, staging, &slots, &user, &[]);
     commands.push(GpuCommand::Dispatch {
         label: Some(node.label.clone()),
         workgroups_x: x,
@@ -600,6 +603,14 @@ pub(crate) fn waves_have_cpu_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
     })
 }
 
+pub(crate) fn waves_have_dispatch(ir: &GraphIR, waves: &[Wave]) -> bool {
+    waves.iter().any(|w| {
+        w.node_indices
+            .iter()
+            .any(|&ni| matches!(ir.nodes[ni].kind, NodeKind::Dispatch { .. }))
+    })
+}
+
 /// Map a node's kind to the Koubaa pipeline category it belongs to.
 fn node_usage_kind(node: &super::ir::TaskNode) -> UsageKindFlags {
     match &node.kind {
@@ -972,6 +983,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                 pipeline: crate::backend::ComputePipelineHandle,
                 resource_slots: SlotData<'n>,
                 user_slots: &'n Vec<u32>,
+                launch_words: &'n Vec<u32>,
                 x: u32,
                 y: u32,
                 z: u32,
@@ -985,6 +997,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     pipeline,
                     resource_slots,
                     user_slots,
+                    launch_words,
                     dispatch: super::ir::DispatchDim::Direct { x, y, z },
                 } = &node.kind
                 {
@@ -997,6 +1010,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         pipeline: *pipeline,
                         resource_slots: slots,
                         user_slots,
+                        launch_words,
                         x: *x,
                         y: *y,
                         z: *z,
@@ -1018,6 +1032,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         pipeline,
                         resource_slots,
                         user_slots,
+                        launch_words,
                         dispatch: super::ir::DispatchDim::Indirect { buffer, offset },
                     } = &node.kind
                     {
@@ -1026,7 +1041,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                             None => resource_slots.clone(),
                         };
                         commands.push(GpuCommand::SetPipeline(*pipeline));
-                        push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                        push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots, launch_words);
                         commands.push(GpuCommand::DispatchIndirect {
                             label: Some(node.label.clone()),
                             buffer: *buffer,
@@ -1050,7 +1065,8 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                         let frame_table_base = frame_table.alloc_dispatch(slots.len() as u32);
                         frame_table.write_dispatch_indices(frame_table_base, slots);
                         let mut layout = crate::backend::shared::PushLayout::default();
-                        crate::backend::shared::fill_frame_table_dispatch(&mut layout, frame_table_base, d.user_slots);
+                        let words = crate::backend::shared::pack_bind_words(d.user_slots, d.launch_words);
+                        crate::backend::shared::fill_frame_table_dispatch(&mut layout, frame_table_base, &words);
                         arg_data.extend_from_slice(bytemuck::bytes_of(&layout));
                         arg_data.extend_from_slice(&d.x.to_ne_bytes());
                         arg_data.extend_from_slice(&d.y.to_ne_bytes());
@@ -1066,7 +1082,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     let d = &run[0];
                     commands.push(GpuCommand::SetPipeline(cur_pipeline));
                     let slots = d.resource_slots.as_slice();
-                    push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots);
+                    push_compute_resource_bind(&mut commands, &mut frame_table, slots, d.user_slots, d.launch_words);
                     commands.push(GpuCommand::Dispatch {
                         label: Some(d.label.clone()),
                         workgroups_x: d.x,
@@ -1095,7 +1111,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
                     None => resource_slots.clone(),
                 };
                 commands.push(GpuCommand::SetRayTracingPipeline(*pipeline));
-                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots);
+                push_compute_resource_bind(&mut commands, &mut frame_table, &slots, user_slots, &[]);
                 commands.push(GpuCommand::TraceRays {
                     label: Some(node.label.clone()),
                     width: *width,
@@ -1151,7 +1167,7 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 /// Partition the compiled schedule into multiple command streams for pipelined
 /// backend submission.
 ///
-/// When `split_on_barrier_cost` is true, the partitioning heuristic selects the
+/// With [`ComputePartitionSplit::BarrierCost`], the partitioning heuristic selects the
 /// single wave boundary (wave index > 0) that has the largest `barriers_before`
 /// cost (sum of buffers and textures that need synchronisation), which
 /// corresponds to the heaviest cross-phase data dependency — typically the
@@ -1160,9 +1176,9 @@ pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option
 /// Returns a `Vec` of one or two partitions:
 ///
 /// - **Single partition**: returned when the schedule has fewer than 3 waves,
-///   every wave boundary has zero barrier cost, or `split_on_barrier_cost` is
-///   false (Metal). The result is equivalent to calling [`emit_commands`] and
-///   wrapping it.
+///   every wave boundary has zero barrier cost, or `split` is
+///   [`ComputePartitionSplit::None`]. The result is equivalent to calling
+///   [`emit_commands`] and wrapping it.
 ///
 /// - **Two partitions**: `[early_cmds, late_cmds]`.  Waves `0..split` go into
 ///   `early_cmds` and waves `split..` go into `late_cmds`.  The leading
@@ -1177,9 +1193,9 @@ pub fn emit_partitioned_commands(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
     resolver: Option<&SlotResolver>,
-    split_on_barrier_cost: bool,
+    split: ComputePartitionSplit,
 ) -> Vec<Vec<GpuCommand>> {
-    partition_wave_ranges(ir, schedule, split_on_barrier_cost)
+    partition_wave_ranges(ir, schedule, split)
         .into_iter()
         .map(|range| {
             let waves = &schedule.waves[range];
@@ -1473,17 +1489,66 @@ fn split_wave_range_at_retainability(
     out
 }
 
-/// Push `wave_range` into `ranges`, optionally splitting at the heaviest barrier boundary
-/// when the slice is a large pure-compute partition.
+/// Push `wave_range` into `ranges`, splitting a large pure-compute slice per `split`.
+fn push_split_partition(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+    split: ComputePartitionSplit,
+) {
+    match split {
+        ComputePartitionSplit::None => ranges.push(wave_range),
+        ComputePartitionSplit::BarrierCost => push_partition_with_barrier_heuristic(ranges, schedule, wave_range),
+        ComputePartitionSplit::EncodeOverlap { head, growth } => {
+            push_encode_overlap_chunks(ranges, schedule, wave_range, head as usize, growth as usize)
+        }
+    }
+}
+
+/// Chunk `wave_range` at wave boundaries for [`ComputePartitionSplit::EncodeOverlap`].
+fn push_encode_overlap_chunks(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    schedule: &CompiledSchedule,
+    wave_range: std::ops::Range<usize>,
+    head: usize,
+    growth: usize,
+) {
+    let head = head.max(1);
+    let mut remaining: usize = schedule.waves[wave_range.clone()]
+        .iter()
+        .map(|w| w.node_indices.len())
+        .sum();
+    if remaining < 2 * head {
+        ranges.push(wave_range);
+        return;
+    }
+    let mut start = wave_range.start;
+    let mut budget = head;
+    let mut taken = 0usize;
+    for i in wave_range.clone() {
+        let n = schedule.waves[i].node_indices.len();
+        taken += n;
+        remaining -= n;
+        if taken >= budget && remaining >= head {
+            ranges.push(start..i + 1);
+            start = i + 1;
+            taken = 0;
+            budget = budget.saturating_mul(growth.max(1));
+        }
+    }
+    ranges.push(start..wave_range.end);
+}
+
+/// Push `wave_range` into `ranges`, splitting once at the heaviest barrier boundary
+/// when the slice has at least 3 waves.
 fn push_partition_with_barrier_heuristic(
     ranges: &mut Vec<std::ops::Range<usize>>,
     schedule: &CompiledSchedule,
     wave_range: std::ops::Range<usize>,
-    enable: bool,
 ) {
     let waves = &schedule.waves[wave_range.clone()];
     let len = waves.len();
-    if enable && len >= 3 {
+    if len >= 3 {
         let (split_offset, max_cost) = waves
             .iter()
             .enumerate()
@@ -1507,19 +1572,19 @@ fn push_partition_with_barrier_heuristic(
 /// Actualized partitions refine the logical partition layout produced by
 /// [`describe_logical_partitions`] with:
 /// - retainability splits (buffer-only upload waves vs texture upload waves), and
-/// - an optional barrier-cost heuristic (`split_on_barrier_cost`): large pure-compute
-///   logical partitions (≥ 3 waves, nonzero barrier cost) are subdivided at their
-///   heaviest wave boundary to expose GPU-pipeline overlap between submissions.
-///   Disabled on Metal (see [`crate::runtime::RuntimeCapabilities::split_compute_partitions_on_barrier_cost`]).
+/// - the [`ComputePartitionSplit`] policy (see
+///   [`crate::runtime::RuntimeCapabilities::compute_partition_split`]).
+///   [`ComputePartitionSplit::BarrierCost`] also applies to the remaining logical
+///   partitions; [`ComputePartitionSplit::EncodeOverlap`] only chunks pure-compute ones.
 ///
 /// The present-boundary and render-kind splits from the logical layer are always
-/// respected; the heuristics are applied only *within* pure-compute non-present partitions.
+/// respected.
 ///
 /// This function always returns at least one range covering all waves.
 pub(crate) fn partition_wave_ranges(
     ir: &GraphIR,
     schedule: &CompiledSchedule,
-    split_on_barrier_cost: bool,
+    split: ComputePartitionSplit,
 ) -> Vec<std::ops::Range<usize>> {
     let logical = describe_logical_partitions(ir, schedule);
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(logical.len());
@@ -1527,10 +1592,12 @@ pub(crate) fn partition_wave_ranges(
     for lp in &logical {
         if lp.is_pure_compute() && lp.wave_range.len() >= 2 {
             for sub in split_wave_range_at_retainability(ir, schedule, lp.wave_range.clone()) {
-                push_partition_with_barrier_heuristic(&mut ranges, schedule, sub, split_on_barrier_cost);
+                push_split_partition(&mut ranges, schedule, sub, split);
             }
+        } else if split == ComputePartitionSplit::BarrierCost {
+            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone());
         } else {
-            push_partition_with_barrier_heuristic(&mut ranges, schedule, lp.wave_range.clone(), split_on_barrier_cost);
+            ranges.push(lp.wave_range.clone());
         }
     }
 
@@ -1817,6 +1884,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     pipeline,
                     resource_slots,
                     user_slots,
+                    launch_words,
                     dispatch,
                 } => {
                     let slots = match resolver {
@@ -1825,7 +1893,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetPipeline(*pipeline)));
                     let mut bind_cmds = Vec::new();
-                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots, launch_words);
                     for cmd in bind_cmds {
                         commands.push(GraphCommand::Compute(cmd));
                     }
@@ -1861,7 +1929,7 @@ pub(crate) fn emit_graph_commands_for_waves(
                     };
                     commands.push(GraphCommand::Compute(GpuCommand::SetRayTracingPipeline(*pipeline)));
                     let mut bind_cmds = Vec::new();
-                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots);
+                    push_compute_resource_bind(&mut bind_cmds, &mut frame_table, &slots, user_slots, &[]);
                     for cmd in bind_cmds {
                         commands.push(GraphCommand::Compute(cmd));
                     }
@@ -1936,6 +2004,7 @@ mod tests {
                 pipeline,
                 resource_slots: Vec::new(),
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }
@@ -1961,6 +2030,7 @@ mod tests {
                 pipeline,
                 resource_slots: vec![pipeline as u32 + 100], // non-empty → alloc_dispatch called
                 user_slots: Vec::new(),
+                launch_words: Vec::new(),
                 dispatch: DispatchDim::Direct { x: wg, y: 1, z: 1 },
             },
         }
@@ -2103,7 +2173,7 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let ranges = partition_wave_ranges(&ir, &schedule, true);
+        let ranges = partition_wave_ranges(&ir, &schedule, ComputePartitionSplit::BarrierCost);
         assert_eq!(
             ranges.len(),
             2,
@@ -2332,6 +2402,7 @@ mod tests {
                     pipeline: 1,
                     resource_slots: vec![42u32], // non-empty → alloc_dispatch is called
                     user_slots: Vec::new(),
+                    launch_words: Vec::new(),
                     dispatch: DispatchDim::Direct { x: 4, y: 1, z: 1 },
                 },
             }],
@@ -2635,6 +2706,7 @@ mod tests {
                     pipeline: 10,
                     resource_slots: vec![42, 7],
                     user_slots: Vec::new(),
+                    launch_words: Vec::new(),
                     dispatch: DispatchDim::Direct { x: 1, y: 1, z: 1 },
                 },
             }],
@@ -3573,7 +3645,7 @@ mod tests {
     fn partitions(ir: &GraphIR) -> Vec<Vec<GpuCommand>> {
         let edges = build_edges(ir);
         let schedule = schedule_waves(ir, &edges);
-        emit_partitioned_commands(ir, &schedule, None, true)
+        emit_partitioned_commands(ir, &schedule, None, ComputePartitionSplit::BarrierCost)
     }
 
     /// Helper: run the full analysis pipeline and return flat commands.
@@ -3670,13 +3742,69 @@ mod tests {
         };
         let edges = build_edges(&ir);
         let schedule = schedule_waves(&ir, &edges);
-        let parts = emit_partitioned_commands(&ir, &schedule, None, false);
-        assert_eq!(
-            parts.len(),
-            1,
-            "Metal-style disabled barrier split must keep one compute partition"
-        );
+        let parts = emit_partitioned_commands(&ir, &schedule, None, ComputePartitionSplit::None);
+        assert_eq!(parts.len(), 1, "a disabled split must keep one compute partition");
         assert_eq!(parts[0], flat_commands(&ir));
+    }
+
+    /// `n` dispatches where each reads its predecessor's output: one node per wave.
+    fn linear_chain(n: u64) -> GraphIR {
+        GraphIR {
+            nodes: (0..n)
+                .map(|i| {
+                    let mut bindings = vec![(buf(i + 1), NodeAccess::Write)];
+                    if i > 0 {
+                        bindings.push((buf(i), NodeAccess::Read));
+                    }
+                    node_bound("N", i + 1, bindings, 1)
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn encode_overlap_ranges(ir: &GraphIR, head: u32, growth: u32) -> Vec<std::ops::Range<usize>> {
+        let schedule = schedule_waves(ir, &build_edges(ir));
+        partition_wave_ranges(ir, &schedule, ComputePartitionSplit::EncodeOverlap { head, growth })
+    }
+
+    #[test]
+    fn encode_overlap_chunks_grow_geometrically() {
+        assert_eq!(
+            encode_overlap_ranges(&linear_chain(20), 2, 2),
+            vec![0..2, 2..6, 6..14, 14..20]
+        );
+    }
+
+    #[test]
+    fn encode_overlap_folds_a_short_remainder_into_the_last_chunk() {
+        assert_eq!(encode_overlap_ranges(&linear_chain(7), 2, 2), vec![0..2, 2..7]);
+    }
+
+    #[test]
+    fn encode_overlap_keeps_a_small_partition_whole() {
+        assert_eq!(encode_overlap_ranges(&linear_chain(3), 2, 2), vec![0..3]);
+    }
+
+    #[test]
+    fn encode_overlap_chunks_flatten_to_the_unsplit_stream() {
+        let ir = linear_chain(20);
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let split = ComputePartitionSplit::EncodeOverlap { head: 2, growth: 2 };
+        let parts = emit_partitioned_commands(&ir, &schedule, None, split);
+        assert_eq!(parts.len(), 4);
+        fn strip_frame_table(cmds: &[GpuCommand]) -> Vec<&GpuCommand> {
+            cmds.iter()
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        GpuCommand::FrameTableStaging { .. } | GpuCommand::BindResourcesRaw { .. }
+                    )
+                })
+                .collect()
+        }
+        let flat: Vec<GpuCommand> = parts.into_iter().flatten().collect();
+        assert_eq!(strip_frame_table(&flat), strip_frame_table(&flat_commands(&ir)));
     }
 
     #[test]

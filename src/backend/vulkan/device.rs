@@ -129,7 +129,26 @@ pub(super) fn adapter_capabilities(
     caps.ray_tracing_pipelines = dev.ray_tracing_pipelines;
     caps.mesh_shaders = dev.mesh_shaders;
     caps.amplification_shaders = dev.amplification_shaders;
+    caps.subgroup_width = dev.subgroup_width;
     caps
+}
+
+/// The subgroup size of compute shaders, when it cannot vary (the minimum and maximum
+/// subgroup sizes agree) and compute subgroups can shuffle.
+pub(super) fn query_subgroup_width(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Option<u32> {
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    let mut size_control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
+    let mut props2 = vk::PhysicalDeviceProperties2::default()
+        .push_next(&mut subgroup)
+        .push_next(&mut size_control);
+    unsafe { instance.get_physical_device_properties2(handle, &mut props2) };
+    let shuffles = subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+        && subgroup
+            .supported_operations
+            .contains(vk::SubgroupFeatureFlags::BASIC | vk::SubgroupFeatureFlags::SHUFFLE);
+    let fixed = size_control.min_subgroup_size == size_control.max_subgroup_size
+        && size_control.max_subgroup_size == subgroup.subgroup_size;
+    (shuffles && fixed && subgroup.subgroup_size > 0).then_some(subgroup.subgroup_size)
 }
 
 /// Create a logical device from a physical device adapter ID.

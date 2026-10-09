@@ -166,8 +166,9 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         tracing::debug!(width = self.width, height = self.height, "Destroying surface");
-        let mut backend = self.backend.lock().unwrap();
-        backend.destroy_surface(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            backend.destroy_surface(self.handle);
+        }
     }
 }
 

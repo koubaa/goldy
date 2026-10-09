@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Bump when the wire layout or parameter classification changes.
-pub const KERNEL_ABI_VERSION: u32 = 3;
+pub const KERNEL_ABI_VERSION: u32 = 4;
 
 /// Hidden structured-buffer parameter that packs every tensor layout for one dispatch.
 pub const TENSOR_META_PARAM: &str = "_goldy_tensor_meta";
@@ -18,6 +18,52 @@ pub const TENSOR_LAYOUT_SLANG: &str = "GoldyTensorLayout";
 
 /// Host/device stride of [`TENSOR_LAYOUT_SLANG`] (`12` `uint`s, 16-byte aligned).
 pub const TENSOR_LAYOUT_STRIDE_BYTES: u32 = 48;
+
+/// Tensor slots whose element offset also rides in a launch word.
+///
+/// Native backends carry these words in `PushLayout` region C after the three frame-table
+/// words, and CUDA as trailing kernel arguments. A slot at or past this count reads its
+/// offset from [`TENSOR_META_PARAM`] in every program.
+pub const TENSOR_LAUNCH_WORDS: usize = 13;
+
+/// Layout fields a site can bake, in [`TENSOR_LAYOUT_SLANG`] word order after `off`.
+///
+/// They are fixed for a dispatch node's lifetime, unlike the element offset, which
+/// differs between sites that bind views of one shape.
+pub const TENSOR_FACTS: [&str; 11] = ["rank", "numel", "d0", "d1", "d2", "d3", "s0", "s1", "s2", "s3", "flags"];
+
+/// Upper-case stem of every specialization macro scoped to the `[goldy_compute]` function `entry`.
+pub fn specialization_macro_stem(entry: &str) -> String {
+    entry
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Macro that supplies tensor slot `slot`'s element offset.
+///
+/// It defaults to the metadata parcel. A virtual-main wrapper that carries launch words
+/// defines it first, for slots below [`TENSOR_LAUNCH_WORDS`].
+pub fn tensor_offset_macro(slot: u32) -> String {
+    format!("_GOLDY_TENSOR_OFF{slot}")
+}
+
+/// Macro that supplies layout field [`TENSOR_FACTS`]`[fact]` of tensor slot `slot` in `entry`.
+///
+/// It defaults to the metadata parcel. Defining it to a wire-word literal bakes the field.
+pub fn tensor_fact_macro(entry: &str, slot: u32, fact: usize) -> String {
+    format!(
+        "_GOLDY_SPEC_{}_T{slot}_{}",
+        specialization_macro_stem(entry),
+        TENSOR_FACTS[fact].to_ascii_uppercase()
+    )
+}
 
 /// Bitflags for hidden builtins injected into the generated Slang signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -185,7 +231,8 @@ impl fmt::Display for TensorDimSpec {
 
 /// Rank-fixing tensor shape contract (`[vocab, dim]`, `[4, _]`, …).
 ///
-/// Host-only: shader parameter order and the 48-byte GPU layout are unchanged.
+/// Shader parameter order and the 48-byte GPU layout are unchanged. The emitter uses
+/// the fixed rank to pick a rank-specialized indexing helper.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TensorShapeSpec {
     pub dims: Vec<TensorDimSpec>,
@@ -426,8 +473,56 @@ pub struct KernelSource {
     pub canonical_slang: String,
 }
 
+/// Stable content identity of a kernel program.
+///
+/// Equal ids name programs with the same canonical source and ABI, so they bind alike
+/// and compile to interchangeable specialized variants. The hash does not depend on the
+/// process, the device or the Rust toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KernelId(pub u64);
+
+impl fmt::Display for KernelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// FNV-1a over length-prefixed fields.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StableHasher(u64);
+
+impl StableHasher {
+    pub(crate) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.raw(&(bytes.len() as u64).to_le_bytes());
+        self.raw(bytes)
+    }
+
+    pub(crate) fn u32(&mut self, value: u32) -> &mut Self {
+        self.raw(&value.to_le_bytes())
+    }
+
+    pub(crate) fn u64(&mut self, value: u64) -> &mut Self {
+        self.raw(&value.to_le_bytes())
+    }
+
+    fn raw(&mut self, bytes: &[u8]) -> &mut Self {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self
+    }
+
+    pub(crate) fn finish(&self) -> KernelId {
+        KernelId(self.0)
+    }
+}
+
 /// Full prepare-time kernel descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KernelDef {
     pub source: KernelSource,
     pub entry: String,
@@ -436,6 +531,9 @@ pub struct KernelDef {
     pub builtins: BuiltinMask,
     pub source_map: SourceMap,
     pub abi_version: u32,
+    /// Structured definition `source` was lowered from. `None` for hand-authored
+    /// Slang, which stays opaque to composition.
+    pub definition: Option<crate::ShaderKernel>,
 }
 
 impl KernelDef {
@@ -457,7 +555,16 @@ impl KernelDef {
             builtins,
             source_map,
             abi_version: KERNEL_ABI_VERSION,
+            definition: None,
         }
+    }
+
+    /// Content identity of this kernel's program: its ABI version and canonical source.
+    pub fn id(&self) -> KernelId {
+        StableHasher::new()
+            .u32(self.abi_version)
+            .bytes(self.source.canonical_slang.as_bytes())
+            .finish()
     }
 
     pub fn resource_params(&self) -> impl Iterator<Item = &KernelParam> {

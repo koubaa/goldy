@@ -4,7 +4,7 @@ use crate::compute::ComputePipeline;
 use crate::kernel::{DispatchBuilder, KernelDef};
 use crate::runtime::Runtime;
 use crate::scheme::{Scheme, SchemeBindable};
-use crate::shader::ShaderModule;
+use crate::shader::{KernelIdentity, ShaderModule};
 use crate::task_graph::NodeAccess;
 use anyhow::{Context, Result};
 #[cfg(feature = "tensor")]
@@ -31,7 +31,7 @@ impl TensorShapeEnv {
 /// Runtime-scoped prepared kernel: compiled pipeline + ABI metadata.
 pub struct PreparedKernel {
     pipeline: Arc<ComputePipeline>,
-    def: KernelDef,
+    def: Arc<KernelDef>,
 }
 
 impl PreparedKernel {
@@ -61,12 +61,17 @@ impl PreparedKernel {
         scheme: &'a mut Scheme,
         label: impl Into<crate::SchemeLabel>,
     ) -> SchemeNodeStart<'a> {
+        let mut builder = scheme.node(label, self.pipeline.as_ref());
+        if crate::fusion_plan::fusable_kernel(&self.def) {
+            builder.begin_kernel_site(Arc::clone(&self.def));
+        }
         SchemeNodeStart {
-            builder: scheme.node(label, self.pipeline.as_ref()),
+            builder,
             workgroup_size: self.def.workgroup_size,
             def: &self.def,
             resource_i: 0,
             scalar_i: 0,
+            facts: Vec::new(),
             #[cfg(feature = "tensor")]
             tensor_layouts: Vec::new(),
         }
@@ -80,6 +85,8 @@ pub struct SchemeNodeStart<'a> {
     def: &'a KernelDef,
     resource_i: usize,
     scalar_i: usize,
+    /// Tensor layout facts, as `(fact slot, word)`.
+    facts: crate::specialization::BakedSlots,
     #[cfg(feature = "tensor")]
     tensor_layouts: Vec<crate::tensor::GoldyTensorLayout>,
 }
@@ -89,6 +96,12 @@ impl<'a> SchemeNodeStart<'a> {
     pub fn bind_resource(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
         self.note_resource_access(access);
         self.builder = self.builder.with_parcel(bindable, access);
+        self
+    }
+
+    pub fn bind_temporary(mut self, temporary: &crate::Temporary, access: NodeAccess) -> Self {
+        self.note_resource_access(access);
+        self.builder = self.builder.with_temporary(temporary, access);
         self
     }
 
@@ -181,6 +194,11 @@ impl<'a> SchemeNodeStart<'a> {
     }
 
     /// Pack collected tensor layouts into a scheme-owned metadata parcel and bind it last.
+    ///
+    /// The first [`goldy_shader_ir::TENSOR_LAUNCH_WORDS`] element offsets also travel as
+    /// launch words, and every tensor's shape facts go to the specialization predictor,
+    /// which bakes them at the node's first submit; the parcel serves the universal
+    /// program and tensors past the launch words.
     #[cfg(feature = "tensor")]
     pub fn finish_with_tensor_meta(mut self) -> Result<DispatchBuilder<'a>, crate::error::GoldyError> {
         let layouts = std::mem::take(&mut self.tensor_layouts);
@@ -189,20 +207,43 @@ impl<'a> SchemeNodeStart<'a> {
                 "kernel tensor metadata: no tensor views were bound".into(),
             ));
         }
+        let offsets = layouts
+            .iter()
+            .take(goldy_shader_ir::TENSOR_LAUNCH_WORDS)
+            .map(|l| l.offset)
+            .collect();
+        self.facts.extend(layouts.iter().enumerate().flat_map(|(slot, l)| {
+            tensor_fact_words(l)
+                .into_iter()
+                .enumerate()
+                .map(move |(fact, word)| (crate::specialization::tensor_fact_slot(slot as u32, fact), word))
+        }));
         let runtime = self.builder.scheme_runtime();
         let buf = runtime
             .acquire_buffer_with_data(&layouts, crate::types::BufferKind::Scattered)
             .map_err(crate::error::GoldyError::from)?;
-        self.builder = self.builder.bind_record_constant(buf, NodeAccess::Read);
+        self.builder = self
+            .builder
+            .with_launch_words(offsets)
+            .bind_record_constant(buf, NodeAccess::Read);
         Ok(self.finish())
     }
 
     pub fn finish(self) -> DispatchBuilder<'a> {
-        DispatchBuilder::new(self.builder, self.workgroup_size)
+        let builder = self.builder.with_tensor_facts(self.facts);
+        DispatchBuilder::new(builder, self.workgroup_size)
     }
 }
 
-fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
+/// `layout`'s fields in [`goldy_shader_ir::TENSOR_FACTS`] order.
+#[cfg(feature = "tensor")]
+fn tensor_fact_words(layout: &crate::tensor::GoldyTensorLayout) -> [u32; goldy_shader_ir::TENSOR_FACTS.len()] {
+    let [d0, d1, d2, d3] = layout.shape;
+    let [s0, s1, s2, s3] = layout.stride;
+    [layout.rank, layout.numel, d0, d1, d2, d3, s0, s1, s2, s3, layout.flags]
+}
+
+pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
     match access {
         goldy_shader_ir::AccessKind::Read => NodeAccess::Read,
         goldy_shader_ir::AccessKind::Write => NodeAccess::Write,
@@ -215,6 +256,15 @@ fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAccess {
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
 pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
+    prepare_kernel_as(device, def, None)
+}
+
+/// [`prepare_kernel`] for a program whose variants are shared by every module of `identity`.
+pub(super) fn prepare_kernel_as(
+    device: &Runtime,
+    def: KernelDef,
+    identity: Option<KernelIdentity>,
+) -> Result<PreparedKernel> {
     if def.abi_version != goldy_shader_ir::KERNEL_ABI_VERSION {
         anyhow::bail!(
             "kernel ABI version mismatch: shader has {}, runtime expects {}",
@@ -223,15 +273,28 @@ pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel
         );
     }
 
+    if let Some(definition) = &def.definition {
+        debug_assert_eq!(
+            goldy_shader_ir::emit_canonical_compute_source(definition)
+                .source
+                .canonical_slang,
+            def.source.canonical_slang,
+            "kernel `{}`: retained definition does not lower to its canonical source",
+            definition.name
+        );
+    }
     dump_kernel_artifacts(&def, None)?;
 
-    let shader = ShaderModule::from_slang(device, &def.source.canonical_slang)
+    let mut shader = ShaderModule::from_slang(device, &def.source.canonical_slang)
         .with_context(|| format!("compiling rust kernel `{}`", def.entry))?;
+    if let Some(identity) = identity {
+        shader = shader.with_kernel_identity(identity);
+    }
     let pipeline = ComputePipeline::new_with_label(device, &shader, Some(&format!("rust_kernel_{}", def.entry)))?;
 
     Ok(PreparedKernel {
         pipeline: Arc::new(pipeline),
-        def,
+        def: Arc::new(def),
     })
 }
 

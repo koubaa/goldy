@@ -34,6 +34,7 @@ use crate::handles::DeviceHandle;
 use crate::shader_library::ShaderLibrary;
 use crate::slang::{ShaderTarget, SlangCompiler, StructLayout};
 use crate::types::*;
+use crate::validation_env::Validation;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,11 +106,19 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Create a new Goldy instance.
+    /// Create a new Goldy instance, validating as [`Validation::from_env`] requests.
     pub fn new() -> Result<Self> {
-        let backend = backend::create_shared_backend()?;
+        Self::with_validation(Validation::from_env())
+    }
+
+    /// Create a new Goldy instance whose backend and runtimes run the checks in `validation`.
+    ///
+    /// Some API-level switches are process-wide by nature: Metal reads
+    /// `MTL_SHADER_VALIDATION` once, before its first device exists.
+    pub fn with_validation(validation: Validation) -> Result<Self> {
+        let backend = backend::create_shared_backend(validation)?;
         let backend_type = backend.lock().unwrap().backend_type();
-        tracing::info!(?backend_type, "Goldy instance created");
+        tracing::info!(?backend_type, ?validation, "Goldy instance created");
         Ok(Self { backend })
     }
 
@@ -238,6 +247,14 @@ pub enum PowerPreference {
 pub struct RuntimeDescriptor {
     /// Optional debug label for the logical device.
     pub label: Option<String>,
+
+    /// How large pure-compute partitions are subdivided into submissions.
+    ///
+    /// `None` keeps the backend default ([`ComputePartitionSplit::None`] on Metal, CUDA,
+    /// and WebGPU; [`ComputePartitionSplit::BarrierCost`] on Vulkan, DX12, and CPU).
+    /// `GOLDY_PARTITION_SPLIT` overrides this when it parses as `none`, `barrier`,
+    /// `overlap`, or `overlap:<head>,<growth>`. An unrecognized value is logged and ignored.
+    pub compute_partition_split: Option<ComputePartitionSplit>,
 }
 
 pub(crate) struct AdapterInner {
@@ -273,10 +290,12 @@ impl Adapter {
 
     /// Create a logical [`Runtime`] on this adapter.
     pub fn request_runtime(&self, desc: &RuntimeDescriptor) -> Result<Runtime> {
-        let _ = desc;
+        let compute_partition_split =
+            resolve_compute_partition_split(self.inner.caps.compute_partition_split, desc.compute_partition_split);
         tracing::debug!(adapter_id = self.inner.info.id, "Creating device for adapter");
         let mut backend = self.inner.backend.lock().unwrap();
         let handle = backend.create_device(self.inner.info.id)?;
+        let validation = backend.validation();
 
         #[cfg(all(feature = "dx12", target_os = "windows"))]
         {
@@ -295,6 +314,7 @@ impl Adapter {
         tracing::info!(
             adapter_id = self.inner.info.id,
             device_type = ?self.inner.info.device_type,
+            ?compute_partition_split,
             "GPU device created"
         );
 
@@ -308,7 +328,9 @@ impl Adapter {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation,
+                compute_partition_split,
             }),
         })
     }
@@ -331,6 +353,82 @@ impl Adapter {
     /// Get the vendor name.
     pub fn vendor(&self) -> &str {
         &self.inner.info.vendor
+    }
+}
+
+/// How a large pure-compute partition is subdivided into separate submissions.
+///
+/// Present, render-pass, CPU-dispatch, and retainability boundaries always split a
+/// schedule; this policy only refines the pure-compute partitions between them.
+/// Every choice is a function of the schedule's shape alone, so a retained scheme
+/// splits identically on every submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputePartitionSplit {
+    /// One submission per partition.
+    None,
+    /// Split once at the wave boundary with the most barriered resources (typically
+    /// coarse→fine), so the two halves can overlap in the GPU pipeline.
+    BarrierCost,
+    /// Commit a short head early so the GPU executes it while the CPU encodes the
+    /// rest. Chunks are counted in schedule nodes: the first holds `head`, and each
+    /// later chunk holds `growth` times the previous one, so each chunk can be encoded
+    /// while the GPU runs the one before it. A remainder smaller than `head` joins the
+    /// last chunk, and partitions under `2 * head` nodes stay whole.
+    EncodeOverlap { head: u32, growth: u32 },
+}
+
+impl ComputePartitionSplit {
+    /// Preset for [`Self::EncodeOverlap`]. On an M1 llama decode step (about 63
+    /// dispatches), heads of 4–16 nodes and growth from 2 up to a plain two-way split
+    /// all measured within noise.
+    pub const ENCODE_OVERLAP_DEFAULT: Self = Self::EncodeOverlap { head: 8, growth: 2 };
+
+    fn parse(v: &str) -> Option<Self> {
+        match v {
+            "none" => Some(Self::None),
+            "barrier" => Some(Self::BarrierCost),
+            "overlap" => Some(Self::ENCODE_OVERLAP_DEFAULT),
+            _ => {
+                let (head, growth) = v.strip_prefix("overlap:")?.split_once(',')?;
+                Some(Self::EncodeOverlap {
+                    head: head.trim().parse().ok().filter(|&h| h > 0)?,
+                    growth: growth.trim().parse().ok().filter(|&g| g > 0)?,
+                })
+            }
+        }
+    }
+}
+
+/// `GOLDY_PARTITION_SPLIT`, when it parses, wins over `requested` and `backend`.
+///
+/// An unrecognized value is logged once per runtime and ignored. The result is fixed
+/// when the runtime is created: retained partition plans are cached against it.
+fn resolve_compute_partition_split(
+    backend: ComputePartitionSplit,
+    requested: Option<ComputePartitionSplit>,
+) -> ComputePartitionSplit {
+    let env = std::env::var("GOLDY_PARTITION_SPLIT").ok();
+    select_compute_partition_split(backend, requested, env.as_deref())
+}
+
+fn select_compute_partition_split(
+    backend: ComputePartitionSplit,
+    requested: Option<ComputePartitionSplit>,
+    env: Option<&str>,
+) -> ComputePartitionSplit {
+    let fallback = requested.unwrap_or(backend);
+    let Some(value) = env else {
+        return fallback;
+    };
+    match ComputePartitionSplit::parse(value) {
+        Some(split) => split,
+        None => {
+            tracing::warn!(
+                %value,
+                "unrecognized GOLDY_PARTITION_SPLIT; using the runtime's partition split"
+            );
+            fallback
+        }
     }
 }
 
@@ -378,12 +476,14 @@ pub struct RuntimeCapabilities {
     /// writes and render-thread reuse gates.
     pub host_sidecar_on_submit_worker: bool,
 
-    /// Whether large pure-compute partitions may be subdivided at their heaviest
-    /// barrier boundary to expose GPU-pipeline overlap between submissions.
+    /// How large pure-compute partitions are subdivided into separate submissions.
     ///
-    /// Enabled on Vulkan/DX12. Disabled on Metal: cross-CB `MTLSharedEvent` waits
-    /// serialize consecutive partitions and dominate any overlap gains.
-    pub split_compute_partitions_on_barrier_cost: bool,
+    /// On an [`Adapter`] this is the backend default: [`ComputePartitionSplit::None`] on
+    /// Metal, CUDA, and WebGPU, and [`ComputePartitionSplit::BarrierCost`] on Vulkan,
+    /// DX12, and CPU. On a [`Runtime`] it is that default, then
+    /// [`RuntimeDescriptor::compute_partition_split`], then `GOLDY_PARTITION_SPLIT`
+    /// when the variable parses.
+    pub compute_partition_split: ComputePartitionSplit,
 
     /// Whether the fresh Scheme submit path may fuse an upload-only partition with
     /// the immediately following compute partition into one command buffer.
@@ -418,6 +518,20 @@ pub struct RuntimeCapabilities {
     ///
     /// When `true`, [`crate::MeshPipelineDesc::amplification`] may be set.
     pub amplification_shaders: bool,
+
+    /// Threads per subgroup (warp, wave) of a compute workgroup, when every subgroup
+    /// has exactly this many and holds consecutive local invocations of a
+    /// one-dimensional workgroup. `None` when the width can vary or is unknown.
+    ///
+    /// Automatic fusion exchanges partial sums through subgroup reads when it is set.
+    pub subgroup_width: Option<u32>,
+
+    /// Whether a subgroup multiplies 16×16 f16 matrices into f32 accumulators on
+    /// matrix units (CUDA tensor cores from compute capability 8.0).
+    ///
+    /// Automatic fusion uses them only for schemes that admit
+    /// [`crate::ContractionPrecision::F16Factors`].
+    pub matrix_multiply: bool,
 }
 
 impl Default for RuntimeCapabilities {
@@ -439,12 +553,14 @@ impl Default for RuntimeCapabilities {
             buffer_page_size: 64 * 1024,
             buffer_decommit_supported: false,
             host_sidecar_on_submit_worker: false,
-            split_compute_partitions_on_barrier_cost: true,
+            compute_partition_split: ComputePartitionSplit::BarrierCost,
             fuse_upload_with_compute_partitions: false,
             ray_query: false,
             ray_tracing_pipelines: false,
             mesh_shaders: false,
             amplification_shaders: false,
+            subgroup_width: None,
+            matrix_multiply: false,
         }
     }
 }
@@ -497,8 +613,12 @@ pub(crate) struct DeviceInner {
     pub(crate) owns_backend_device: bool,
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
-    /// Lazily compiled stdlib MatMul kernel (fallback path).
-    pub(crate) stdlib_matmul: Mutex<Option<Arc<crate::compute::ComputePipeline>>>,
+    /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
+    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
+    /// The backend's [`Validation`], read once so hot paths need not lock the backend.
+    pub(crate) validation: Validation,
+    /// Partition policy for this runtime. See [`resolve_compute_partition_split`].
+    compute_partition_split: ComputePartitionSplit,
 }
 
 impl Clone for Runtime {
@@ -651,7 +771,9 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: false,
                 slang: Arc::clone(&self.inner.slang),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation: self.inner.validation,
+                compute_partition_split: self.inner.compute_partition_split,
             }),
         }
     }
@@ -821,16 +943,25 @@ impl Runtime {
         self.inner.backend.lock().unwrap().backend_type()
     }
 
-    pub(crate) fn stdlib_matmul_f32(&self) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
-        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap().clone() {
+    /// The checks this runtime's backend runs (see [`Instance::with_validation`]).
+    pub fn validation(&self) -> Validation {
+        self.inner.validation
+    }
+
+    pub(crate) fn stdlib_matmul_f32(
+        &self,
+        kind: crate::ops::matmul::MatMulFallback,
+    ) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
+        let index = kind as usize;
+        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
             return Ok(pipeline);
         }
-        let pipeline = crate::ops::matmul::prepare_stdlib(self).map_err(GoldyError::Backend)?;
-        let mut slot = self.inner.stdlib_matmul.lock().unwrap();
-        if let Some(existing) = slot.as_ref() {
+        let pipeline = crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?;
+        let mut slots = self.inner.stdlib_matmul.lock().unwrap();
+        if let Some(existing) = slots[index].as_ref() {
             return Ok(Arc::clone(existing));
         }
-        *slot = Some(Arc::clone(&pipeline));
+        slots[index] = Some(Arc::clone(&pipeline));
         Ok(pipeline)
     }
 
@@ -999,7 +1130,9 @@ impl Runtime {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn capabilities(&self) -> RuntimeCapabilities {
-        self.inner.adapter.capabilities()
+        let mut caps = self.inner.adapter.capabilities();
+        caps.compute_partition_split = self.inner.compute_partition_split;
+        caps
     }
 
     // --- Shader Library Management ---
@@ -1187,6 +1320,7 @@ impl Runtime {
             })
         };
         let caps = backend.lock().unwrap().adapter_capabilities(adapter_info.id);
+        let compute_partition_split = resolve_compute_partition_split(caps.compute_partition_split, None);
         let adapter = Adapter {
             inner: Arc::new(AdapterInner {
                 backend: Arc::clone(&backend),
@@ -1194,9 +1328,9 @@ impl Runtime {
                 caps,
             }),
         };
-        let handle = {
+        let (handle, validation) = {
             let mut b = backend.lock().unwrap();
-            b.create_device(adapter.id())?
+            (b.create_device(adapter.id())?, b.validation())
         };
 
         let mut registry = ShaderLibraryRegistry::new();
@@ -1212,7 +1346,9 @@ impl Runtime {
                 bookkeeping: Arc::new(crate::parcel::PoolBookkeeping::new()),
                 owns_backend_device: true,
                 slang: Arc::new(OnceLock::new()),
-                stdlib_matmul: Mutex::new(None),
+                stdlib_matmul: Mutex::default(),
+                validation,
+                compute_partition_split,
             }),
         })
     }
@@ -1286,10 +1422,10 @@ impl Drop for DeviceInner {
         // Wait for all GPU work on this device to complete before tearing down resources.
         // Contexts must be dropped before DeviceInner; device_wait_idle is the device-wide fence.
         // Skip if already lost: the hardware cannot make progress and destroy_device orders teardown.
-        let already_lost = self.backend.lock().unwrap().is_device_lost(self.handle);
-        if !already_lost {
-            let mut backend = self.backend.lock().unwrap();
-            let _ = backend.device_wait_idle(self.handle);
+        if let Ok(mut backend) = self.backend.lock() {
+            if !backend.is_device_lost(self.handle) {
+                let _ = backend.device_wait_idle(self.handle);
+            }
         }
         // Drop all deferred payloads after the idle wait.
         self.vram_allocator.drain();
@@ -1297,8 +1433,9 @@ impl Drop for DeviceInner {
         // which runs before this (contexts hold a `Runtime` clone, so they outlive nothing
         // but are dropped first by users tearing down renderers before devices).
         if self.owns_backend_device {
-            let mut backend = self.backend.lock().unwrap();
-            backend.destroy_device(self.handle);
+            if let Ok(mut backend) = self.backend.lock() {
+                backend.destroy_device(self.handle);
+            }
         }
     }
 }
@@ -1313,6 +1450,39 @@ mod tests {
     }
 
     #[test]
+    fn partition_split_override_parses() {
+        use ComputePartitionSplit as S;
+        assert_eq!(S::parse("none"), Some(S::None));
+        assert_eq!(S::parse("barrier"), Some(S::BarrierCost));
+        assert_eq!(S::parse("overlap"), Some(S::ENCODE_OVERLAP_DEFAULT));
+        assert_eq!(S::parse("overlap:4, 3"), Some(S::EncodeOverlap { head: 4, growth: 3 }));
+        assert_eq!(S::parse("overlap:0,2"), None);
+        assert_eq!(S::parse("overlap:4"), None);
+        assert_eq!(S::parse("fast"), None);
+    }
+
+    #[test]
+    fn partition_split_selection_prefers_env_then_descriptor_then_backend() {
+        use ComputePartitionSplit as S;
+        let backend = S::BarrierCost;
+        let requested = Some(S::None);
+        assert_eq!(select_compute_partition_split(backend, requested, None), S::None);
+        assert_eq!(select_compute_partition_split(backend, None, None), backend);
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("overlap")),
+            S::ENCODE_OVERLAP_DEFAULT
+        );
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("overlap:4,3")),
+            S::EncodeOverlap { head: 4, growth: 3 }
+        );
+        assert_eq!(
+            select_compute_partition_split(backend, requested, Some("fast")),
+            S::None
+        );
+    }
+
+    #[test]
     fn with_vram_allocator_alias_does_not_destroy_backend_device() {
         use std::sync::Arc;
 
@@ -1324,6 +1494,30 @@ mod tests {
             device.is_valid(),
             "dropping a with_vram_allocator alias must not destroy the backend device"
         );
+    }
+
+    /// A panic while the backend lock is held must not turn later teardown into a
+    /// second panic, which aborts the process when it happens during unwinding.
+    #[test]
+    fn teardown_tolerates_poisoned_backend_lock() {
+        use std::sync::Arc;
+
+        let device = test_device();
+        let ctx = device.create_context().unwrap();
+        let buffer = device
+            .acquire_buffer_with_data(&[0u32; 4], crate::BufferKind::Scattered)
+            .unwrap();
+        let backend = Arc::clone(&device.inner.backend);
+        let _ = std::thread::spawn(move || {
+            let _guard = backend.lock().unwrap();
+            panic!("poison the backend lock");
+        })
+        .join();
+        assert!(device.inner.backend.is_poisoned());
+
+        drop(buffer);
+        drop(ctx);
+        drop(device);
     }
 
     #[test]

@@ -48,6 +48,8 @@ pub(super) struct CudaPendingSubmit {
     pub host_waits: Vec<Arc<CudaEvent>>,
     pub deferred_writes: Vec<MaterializedHostWrite>,
     pub body: CudaSubmitBody,
+    /// The backend's GPU API validation: synchronize after every stream operation.
+    pub validate: bool,
 }
 
 /// One alternating segment of a retainable CUDA partition.
@@ -111,8 +113,16 @@ pub(super) enum CudaSubmitBody {
     },
 }
 
+/// Where a deferred host write lands on the worker.
+pub(super) enum HostWriteTarget {
+    /// Device memory, written with an HtoD on the context stream.
+    Device(Arc<Mutex<CudaSlice<u8>>>),
+    /// `CPU_WRITABLE` pinned staging. Retained `WriteFromHost` nodes read it at replay.
+    Staging(Arc<Mutex<super::pinned_host::CudaPinnedHost>>),
+}
+
 pub(super) struct MaterializedHostWrite {
-    pub memory: Arc<Mutex<CudaSlice<u8>>>,
+    pub target: HostWriteTarget,
     pub abs_offset: u64,
     pub data: Arc<[u8]>,
 }
@@ -184,6 +194,8 @@ pub(super) enum CudaOp {
         host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
         host_offset: usize,
         len: usize,
+        /// Captures as a kernel node reading mapped `host` instead of an HtoD memcpy node.
+        capture_kernel: Option<Arc<super::runtime_module::HostCopyKernel>>,
     },
     Copy {
         src: Arc<Mutex<CudaSlice<u8>>>,
@@ -250,6 +262,7 @@ pub(super) enum CudaOp {
         semaphore: SendExternalSemaphore,
         value: u64,
     },
+    #[allow(dead_code)]
     CopyTextureToBuffer {
         texture: Arc<super::texture::CudaTextureResource>,
         x: u32,
@@ -259,6 +272,26 @@ pub(super) enum CudaOp {
         dst: Arc<Mutex<CudaSlice<u8>>>,
         dst_abs: u64,
         dst_ptr: u64,
+        dst_row_pitch: u32,
+    },
+    /// Device buffer → cacheable pinned host (host-claim / CPU-dispatch readback).
+    /// Graph-unsafe in v1: stays on the stream-replay path.
+    CopyToReadbackHost {
+        src: Arc<Mutex<CudaSlice<u8>>>,
+        src_abs: u64,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
+        len: usize,
+    },
+    /// CUDA array → cacheable pinned host (texture host-claim readback). Graph-unsafe in v1.
+    CopyTextureToReadbackHost {
+        texture: Arc<super::texture::CudaTextureResource>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        host: Arc<Mutex<super::pinned_host::CudaPinnedHost>>,
+        host_offset: usize,
         dst_row_pitch: u32,
     },
     /// cuBLAS GEMM/GEMV captured on the submit stream.
@@ -605,8 +638,20 @@ pub(super) fn collect_pins(
             CudaOp::Clear { memory, .. } | CudaOp::Write { memory, .. } => {
                 buffers.push(Arc::clone(memory));
             }
-            CudaOp::WriteFromHost { memory, host, .. } => {
+            CudaOp::WriteFromHost {
+                memory,
+                host,
+                capture_kernel,
+                ..
+            } => {
                 buffers.push(Arc::clone(memory));
+                hosts.push(Arc::clone(host));
+                if let Some(kernel) = capture_kernel {
+                    modules.push(Arc::clone(&kernel.module));
+                }
+            }
+            CudaOp::CopyToReadbackHost { src, host, .. } => {
+                buffers.push(Arc::clone(src));
                 hosts.push(Arc::clone(host));
             }
             CudaOp::Copy { src, dst, .. } => {
@@ -634,6 +679,10 @@ pub(super) fn collect_pins(
                 textures.push(Arc::clone(texture));
                 buffers.push(Arc::clone(dst));
             }
+            CudaOp::CopyTextureToReadbackHost { texture, host, .. } => {
+                textures.push(Arc::clone(texture));
+                hosts.push(Arc::clone(host));
+            }
             CudaOp::MatMul { a, b, c, .. } => {
                 buffers.push(Arc::clone(&a.memory));
                 buffers.push(Arc::clone(&b.memory));
@@ -644,23 +693,30 @@ pub(super) fn collect_pins(
     (buffers, modules, textures, hosts)
 }
 
-pub(super) fn maybe_validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<()> {
-    if !crate::backend::goldy_validation_enabled() {
-        return Ok(());
-    }
+/// Synchronize `stream` so a validated backend reports a failure at the operation `op`.
+pub(super) fn validate_sync(stream: &Arc<CudaStream>, op: &str) -> Result<()> {
     stream
         .synchronize()
         .with_context(|| format!("CUDA validation: {op} synchronize failed"))
 }
 
+/// How [`execute_ops`] issues its operations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpMode {
+    /// Recording into a graph: host synchronization is illegal, and indirect launches
+    /// record an updater plus a placeholder consumer.
+    Capture,
+    /// Issuing on the stream; with `validate`, synchronize after every operation.
+    Stream { validate: bool },
+}
+
 /// Execute materialized ops on `stream`.
 ///
-/// When `validate` is false, per-op stream synchronization is skipped (required during
-/// CUDA graph capture, where host sync is illegal). Indirect launches in capture mode
-/// record updater + placeholder consumer; the consumer is made device-updatable after
+/// In [`OpMode::Capture`], indirect consumers are made device-updatable after
 /// `end_capture` via [`finalize_indirect_capture`].
-pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bool) -> Result<()> {
-    let capturing = !validate;
+pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], mode: OpMode) -> Result<()> {
+    let capturing = mode == OpMode::Capture;
+    let validate = mode == OpMode::Stream { validate: true };
     for op in ops {
         match op {
             CudaOp::Launch {
@@ -743,7 +799,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     stream.memset_zeros(&mut view).context("CUDA: memset failed")?;
                 }
                 if validate {
-                    maybe_validate_sync(stream, "ClearBuffer")?;
+                    validate_sync(stream, "ClearBuffer")?;
                 }
             }
             CudaOp::Write {
@@ -759,7 +815,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     .context("CUDA: write range out of bounds")?;
                 stream.memcpy_htod(data, &mut view).context("CUDA: HtoD write failed")?;
                 if validate {
-                    maybe_validate_sync(stream, "WriteBuffer")?;
+                    validate_sync(stream, "WriteBuffer")?;
                 }
             }
             CudaOp::WriteFromHost {
@@ -769,6 +825,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 host,
                 host_offset,
                 len,
+                capture_kernel,
             } => {
                 let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.lock");
                 let host = host.lock().unwrap();
@@ -779,7 +836,10 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 let src = &host.as_slice()[*host_offset..host_end];
                 {
                     let _tz = crate::tracy_zone!("cuda.execute_op.write_from_host.htod");
-                    if capturing {
+                    let mapped_src = host.device_ptr().map(|base| base + *host_offset as u64);
+                    if let (true, Some(kernel), Some(src_ptr)) = (capturing, capture_kernel, mapped_src) {
+                        capture_copy_from_host(stream, kernel, src_ptr, *device_ptr, *len)?;
+                    } else if capturing {
                         capture_memcpy_htod(stream, *device_ptr, src).context("CUDA: WriteFromHost HtoD failed")?;
                     } else {
                         let mut guard = memory.lock().unwrap();
@@ -794,7 +854,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     }
                 }
                 if validate {
-                    maybe_validate_sync(stream, "WriteFromHost")?;
+                    validate_sync(stream, "WriteFromHost")?;
                 }
             }
             CudaOp::Copy {
@@ -812,7 +872,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     execute_copy(stream, src, *src_abs, dst, *dst_abs, *size)?;
                 }
                 if validate {
-                    maybe_validate_sync(stream, "CopyBuffer")?;
+                    validate_sync(stream, "CopyBuffer")?;
                 }
             }
             CudaOp::WriteTexture {
@@ -826,7 +886,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
             } => {
                 super::texture::memcpy_htod_array(stream, texture, *x, *y, *width, *height, data, *src_row_pitch)?;
                 if validate {
-                    maybe_validate_sync(stream, "WriteTexture")?;
+                    validate_sync(stream, "WriteTexture")?;
                 }
             }
             CudaOp::WriteTextureFromHost {
@@ -852,7 +912,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     super::texture::memcpy_htod_array(stream, texture, *x, *y, *width, *height, data, *src_row_pitch)?;
                 }
                 if validate {
-                    maybe_validate_sync(stream, "WriteTextureFromHost")?;
+                    validate_sync(stream, "WriteTextureFromHost")?;
                 }
             }
             CudaOp::CopyBufferToTexture {
@@ -875,7 +935,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                 };
                 super::texture::memcpy_dtod_array(stream, src_ptr, *src_row_pitch, texture, *x, *y, *width, *height)?;
                 if validate {
-                    maybe_validate_sync(stream, "CopyBufferToTexture")?;
+                    validate_sync(stream, "CopyBufferToTexture")?;
                 }
             }
             CudaOp::CopyTexture {
@@ -892,7 +952,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     stream, src, *src_x, *src_y, dst, *dst_x, *dst_y, *width, *height,
                 )?;
                 if validate {
-                    maybe_validate_sync(stream, "CopyTexture")?;
+                    validate_sync(stream, "CopyTexture")?;
                 }
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -903,7 +963,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
             } => {
                 super::dx12_companion::cuda_wait_fence(cuda_ctx, semaphore.0, stream.cu_stream(), *value)?;
                 if validate {
-                    maybe_validate_sync(stream, "WaitExternalFence")?;
+                    validate_sync(stream, "WaitExternalFence")?;
                 }
             }
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
@@ -914,7 +974,7 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
             } => {
                 super::dx12_companion::cuda_signal_fence(cuda_ctx, semaphore.0, stream.cu_stream(), *value)?;
                 if validate {
-                    maybe_validate_sync(stream, "SignalExternalFence")?;
+                    validate_sync(stream, "SignalExternalFence")?;
                 }
             }
             CudaOp::CopyTextureToBuffer {
@@ -946,13 +1006,71 @@ pub(super) fn execute_ops(stream: &Arc<CudaStream>, ops: &[CudaOp], validate: bo
                     *dst_row_pitch,
                 )?;
                 if validate {
-                    maybe_validate_sync(stream, "CopyTextureToReadback")?;
+                    validate_sync(stream, "CopyTextureToReadback")?;
+                }
+            }
+            CudaOp::CopyToReadbackHost {
+                src,
+                src_abs,
+                host,
+                host_offset,
+                len,
+            } => {
+                if capturing {
+                    anyhow::bail!("CUDA: CopyToReadbackHost is not graph-capturable");
+                }
+                if *len > 0 {
+                    let mut host = host.lock().unwrap();
+                    let host_end = *host_offset + *len;
+                    if host_end > host.len() {
+                        anyhow::bail!("CUDA: CopyToReadbackHost exceeds host staging");
+                    }
+                    let dst = &mut host.as_mut_slice()[*host_offset..host_end];
+                    let memory = src.lock().unwrap();
+                    let view = memory
+                        .try_slice(*src_abs as usize..*src_abs as usize + *len)
+                        .context("CUDA: CopyToReadbackHost source out of bounds")?;
+                    stream
+                        .memcpy_dtoh(&view, dst)
+                        .context("CUDA: CopyToReadbackHost DtoH failed")?;
+                }
+                if validate {
+                    validate_sync(stream, "CopyToReadbackHost")?;
+                }
+            }
+            CudaOp::CopyTextureToReadbackHost {
+                texture,
+                x,
+                y,
+                width,
+                height,
+                host,
+                host_offset,
+                dst_row_pitch,
+            } => {
+                if capturing {
+                    anyhow::bail!("CUDA: CopyTextureToReadbackHost is not graph-capturable");
+                }
+                let mut host = host.lock().unwrap();
+                super::texture::memcpy_array_to_host(
+                    stream,
+                    texture,
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                    host.as_mut_slice(),
+                    *host_offset,
+                    *dst_row_pitch,
+                )?;
+                if validate {
+                    validate_sync(stream, "CopyTextureToReadbackHost")?;
                 }
             }
             CudaOp::MatMul { .. } => {
                 super::matmul::execute(op)?;
                 if validate {
-                    maybe_validate_sync(stream, "MatMul")?;
+                    validate_sync(stream, "MatMul")?;
                 }
             }
         }
@@ -996,7 +1114,7 @@ fn launch_direct(
             .with_context(|| format!("CUDA: cuLaunchKernel failed for dispatch '{where_}'"))?;
     }
     if validate {
-        maybe_validate_sync(stream, &format!("dispatch '{where_}'"))?;
+        validate_sync(stream, &format!("dispatch '{where_}'"))?;
     }
     Ok(())
 }
@@ -1104,7 +1222,7 @@ fn launch_indirect_fallback(
             max_grid.2
         );
     }
-    super::validate_launch_config(&limits, max_threads_per_block, grid, workgroup_size, 0, label)?;
+    super::validate_launch_config(validate, &limits, max_threads_per_block, grid, workgroup_size, 0, label)?;
     launch_direct(stream, label, function, workgroup_size, grid, args, validate)
 }
 
@@ -1143,6 +1261,8 @@ pub(super) fn finalize_indirect_capture(
             | CudaOp::CopyBufferToTexture { .. }
             | CudaOp::CopyTexture { .. }
             | CudaOp::CopyTextureToBuffer { .. }
+            | CudaOp::CopyToReadbackHost { .. }
+            | CudaOp::CopyTextureToReadbackHost { .. }
             | CudaOp::MatMul { .. } => {}
             #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
             CudaOp::WaitExternalFence { .. } | CudaOp::SignalExternalFence { .. } => {}
@@ -1165,7 +1285,7 @@ pub(super) fn capture_partition_graph(
     stream
         .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
         .context("CUDA: begin_capture failed")?;
-    let capture_result = execute_ops(stream, ops, false);
+    let capture_result = execute_ops(stream, ops, OpMode::Capture);
     let end = unsafe { cudarc::driver::result::stream::end_capture(stream.cu_stream()) };
     if let Err(error) = &capture_result {
         let _ = stream.synchronize();
@@ -1189,6 +1309,7 @@ fn run_dynamic_prefix(
     host_waits: &[Arc<CudaEvent>],
     deferred_writes: &[MaterializedHostWrite],
     stream_waits: &[Arc<CudaEvent>],
+    validate: bool,
     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))] dx12_stream_fence_waits: &[(
         Arc<Dx12Companion>,
         u64,
@@ -1198,16 +1319,30 @@ fn run_dynamic_prefix(
         timeline::host_wait_event(event)?;
     }
     for write in deferred_writes {
-        let mut memory = write.memory.lock().unwrap();
         let start = write.abs_offset as usize;
         let end = start + write.data.len();
-        let mut view = memory
-            .try_slice_mut(start..end)
-            .context("CUDA: deferred host write out of bounds")?;
-        stream
-            .memcpy_htod(write.data.as_ref(), &mut view)
-            .context("CUDA: deferred host write HtoD failed")?;
-        maybe_validate_sync(stream, "deferred host write")?;
+        match &write.target {
+            HostWriteTarget::Device(memory) => {
+                let mut memory = memory.lock().unwrap();
+                let mut view = memory
+                    .try_slice_mut(start..end)
+                    .context("CUDA: deferred host write out of bounds")?;
+                stream
+                    .memcpy_htod(write.data.as_ref(), &mut view)
+                    .context("CUDA: deferred host write HtoD failed")?;
+                if validate {
+                    validate_sync(stream, "deferred host write")?;
+                }
+            }
+            HostWriteTarget::Staging(host) => {
+                let mut host = host.lock().unwrap();
+                let dst = host
+                    .as_mut_slice()
+                    .get_mut(start..end)
+                    .context("CUDA: deferred host write exceeds pinned staging")?;
+                dst.copy_from_slice(&write.data);
+            }
+        }
     }
     for event in stream_waits {
         stream
@@ -1257,6 +1392,7 @@ impl PendingSubmit for CudaPendingSubmit {
             host_waits,
             deferred_writes,
             body,
+            validate,
         } = *self;
         let body_result: Result<(), anyhow::Error> = (|| {
             // Hold across prefix + capture: API-thread `device_ptr` / alloc on another
@@ -1269,6 +1405,7 @@ impl PendingSubmit for CudaPendingSubmit {
                     &host_waits,
                     &deferred_writes,
                     &stream_waits,
+                    validate,
                     #[cfg(all(feature = "graphics", feature = "dx12", target_os = "windows"))]
                     &dx12_stream_fence_waits,
                 )?;
@@ -1277,7 +1414,7 @@ impl PendingSubmit for CudaPendingSubmit {
             match body {
                 CudaSubmitBody::Ops { ops, .. } => {
                     let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.execute_ops");
-                    execute_ops(&stream, &ops, true)?;
+                    execute_ops(&stream, &ops, OpMode::Stream { validate })?;
                 }
                 CudaSubmitBody::CaptureAndLaunch {
                     key,
@@ -1305,7 +1442,9 @@ impl PendingSubmit for CudaPendingSubmit {
                                 }
                                 graph.launch().context("CUDA: cuGraphLaunch failed after capture")?;
                                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                maybe_validate_sync(&stream, "graph launch after capture")?;
+                                if validate {
+                                    validate_sync(&stream, "graph launch after capture")?;
+                                }
                                 islands.push(retained_graph::CudaRetainedPartition {
                                     graph,
                                     buffers,
@@ -1318,7 +1457,7 @@ impl PendingSubmit for CudaPendingSubmit {
                             CudaOpSegment::Stream(ops) => {
                                 if !ops.is_empty() {
                                     let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
-                                    execute_ops(&stream, ops, true)?;
+                                    execute_ops(&stream, ops, OpMode::Stream { validate })?;
                                 }
                             }
                         }
@@ -1368,13 +1507,15 @@ impl PendingSubmit for CudaPendingSubmit {
                                 program.last_launch_tv = fence_value;
                                 drop(guard);
                                 stats.launches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                maybe_validate_sync(&stream, "retained graph launch")?;
+                                if validate {
+                                    validate_sync(&stream, "retained graph launch")?;
+                                }
                                 island_idx += 1;
                             }
                             CudaLaunchSegment::Stream(ops) => {
                                 if !ops.is_empty() {
                                     let _tz = crate::tracy_zone!("goldy.submit_worker.cuda.stream_segment");
-                                    execute_ops(&stream, ops, true)?;
+                                    execute_ops(&stream, ops, OpMode::Stream { validate })?;
                                 }
                             }
                         }
@@ -1467,6 +1608,35 @@ fn capture_memset_zeros(stream: &Arc<CudaStream>, device_ptr: u64, size: u64) ->
     }
     unsafe { cudarc::driver::result::memset_d8_async(device_ptr, 0, size as usize, stream.cu_stream()) }
         .context("CUDA: capture memset failed")
+}
+
+fn capture_copy_from_host(
+    stream: &Arc<CudaStream>,
+    kernel: &super::runtime_module::HostCopyKernel,
+    src_ptr: u64,
+    dst_ptr: u64,
+    len: usize,
+) -> Result<()> {
+    // Baked pointers as POD words, as in `launch_indirect_for_capture`.
+    let src_arg = U64Word(src_ptr);
+    let dst_arg = U64Word(dst_ptr);
+    let len_arg = U32Word(u32::try_from(len).context("CUDA: host-copy length exceeds u32")?);
+    // SAFETY: argument order and types match goldy_copy_from_host; `src_ptr` is a
+    // mapped pinned range kept alive by the retained graph's host pins.
+    unsafe {
+        stream
+            .launch_builder(&kernel.function)
+            .arg(&src_arg)
+            .arg(&dst_arg)
+            .arg(&len_arg)
+            .launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (super::runtime_module::COPY_FROM_HOST_THREADS, 1, 1),
+                shared_mem_bytes: 0,
+            })
+            .context("CUDA: host-copy launch failed during graph capture")?;
+    }
+    Ok(())
 }
 
 fn capture_memcpy_htod(stream: &Arc<CudaStream>, device_ptr: u64, src: &[u8]) -> Result<()> {
@@ -1570,14 +1740,14 @@ pub(super) fn buffer_device_arg(
 
 pub(super) fn materialize_deferred_writes(
     writes: &[DeferredHostWrite],
-    resolve: impl Fn(crate::backend::BufferHandle) -> Result<(Arc<Mutex<CudaSlice<u8>>>, u64)>,
+    mut resolve: impl FnMut(&DeferredHostWrite) -> Result<(HostWriteTarget, u64)>,
 ) -> Result<Vec<MaterializedHostWrite>> {
     let mut out = Vec::with_capacity(writes.len());
     for write in writes {
-        let (memory, base_offset) = resolve(write.buffer)?;
+        let (target, abs_offset) = resolve(write)?;
         out.push(MaterializedHostWrite {
-            memory,
-            abs_offset: base_offset + write.offset,
+            target,
+            abs_offset,
             data: Arc::clone(&write.data),
         });
     }

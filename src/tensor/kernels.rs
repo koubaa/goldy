@@ -1,4 +1,8 @@
 //! Portable `#[goldy::compute]` kernels for the dense tensor op set.
+//!
+//! Operands are tensor views, so element offsets travel as launch words and shapes bake
+//! through the specializer. The op code, axis, reduction length and scalar operand are
+//! scalars fixed when the op is recorded, so they bake at the node's first submit too.
 
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
@@ -40,375 +44,261 @@ pub const OP_CAST_U32_F32: u32 = 33;
 pub const OP_CAST_I32_U32: u32 = 34;
 pub const OP_CAST_U32_I32: u32 = 35;
 
-#[goldy::gpu]
-pub struct TensorOpMeta {
-    pub op: u32,
-    pub axis: u32,
-    pub scalar_bits: u32,
-    pub reduce_len: u32,
-    pub a_off: u32,
-    pub a_numel: u32,
-    pub a_s0: u32,
-    pub a_s1: u32,
-    pub a_s2: u32,
-    pub a_s3: u32,
-    pub a_d0: u32,
-    pub a_d1: u32,
-    pub a_d2: u32,
-    pub a_d3: u32,
-    pub b_off: u32,
-    pub b_numel: u32,
-    pub b_s0: u32,
-    pub b_s1: u32,
-    pub b_s2: u32,
-    pub b_s3: u32,
-    pub b_d0: u32,
-    pub b_d1: u32,
-    pub b_d2: u32,
-    pub b_d3: u32,
-    pub o_off: u32,
-    pub o_numel: u32,
-    pub o_s0: u32,
-    pub o_s1: u32,
-    pub o_s2: u32,
-    pub o_s3: u32,
-    pub o_d0: u32,
-    pub o_d1: u32,
-    pub o_d2: u32,
-    pub o_d3: u32,
-}
-
+/// `dst = op(src)`, or `scalar` for [`OP_FILL`]. `src` has `dst`'s shape.
+///
+/// `scalar` is user slot 0, where semantic sites read it (`semantic.rs`).
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_unary_f32(src: &[f32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta], scalar: f32) {
+fn tensor_unary_f32(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f32>, scalar: f32, op: u32) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
+    if i < dst.len() {
         let mut v = scalar;
-        if m.op != 1 {
-            let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-            v = src[si];
-            if m.op == 3 {
+        if op != 1 {
+            v = src[i];
+            if op == 3 {
                 v = -v;
-            } else if m.op == 4 {
+            } else if op == 4 {
                 v = goldy::gpu::abs(v);
-            } else if m.op == 5 {
+            } else if op == 5 {
                 v = goldy::gpu::exp(v);
-            } else if m.op == 6 {
+            } else if op == 6 {
                 v = goldy::gpu::log(v);
-            } else if m.op == 7 {
+            } else if op == 7 {
                 v = goldy::gpu::sqrt(v);
-            } else if m.op == 8 {
+            } else if op == 8 {
                 v = 1.0 / v;
             }
         }
-        dst[di] = v;
+        dst[i] = v;
     }
 }
 
+/// `dst = a op b`, or `a op scalar` for the `_SCALAR` ops. `a` and `b` have `dst`'s shape.
+///
+/// `scalar` is user slot 0, where semantic sites read it (`semantic.rs`).
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_binary_f32(a: &[f32], b: &[f32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta], scalar: f32) {
+fn tensor_binary_f32(
+    a: goldy::gpu::Tensor<f32>,
+    b: goldy::gpu::Tensor<f32>,
+    dst: goldy::gpu::TensorWrite<f32>,
+    scalar: f32,
+    op: u32,
+) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let ai = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let bi = m.b_off + i0 * m.b_s0 + i1 * m.b_s1 + i2 * m.b_s2 + i3 * m.b_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        let av = a[ai];
+    if i < dst.len() {
+        let av = a[i];
         let mut bv = scalar;
-        if m.op < 15 {
-            bv = b[bi];
+        if op < 15 {
+            bv = b[i];
         }
         let mut v = 0.0;
-        if m.op == 9 || m.op == 15 {
+        if op == 9 || op == 15 {
             v = av + bv;
-        } else if m.op == 10 || m.op == 16 {
+        } else if op == 10 || op == 16 {
             v = av - bv;
-        } else if m.op == 11 || m.op == 17 {
+        } else if op == 11 || op == 17 {
             v = av * bv;
-        } else if m.op == 12 || m.op == 18 {
+        } else if op == 12 || op == 18 {
             v = av / bv;
-        } else if m.op == 13 || m.op == 19 {
+        } else if op == 13 || op == 19 {
             v = goldy::gpu::min(av, bv);
-        } else if m.op == 14 || m.op == 20 {
+        } else if op == 14 || op == 20 {
             v = goldy::gpu::max(av, bv);
         }
-        dst[di] = v;
+        dst[i] = v;
     }
 }
 
+/// 32-bit copy, or `bits` for [`OP_FILL`]. Views of other 32-bit dtypes are reinterpreted.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_copy_u32(src: &[u32], dst: goldy::gpu::Scattered<u32>, meta: &[TensorOpMeta], bits: u32) {
+fn tensor_copy_u32(src: goldy::gpu::Tensor<u32>, dst: goldy::gpu::TensorWrite<u32>, op: u32, bits: u32) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        if m.op == 1 {
-            dst[di] = bits;
+    if i < dst.len() {
+        if op == 1 {
+            dst[i] = bits;
         } else {
-            dst[di] = src[si];
+            dst[i] = src[i];
         }
     }
 }
 
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_cast_f32_i32(src: &[f32], dst: goldy::gpu::Scattered<i32>, meta: &[TensorOpMeta]) {
+fn tensor_cast_f32_i32(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<i32>) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = src[si] as i32;
+    if i < dst.len() {
+        dst[i] = src[i] as i32;
     }
 }
 
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_cast_f32_u32(src: &[f32], dst: goldy::gpu::Scattered<u32>, meta: &[TensorOpMeta]) {
+fn tensor_cast_f32_u32(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<u32>) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = src[si] as u32;
+    if i < dst.len() {
+        dst[i] = src[i] as u32;
     }
 }
 
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_cast_i32_f32(src: &[i32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_cast_i32_f32(src: goldy::gpu::Tensor<i32>, dst: goldy::gpu::TensorWrite<f32>) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = src[si] as f32;
+    if i < dst.len() {
+        dst[i] = src[i] as f32;
     }
 }
 
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_cast_u32_f32(src: &[u32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_cast_u32_f32(src: goldy::gpu::Tensor<u32>, dst: goldy::gpu::TensorWrite<f32>) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = src[si] as f32;
+    if i < dst.len() {
+        dst[i] = src[i] as f32;
     }
 }
 
+/// Reduce `src` along one axis into `dst`, which has `src`'s shape with that axis at one.
+///
+/// `inner` is the element count of the axes after the reduced one, so element `i` of `dst`
+/// reduces `src[(i / inner) * reduce_len * inner + k * inner + i % inner]` for `k` in order.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_reduce_f32(src: &[f32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_reduce_f32(
+    src: goldy::gpu::Tensor<f32>,
+    dst: goldy::gpu::TensorWrite<f32>,
+    op: u32,
+    reduce_len: u32,
+    inner: u32,
+) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
-        let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
+    if i < dst.len() {
+        let outer = i / inner;
+        let base = outer * reduce_len * inner + (i - outer * inner);
         let mut acc = 0.0;
-        if m.op == 22 {
+        if op == 22 {
             acc = -3.402823e38;
-        } else if m.op == 23 {
+        } else if op == 23 {
             acc = 3.402823e38;
         }
         let mut k = 0u32;
-        while k < m.reduce_len {
-            let mut s0 = i0;
-            let mut s1 = i1;
-            let mut s2 = i2;
-            let mut s3 = i3;
-            if m.axis == 0 {
-                s0 = k;
-            } else if m.axis == 1 {
-                s1 = k;
-            } else if m.axis == 2 {
-                s2 = k;
-            } else {
-                s3 = k;
-            }
-            let si = m.a_off + s0 * m.a_s0 + s1 * m.a_s1 + s2 * m.a_s2 + s3 * m.a_s3;
-            let v = src[si];
-            if m.op == 21 || m.op == 24 {
+        while k < reduce_len {
+            let v = src[base + k * inner];
+            if op == 21 || op == 24 {
                 acc = acc + v;
-            } else if m.op == 22 {
+            } else if op == 22 {
                 acc = goldy::gpu::max(acc, v);
-            } else if m.op == 23 {
+            } else if op == 23 {
                 acc = goldy::gpu::min(acc, v);
             }
             k = k + 1;
         }
-        if m.op == 24 {
-            acc = acc / (m.reduce_len as f32);
+        if op == 24 {
+            acc = acc / (reduce_len as f32);
         }
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = acc;
+        dst[i] = acc;
     }
 }
 
+/// `dst[c] = src[c with c[axis] = index[c]]`. `index` has `dst`'s shape.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_gather_f32(src: &[f32], index: &[i32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_gather_f32(
+    src: goldy::gpu::Tensor<f32>,
+    index: goldy::gpu::Tensor<i32>,
+    dst: goldy::gpu::TensorWrite<f32>,
+    axis: u32,
+) {
     let i = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if i < m.o_numel {
+    if i < dst.len() {
         let mut rest = i;
-        let i3 = rest % m.o_d3;
-        rest = rest / m.o_d3;
-        let i2 = rest % m.o_d2;
-        rest = rest / m.o_d2;
-        let i1 = rest % m.o_d1;
-        rest = rest / m.o_d1;
-        let i0 = rest % m.o_d0;
-        let ii = m.b_off + i0 * m.b_s0 + i1 * m.b_s1 + i2 * m.b_s2 + i3 * m.b_s3;
-        let g = index[ii] as u32;
-        let mut s0 = i0;
-        let mut s1 = i1;
-        let mut s2 = i2;
-        let mut s3 = i3;
-        if m.axis == 0 {
-            s0 = g;
-        } else if m.axis == 1 {
-            s1 = g;
-        } else if m.axis == 2 {
-            s2 = g;
+        let mut c3 = rest % dst.dim(3);
+        rest = rest / dst.dim(3);
+        let mut c2 = rest % dst.dim(2);
+        rest = rest / dst.dim(2);
+        let mut c1 = rest % dst.dim(1);
+        let mut c0 = rest / dst.dim(1);
+        let g = index[i] as u32;
+        if axis == 0 {
+            c0 = g;
+        } else if axis == 1 {
+            c1 = g;
+        } else if axis == 2 {
+            c2 = g;
         } else {
-            s3 = g;
+            c3 = g;
         }
-        let si = m.a_off + s0 * m.a_s0 + s1 * m.a_s1 + s2 * m.a_s2 + s3 * m.a_s3;
-        let di = m.o_off + i0 * m.o_s0 + i1 * m.o_s1 + i2 * m.o_s2 + i3 * m.o_s3;
-        dst[di] = src[si];
+        dst[i] = src[((c0 * src.dim(1) + c1) * src.dim(2) + c2) * src.dim(3) + c3];
     }
 }
 
 /// Collision-safe scatter: one thread walks every index so add/min/max are defined.
+///
+/// `dst[c with c[axis] = index[c]] op= src[c]`. `index` has `src`'s shape.
 #[goldy::compute(workgroup_size = [1, 1, 1])]
-fn tensor_scatter_f32(src: &[f32], index: &[i32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_scatter_f32(
+    src: goldy::gpu::Tensor<f32>,
+    index: goldy::gpu::Tensor<i32>,
+    dst: goldy::gpu::TensorMut<f32>,
+    op: u32,
+    axis: u32,
+) {
     let lid = goldy::gpu::global_id().x;
     if lid != 0 {
         return;
     }
-    let m: TensorOpMeta = meta[0];
     let mut i = 0u32;
-    while i < m.a_numel {
+    while i < src.len() {
         let mut rest = i;
-        let i3 = rest % m.a_d3;
-        rest = rest / m.a_d3;
-        let i2 = rest % m.a_d2;
-        rest = rest / m.a_d2;
-        let i1 = rest % m.a_d1;
-        rest = rest / m.a_d1;
-        let i0 = rest % m.a_d0;
-        let si = m.a_off + i0 * m.a_s0 + i1 * m.a_s1 + i2 * m.a_s2 + i3 * m.a_s3;
-        let ii = m.b_off + i0 * m.b_s0 + i1 * m.b_s1 + i2 * m.b_s2 + i3 * m.b_s3;
-        let g = index[ii] as u32;
-        let mut d0 = i0;
-        let mut d1 = i1;
-        let mut d2 = i2;
-        let mut d3 = i3;
-        if m.axis == 0 {
-            d0 = g;
-        } else if m.axis == 1 {
-            d1 = g;
-        } else if m.axis == 2 {
-            d2 = g;
+        let mut c3 = rest % src.dim(3);
+        rest = rest / src.dim(3);
+        let mut c2 = rest % src.dim(2);
+        rest = rest / src.dim(2);
+        let mut c1 = rest % src.dim(1);
+        let mut c0 = rest / src.dim(1);
+        let g = index[i] as u32;
+        if axis == 0 {
+            c0 = g;
+        } else if axis == 1 {
+            c1 = g;
+        } else if axis == 2 {
+            c2 = g;
         } else {
-            d3 = g;
+            c3 = g;
         }
-        let di = m.o_off + d0 * m.o_s0 + d1 * m.o_s1 + d2 * m.o_s2 + d3 * m.o_s3;
-        let sv = src[si];
-        if m.op == 26 {
+        let di = ((c0 * dst.dim(1) + c1) * dst.dim(2) + c2) * dst.dim(3) + c3;
+        let sv = src[i];
+        if op == 26 {
             dst[di] = sv;
-        } else if m.op == 27 {
+        } else if op == 27 {
             dst[di] = dst[di] + sv;
-        } else if m.op == 28 {
+        } else if op == 28 {
             dst[di] = goldy::gpu::min(dst[di], sv);
-        } else if m.op == 29 {
+        } else if op == 29 {
             dst[di] = goldy::gpu::max(dst[di], sv);
         }
         i = i + 1;
     }
 }
 
-/// Packed rank-3 GEMM: `C[b,i,j] = A[b,i,p] @ B[b,p,j]`.
+/// Rank-3 GEMM over any strides: `C[b,i,j] = A[b,i,p] @ B[b,p,j]`.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_batched_matmul_f32(a: &[f32], b: &[f32], dst: goldy::gpu::Scattered<f32>, meta: &[TensorOpMeta]) {
+fn tensor_batched_matmul_f32(
+    #[tensor(shape = [batches, rows, depth])] a: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [batches, depth, cols])] b: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [batches, rows, cols])] dst: goldy::gpu::TensorWrite<f32>,
+) {
     let idx = goldy::gpu::global_id().x;
-    let m: TensorOpMeta = meta[0];
-    if idx < m.o_numel {
-        let n = m.o_d3;
-        let kdim = m.reduce_len;
+    if idx < dst.len() {
+        let n = dst.dim(2);
+        let m = dst.dim(1);
+        let kdim = a.dim(2);
         let i = idx / n;
         let j = idx - i * n;
-        let batch = i / m.o_d2;
-        let row = i - batch * m.o_d2;
+        let batch = i / m;
+        let row = i - batch * m;
         let mut acc = 0.0;
         let mut p = 0u32;
         while p < kdim {
-            let av = a[m.a_off + batch * m.a_s0 + row * m.a_s1 + p * m.a_s2];
-            let bv = b[m.b_off + batch * m.b_s0 + p * m.b_s1 + j * m.b_s2];
+            let av = a[(batch * m + row) * kdim + p];
+            let bv = b[(batch * kdim + p) * n + j];
             acc = acc + av * bv;
             p = p + 1;
         }
-        dst[m.o_off + batch * m.o_s0 + row * m.o_s1 + j * m.o_s2] = acc;
+        dst[idx] = acc;
     }
 }
 

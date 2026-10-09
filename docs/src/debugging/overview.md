@@ -45,6 +45,10 @@ enables backend-specific validation:
 | Metal | Sets `MTL_SHADER_VALIDATION=1` (if not already set) before the first device is created |
 | DX12 | See [DX12 Debug Layer](#dx12-debug-layer) below |
 | WebGPU | wgpu validation error scopes on shader/PSO create (always in debug builds; in release when GPU API validation is on) and on bind-group create (GPU API validation only) |
+| CUDA | PTX JIT logs, launch-limit checks, and a stream sync after every op; that backend skips CUDA graph capture |
+
+The environment variables set the default `goldy::Validation`. `Instance::with_validation`
+chooses the checks for one instance instead, and `Runtime::validation()` reports them.
 
 On Vulkan, `GOLDY_VALIDATION_FATAL=1` treats messenger ERROR records as hard failures (`Err` on later Goldy `Result` calls; panic on backend drop).
 

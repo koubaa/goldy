@@ -17,6 +17,7 @@ mod buffer;
 mod compute;
 mod context;
 mod device;
+mod dispatch_timing;
 mod frame_table;
 mod matmul;
 pub(super) mod metal_capture;
@@ -147,8 +148,15 @@ pub(crate) struct MetalBackend {
 }
 
 impl MetalBackend {
-    /// Create a new Metal backend.
+    /// Create a new Metal backend, validating as [`crate::Validation::from_env`] requests.
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
+        Self::with_validation(crate::Validation::from_env())
+    }
+
+    /// Create a Metal backend with explicit validation. `MTL_SHADER_VALIDATION` is
+    /// process-wide, so only the first backend's `gpu_api` choice reaches Metal itself.
+    pub fn with_validation(validation: crate::Validation) -> Result<Self> {
         let _span = goldy_span!("backend.metal.init").entered();
         tracing::info!("Initializing Metal backend");
 
@@ -160,7 +168,7 @@ impl MetalBackend {
         // first MTLDevice is created. Use a process-wide Once so parallel test
         // threads do not race on `setenv`.
         METAL_VALIDATION_INIT.call_once(|| {
-            if crate::backend::goldy_validation_enabled() && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
+            if validation.gpu_api && std::env::var_os("MTL_SHADER_VALIDATION").is_none() {
                 // SAFETY: called exactly once per process, before `Runtime::all()` below.
                 unsafe { std::env::set_var("MTL_SHADER_VALIDATION", "1") };
                 tracing::info!("Set MTL_SHADER_VALIDATION=1 (GOLDY_VALIDATION api)");
@@ -172,6 +180,19 @@ impl MetalBackend {
                 tracing::info!("Set METAL_CAPTURE_ENABLED=1 (GOLDY_METAL_CAPTURE)");
             }
         });
+        let shader_validation = std::env::var_os("MTL_SHADER_VALIDATION").is_some_and(|v| v != "0");
+        if shader_validation != validation.gpu_api {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    target: "goldy::validation",
+                    "Metal shader validation is {} for the whole process (MTL_SHADER_VALIDATION), \
+                     but this backend requested GPU API validation {}",
+                    if shader_validation { "on" } else { "off" },
+                    if validation.gpu_api { "on" } else { "off" },
+                );
+            });
+        }
 
         let slang_compiler = crate::slang::SlangCompiler::new().context("Failed to create Slang compiler")?;
 
@@ -213,6 +234,7 @@ impl MetalBackend {
                 accels: std::collections::HashMap::new(),
                 next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
+                validation,
             },
         })
     }
@@ -272,11 +294,17 @@ impl crate::backend::GpuBackendTimelineWait for MetalBackend {
             sc.in_flight_command_buffers
                 .iter()
                 .find(|(tv, _)| *tv >= value)
-                .map(|(_, cb)| cb.to_owned())
+                .map(|(_, cb)| MetalCommandBufferBlockingWait {
+                    cb: cb.to_owned(),
+                    event: sc.timeline_event.clone(),
+                    waiter: sc.timeline_waiter.clone(),
+                    value,
+                    estimate_ns: std::sync::Arc::clone(&sc.host_wait_estimate_ns),
+                })
         });
 
-        if let Some(cb) = cb_to_wait {
-            return Ok(Some(Box::new(MetalCommandBufferBlockingWait { cb })));
+        if let Some(wait) = cb_to_wait {
+            return Ok(Some(Box::new(wait)));
         }
 
         let waiter = self
@@ -344,6 +372,10 @@ impl GpuBackend for MetalBackend {
 
     fn backend_type(&self) -> BackendType {
         BackendType::Metal
+    }
+
+    fn validation(&self) -> crate::Validation {
+        self.state.validation
     }
 
     fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
@@ -1094,14 +1126,76 @@ impl crate::backend::GpuBackendSubmitSession for MetalBackend {
     }
 }
 
+/// Wait for `value` on a context whose command buffer `cb` signals it.
+///
+/// `waitUntilCompleted` returns about 100 µs after the GPU finishes on M1, while
+/// `event` is observed signaled about 50 µs after. So when the context's last wait
+/// predicts this one, the waiter blocks on `waiter` (woken by the completion handler,
+/// so an early finish costs no more than `waitUntilCompleted`) until shortly before
+/// the predicted completion, then polls `event` with `wfe`, which idles the core
+/// between event-stream ticks about 1 µs apart. A wait that outlasts its prediction
+/// falls back to `waitUntilCompleted`.
 struct MetalCommandBufferBlockingWait {
     cb: mtl::CommandBuffer,
+    event: mtl::SharedEvent,
+    waiter: types::TimelineWaiter,
+    value: crate::timeline::TimelineValue,
+    estimate_ns: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl MetalCommandBufferBlockingWait {
+    /// Shortest predicted wait worth polling for.
+    const MIN_PREDICTED: std::time::Duration = std::time::Duration::from_micros(200);
+    /// How far ahead of the predicted completion polling starts.
+    const POLL_LEAD: std::time::Duration = std::time::Duration::from_micros(200);
+
+    /// Block, then poll, toward the predicted completion; `false` if not observed.
+    fn poll_predicted(&self, start: std::time::Instant, predicted: std::time::Duration) -> bool {
+        use mtl::MTLCommandBufferStatus;
+        if predicted < Self::MIN_PREDICTED {
+            return false;
+        }
+        let poll_from = predicted.mul_f32(0.9).saturating_sub(Self::POLL_LEAD);
+        let poll_until = predicted + (predicted / 4).max(Self::POLL_LEAD);
+        if !poll_from.is_zero() && self.waiter.wait_until(self.value, poll_from) {
+            return true;
+        }
+        let mut polls = 0u32;
+        while self.event.signaled_value() < self.value {
+            polls = polls.wrapping_add(1);
+            if polls.is_multiple_of(256)
+                && (start.elapsed() >= poll_until || self.cb.status() == MTLCommandBufferStatus::Error)
+            {
+                return false;
+            }
+            wait_for_event();
+        }
+        true
+    }
+}
+
+#[inline]
+fn wait_for_event() {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: `wfe` only suspends the core until the next event or event-stream tick.
+    unsafe {
+        std::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    std::hint::spin_loop();
 }
 
 impl crate::backend::TimelineBlockingWait for MetalCommandBufferBlockingWait {
     fn block(self: Box<Self>) -> Result<()> {
+        use std::sync::atomic::Ordering;
         let _wz = crate::tracy_zone!("mtl.wait_until.waitUntilCompleted");
-        self.cb.wait_until_completed();
+        let start = std::time::Instant::now();
+        let predicted = std::time::Duration::from_nanos(self.estimate_ns.load(Ordering::Relaxed));
+        if !self.poll_predicted(start, predicted) {
+            self.cb.wait_until_completed();
+        }
+        let took = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.estimate_ns.store(took, Ordering::Relaxed);
         Ok(())
     }
 
