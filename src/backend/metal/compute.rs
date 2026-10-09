@@ -2061,7 +2061,11 @@ fn submit_graph_inner(
                 }
             }
             if let Some(device) = state.devices.get(&device_handle) {
-                device.descriptors.lock().unwrap().pin_retained_slots(used_slots.iter().copied());
+                device
+                    .descriptors
+                    .lock()
+                    .unwrap()
+                    .pin_retained_slots(used_slots.iter().copied());
             }
         }
     }

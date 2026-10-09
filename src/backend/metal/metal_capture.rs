@@ -99,9 +99,13 @@ pub fn enabled() -> bool {
 
 static DEBUG_GROUPS: LazyLock<bool> = LazyLock::new(|| {
     enabled()
-        || ["GOLDY_METAL_DEBUG_GROUPS", "METAL_CAPTURE_ENABLED", "MTL_CAPTURE_ENABLED"]
-            .iter()
-            .any(|name| std::env::var_os(name).is_some_and(|v| v != "0"))
+        || [
+            "GOLDY_METAL_DEBUG_GROUPS",
+            "METAL_CAPTURE_ENABLED",
+            "MTL_CAPTURE_ENABLED",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|v| v != "0"))
 });
 
 /// Whether dispatches carry their labels as encoder debug groups. Only a GPU capture
