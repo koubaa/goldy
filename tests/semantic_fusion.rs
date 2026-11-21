@@ -297,6 +297,45 @@ fn a_scale_updated_in_place() {
 }
 
 #[test]
+fn tanh_and_sigmoid_fuse() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let mut values = data(7, 16);
+    values.extend_from_slice(&[
+        0.0,
+        4.0,
+        -4.0,
+        25.0,
+        -25.0,
+        30.0,
+        -30.0,
+        100.0,
+        -100.0,
+        1.0e10,
+        -1.0e10,
+        f32::MAX,
+        f32::MIN,
+    ]);
+    let n = values.len() as u32;
+    let init = [Init::F32(TensorShape::vector(n), values)];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            let y = rec.tanh("tanh", t[0].view())?;
+            let z = rec.sigmoid("sigmoid", y.view())?;
+            let out = rec.mul_scalar("scale", z.view(), 2.0)?;
+            Ok((vec![y, z, out], Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 3);
+    let structure = structure(&scheme);
+    assert!(structure.contains("tanh("), "{structure}");
+    assert!(structure.contains("sigmoid("), "{structure}");
+}
+
+#[test]
 fn products_of_different_rows_side_by_side() {
     let _gpu = gpu_lock();
     let device = runtime();

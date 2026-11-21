@@ -311,7 +311,7 @@ PushLayout lowering.
 
 Allowed: scalar arithmetic/comparisons, `let` / `let mut`, assignment,
 field/index access, `if`/`else`, `while`, `for i in 0..n`, casts, selected math
-intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`cos`/`exp`/`pow`/`length`),
+intrinsics (`abs`/`min`/`max`/`floor`/`ceil`/`sqrt`/`sin`/`cos`/`exp`/`log`/`pow`/`tanh`/`sigmoid`/`length`),
 vector constructors (`gpu::float2`/`float3`/`float4`), buffer `.len()`, tensor
 `.len()` / `.dim(axis)` / `.rank()`, `return`,
 workgroup shared arrays + barriers, workgroup sum/max/softmax collectives, and the ID builtins above.

@@ -174,6 +174,30 @@ The Vulkan backend requires Vulkan 1.4+ and uses:
 - **Descriptor indexing** — bindless resource access by index in shaders
 - **Buffer device address** — 64-bit GPU pointers for direct memory access in shaders
 
+Headless compute does not need a window system. `VK_KHR_surface` and the platform
+surface extension (`VK_KHR_wayland_surface` on Linux, `VK_KHR_win32_surface` on
+Windows, `VK_KHR_android_surface` on Android) are enabled only when the loader
+advertises both. `VK_KHR_swapchain`, `fragmentStoresAndAtomics`,
+`shaderDrawParameters`, `shaderFloat16`, `shaderInt8`, `shaderInt16`, and
+`shaderInt64` are enabled only when the device supports them. Devices that have
+those features still enable them. Shaders that need a missing feature fail when
+the pipeline is created, not when the device is.
+
+A graphics queue is still required. The device command pool, the device-owner
+timeline, and presentation are created on a queue family with
+`VK_QUEUE_GRAPHICS_BIT`. Compute dispatches can use a separate compute family
+when one exists, but device creation fails with "No graphics queue family found"
+on a compute-only ICD. Supporting that ICD would mean:
+
+- selecting a compute family when no graphics family exists
+- recording every submission with the existing `on_graphics_queue = false` barrier
+  path, which already omits fragment and color stages
+- creating the device command pool and device-owner timeline on that compute family
+- returning a clear error from present and from any render submission
+
+Descriptor indexing, synchronization2, timeline semaphores, and pipeline
+robustness stay required, because compute shaders use them.
+
 ### DX12 Backend
 
 The DX12 backend uses the `windows` crate and provides:

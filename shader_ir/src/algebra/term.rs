@@ -29,6 +29,11 @@ pub enum UnaryOp {
     Recip,
     Sin,
     Cos,
+    /// Numerically stable hyperbolic tangent. Large `|x|` saturates to ±1.
+    Tanh,
+    /// Numerically stable logistic sigmoid. Large positive `x` saturates to 1
+    /// and large negative `x` to 0.
+    Sigmoid,
     /// The argument's value, rounded to f32 on its own: a product here does not
     /// contract with the operation that reads it, as when it was stored between them,
     /// and a quotient stays a division, as when its divisor was only known at run time.
@@ -264,6 +269,14 @@ impl Term {
 
     pub fn cos(self) -> Term {
         Term::unary(UnaryOp::Cos, self)
+    }
+
+    pub fn tanh(self) -> Term {
+        Term::unary(UnaryOp::Tanh, self)
+    }
+
+    pub fn sigmoid(self) -> Term {
+        Term::unary(UnaryOp::Sigmoid, self)
     }
 
     /// Index variables mentioned outside any reduction that binds them.

@@ -162,7 +162,15 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     let physical_device_handle = physical_device.handle;
 
-    // Find a graphics queue family
+    // Find a graphics queue family.
+    //
+    // Compute dispatches can run on a dedicated compute family, but the device
+    // command pool, the device-owner timeline, and presentation are created on a
+    // graphics family. A compute-only ICD (no `VK_QUEUE_GRAPHICS_BIT`) still fails
+    // here. Dropping that requirement means selecting a compute family instead,
+    // forcing every submission onto the existing `on_graphics_queue = false`
+    // barrier path, and refusing present and render. See
+    // `docs/src/backends/overview.md`.
     let queue_families = unsafe {
         state
             .instance
@@ -177,12 +185,38 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .context("No graphics queue family found")?;
 
     let pdev_features = unsafe { state.instance.get_physical_device_features(physical_device_handle) };
-    let require_core = |bit: vk::Bool32, name: &'static str| -> Result<vk::Bool32> {
+    let enable_if_present = |bit: vk::Bool32, name: &'static str| -> vk::Bool32 {
         if bit == vk::FALSE {
-            anyhow::bail!("required Vulkan feature {name} is not available on this device");
+            tracing::warn!(
+                "{name} is not available; shaders that need it fail at pipeline creation rather than device creation"
+            );
+            vk::FALSE
+        } else {
+            vk::TRUE
         }
-        Ok(vk::TRUE)
     };
+    let mut supported_11 = vk::PhysicalDeviceVulkan11Features::default();
+    let mut supported_12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut supported_features2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut supported_11)
+        .push_next(&mut supported_12);
+    unsafe {
+        state
+            .instance
+            .get_physical_device_features2(physical_device_handle, &mut supported_features2);
+    }
+    let shader_float16 = supported_12.shader_float16 == vk::TRUE;
+    let shader_int8 = supported_12.shader_int8 == vk::TRUE;
+    let shader_draw_parameters = supported_11.shader_draw_parameters == vk::TRUE;
+    if !shader_float16 {
+        tracing::warn!("shaderFloat16 is not available; half-precision shaders fail at pipeline creation");
+    }
+    if !shader_int8 {
+        tracing::warn!("shaderInt8 is not available; 8-bit integer shaders fail at pipeline creation");
+    }
+    if !shader_draw_parameters {
+        tracing::warn!("shaderDrawParameters is not available; vertex SV_InstanceID is unavailable");
+    }
     let supports_sparse = physical_device.supports_sparse_buffer;
     debug_assert_eq!(
         supports_sparse,
@@ -262,10 +296,9 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
         .shader_storage_buffer_array_non_uniform_indexing(true)
         .shader_sampled_image_array_non_uniform_indexing(true)
         .shader_uniform_buffer_array_non_uniform_indexing(true)
-        // Required for SPIR-V Float16 capability used by compute shaders.
-        .shader_float16(true)
-        // Required for SPIR-V Int8 capability (enabled alongside float16 in Vulkan 1.2).
-        .shader_int8(true);
+        // Enabled when the device has them. Half and 8-bit shaders fail later if not.
+        .shader_float16(shader_float16)
+        .shader_int8(shader_int8);
 
     let enable_ray_query = physical_device.ray_query;
     let enable_rtp = physical_device.ray_tracing_pipelines;
@@ -278,7 +311,8 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
 
     // Vulkan 1.1 features: shaderDrawParameters is needed for SV_InstanceID
     // (SPIR-V DrawParameters capability) in vertex shaders.
-    let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+    let mut vulkan_11_features =
+        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(shader_draw_parameters);
 
     // Vulkan 1.3 features: mandatory in 1.4, but must still be enabled.
     let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
@@ -314,12 +348,12 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     };
     let core_features = vk::PhysicalDeviceFeatures {
         vertex_pipeline_stores_and_atomics: vertex_pipeline_stores,
-        fragment_stores_and_atomics: require_core(
+        fragment_stores_and_atomics: enable_if_present(
             pdev_features.fragment_stores_and_atomics,
             "fragmentStoresAndAtomics",
-        )?,
-        shader_int16: require_core(pdev_features.shader_int16, "shaderInt16")?,
-        shader_int64: require_core(pdev_features.shader_int64, "shaderInt64")?,
+        ),
+        shader_int16: enable_if_present(pdev_features.shader_int16, "shaderInt16"),
+        shader_int64: enable_if_present(pdev_features.shader_int64, "shaderInt64"),
         sparse_binding: if supports_sparse { vk::TRUE } else { vk::FALSE },
         sparse_residency_buffer: if supports_sparse { vk::TRUE } else { vk::FALSE },
         ..Default::default()
@@ -405,13 +439,17 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
                 .queue_priorities(&queue_priority_storage[idx])
         })
         .collect();
-    // Extensions: swapchain for presentation, plus 1.4-promoted extensions whose KHR
-    // variants must still be requested, plus optional compute-derivatives support.
-    let mut device_extensions = vec![
-        khr::swapchain::NAME.as_ptr(),
-        khr::map_memory2::NAME.as_ptr(),
-        ext::pipeline_robustness::NAME.as_ptr(),
-    ];
+    // Extensions: swapchain for presentation when the device has it, plus
+    // 1.4-promoted extensions whose KHR variants must still be requested, plus
+    // optional compute-derivatives support.
+    let mut device_extensions = Vec::new();
+    if available_device_exts.contains("VK_KHR_swapchain") {
+        device_extensions.push(khr::swapchain::NAME.as_ptr());
+    } else {
+        tracing::warn!("VK_KHR_swapchain is not available; presentation is disabled");
+    }
+    device_extensions.push(khr::map_memory2::NAME.as_ptr());
+    device_extensions.push(ext::pipeline_robustness::NAME.as_ptr());
     if supports_compute_derivative_quads && has_khr_compute_derivatives {
         device_extensions.push(KHR_COMPUTE_DERIVATIVES.as_ptr());
     }

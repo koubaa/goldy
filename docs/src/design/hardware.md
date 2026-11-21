@@ -16,6 +16,15 @@ Goldy requires Vulkan 1.4, which promotes several extensions that were optional 
 | Synchronization2 | `VK_KHR_synchronization2` (1.3) | Simplified barrier model |
 | Push descriptors | Core in 1.4 | Efficient uniform updates |
 
+Surface extensions and graphics-only feature bits are requested only when the
+device advertises them, so a headless loader without `VK_KHR_wayland_surface`
+(or without `fragmentStoresAndAtomics` / `shaderDrawParameters`) can still
+create a device. `shaderFloat16`, `shaderInt8`, `shaderInt16`, and `shaderInt64`
+are the same: enabled when present, and absent they fail the pipeline that needs
+them rather than `vkCreateDevice`. Device creation still requires a graphics
+queue family. A compute-only ICD fails before any kernel runs; what that change
+would take is described in [Backend Architecture](../backends/overview.md).
+
 **Supported hardware:**
 
 - NVIDIA: Turing and later (RTX 2000 / GTX 1600 series, 2018+)

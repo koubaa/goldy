@@ -53,6 +53,41 @@ public float goldy_exact_mul(float a, float b) {
     }
 }
 
+/// Logistic sigmoid, stable for large |x|.
+///
+/// The non-negative branch evaluates `exp(-x)` and the negative branch `exp(x)`,
+/// so `exp` never sees a large positive argument. Large positive inputs saturate
+/// to 1 and large negative inputs to 0, including infinities.
+public float goldy_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float e = exp(x);
+    return e / (1.0 + e);
+}
+
+/// Hyperbolic tangent, stable for large |x|.
+///
+/// `tanh(x) = sign(x) * (1 - exp(-2|x|)) / (1 + exp(-2|x|))`. In f32, `|x| >= 10`
+/// is already ±1 (as are the softcaps at 25 and 30), so those inputs return ±1
+/// without calling `exp`. A huge finite value therefore cannot overflow the
+/// exponent into a NaN.
+public float goldy_tanh(float x) {
+    float a = abs(x);
+    if (a >= 10.0) {
+        if (x < 0.0) {
+            return -1.0;
+        }
+        return 1.0;
+    }
+    float e = exp(-2.0 * a);
+    float t = (1.0 - e) / (1.0 + e);
+    if (x < 0.0) {
+        return -t;
+    }
+    return t;
+}
+
 /// `a / b` rounded to float on its own: the device must not rewrite it, as into a
 /// multiply by the reciprocal of a constant divisor.
 public float goldy_exact_div(float a, float b) {

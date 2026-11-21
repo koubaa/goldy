@@ -7,7 +7,8 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN,
-    OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
+    OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SIGMOID, OP_SQRT, OP_SUB,
+    OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::view::TensorView;
 use crate::semantic_fusion::{SemanticSite, SiteBuilder, SiteParcel};
@@ -71,6 +72,8 @@ pub(crate) fn unary(op: u32, src: TensorView<'_>, dst: TensorView<'_>) -> Option
         OP_LOG => UnaryOp::Log,
         OP_SQRT => UnaryOp::Sqrt,
         OP_RECIP => UnaryOp::Recip,
+        OP_TANH => UnaryOp::Tanh,
+        OP_SIGMOID => UnaryOp::Sigmoid,
         _ => return None,
     };
     elementwise(&[src], dst, false, |_| Some(Term::unary(op, Term::arg(0))))

@@ -249,6 +249,8 @@ impl Eval<'_> {
                     UnaryOp::Recip => 1.0 / x,
                     UnaryOp::Sin => x.sin(),
                     UnaryOp::Cos => x.cos(),
+                    UnaryOp::Tanh => stable_tanh(x),
+                    UnaryOp::Sigmoid => stable_sigmoid(x),
                     UnaryOp::Round => x,
                 }
             }
@@ -328,5 +330,30 @@ impl Eval<'_> {
                 }
             }
         })
+    }
+}
+
+/// Same saturation rule as `goldy_tanh`: `|x| >= 10` is ±1 in f32.
+fn stable_tanh(x: f32) -> f32 {
+    let a = x.abs();
+    if a >= 10.0 {
+        return if x < 0.0 { -1.0 } else { 1.0 };
+    }
+    let e = (-2.0 * a).exp();
+    let t = (1.0 - e) / (1.0 + e);
+    if x < 0.0 {
+        -t
+    } else {
+        t
+    }
+}
+
+/// Same split as `goldy_sigmoid`: `exp` is only evaluated on a non-positive argument.
+fn stable_sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
     }
 }

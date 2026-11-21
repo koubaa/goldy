@@ -360,6 +360,8 @@ fn builtin_fn(func: BuiltinFn) -> TokenStream {
         BuiltinFn::Exp => quote! { Exp },
         BuiltinFn::Log => quote! { Log },
         BuiltinFn::Pow => quote! { Pow },
+        BuiltinFn::Tanh => quote! { Tanh },
+        BuiltinFn::Sigmoid => quote! { Sigmoid },
         BuiltinFn::Length => quote! { Length },
         BuiltinFn::Float2 => quote! { Float2 },
         BuiltinFn::Float3 => quote! { Float3 },

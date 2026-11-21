@@ -2905,6 +2905,25 @@ mod uniform_entry_point_param_binding_tests {
         manifest_dir.join("shaders").to_string_lossy().into_owned()
     }
 
+    /// `OpCapability` operands. Float16 is 9, Int64 is 11, Int16 is 22, Int8 is 39.
+    fn spirv_capabilities(words: &[u32]) -> Vec<u32> {
+        let mut caps = Vec::new();
+        let mut i = 5;
+        while i < words.len() {
+            let word = words[i];
+            let opcode = word & 0xffff;
+            let count = (word >> 16) as usize;
+            if count == 0 || i + count > words.len() {
+                break;
+            }
+            if opcode == 17 && count >= 2 {
+                caps.push(words[i + 1]);
+            }
+            i += count;
+        }
+        caps
+    }
+
     #[test]
     fn pretransformed_source_matches_default_spirv_compile() {
         let compiler = SlangCompiler::new().expect("Slang unavailable");
@@ -2963,11 +2982,51 @@ mod uniform_entry_point_param_binding_tests {
         let words = output.shader.as_spirv().expect("should be valid SPIR-V");
         assert_eq!(words[0], 0x07230203, "SPIR-V magic number mismatch");
 
+        // A plain integer compute shader must not drag in half or 64-bit integer
+        // capabilities. Device creation enables those features only when the
+        // device has them; this kernel has to load without them.
+        let caps = spirv_capabilities(words);
+        assert!(
+            !caps.contains(&9) && !caps.contains(&11) && !caps.contains(&22),
+            "integer copy shader requested Float16/Int64/Int16 capabilities {caps:?}"
+        );
+
         // StorageClass::PushConstant == 9. This value should appear as a word in
         // the SPIR-V binary when uniform entry-point params are mapped to resource slots.
         assert!(
             words.contains(&9),
             "Expected PushConstant storage class (9) in SPIR-V for uniform params"
+        );
+    }
+
+    #[test]
+    fn tanh_sigmoid_spirv_stays_f32() {
+        let compiler = SlangCompiler::new().expect("Slang unavailable");
+        let path = shader_path();
+        let source = r#"
+            import goldy_exp;
+            [goldy_compute]
+            [numthreads(64, 1, 1)]
+            void cs_main(BufRO<float> src, Scattered<float> dst, ThreadId id) {
+                dst[id.x] = goldy_tanh(src[id.x]) + goldy_sigmoid(src[id.x]);
+            }
+        "#;
+        let output = compiler
+            .compile_bindless_with_reflection_and_defines(
+                source,
+                ShaderTarget::Spirv,
+                &[("cs_main", SlangStage::Compute)],
+                &[&path],
+                &[],
+                &[],
+                OptimizationLevel::None,
+            )
+            .expect("tanh/sigmoid SPIR-V");
+        let words = output.shader.as_spirv().expect("spirv");
+        let caps = spirv_capabilities(words);
+        assert!(
+            !caps.contains(&9) && !caps.contains(&11) && !caps.contains(&22) && !caps.contains(&39),
+            "tanh/sigmoid shader requested Float16/Int64/Int16/Int8 capabilities {caps:?}"
         );
     }
 

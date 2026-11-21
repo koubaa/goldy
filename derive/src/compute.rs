@@ -1365,6 +1365,8 @@ fn lower_call(
             ["exp"] | ["gpu", "exp"] | ["goldy", "gpu", "exp"] => BuiltinFn::Exp,
             ["log"] | ["gpu", "log"] | ["goldy", "gpu", "log"] => BuiltinFn::Log,
             ["pow"] | ["gpu", "pow"] | ["goldy", "gpu", "pow"] => BuiltinFn::Pow,
+            ["tanh"] | ["gpu", "tanh"] | ["goldy", "gpu", "tanh"] => BuiltinFn::Tanh,
+            ["sigmoid"] | ["gpu", "sigmoid"] | ["goldy", "gpu", "sigmoid"] => BuiltinFn::Sigmoid,
             ["workgroup_barrier"] | ["gpu", "workgroup_barrier"] | ["goldy", "gpu", "workgroup_barrier"] => {
                 BuiltinFn::WorkgroupBarrier
             }
@@ -1546,6 +1548,8 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
                 | BuiltinFn::Exp
                 | BuiltinFn::Log
                 | BuiltinFn::Pow
+                | BuiltinFn::Tanh
+                | BuiltinFn::Sigmoid
                 | BuiltinFn::Length
                 | BuiltinFn::Abs
                 | BuiltinFn::Min

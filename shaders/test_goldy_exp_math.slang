@@ -73,4 +73,10 @@ void cs_main(Scattered<float> OUT, ThreadId id) {
     OUT[22] = hsv.r;
 
     OUT[23] = luminance(float3(1.0, 0.0, 0.0));
+
+    // Stable activations, including magnitudes past the f32 exp overflow.
+    OUT[24] = goldy_tanh(0.5);
+    OUT[25] = goldy_tanh(-30.0);
+    OUT[26] = goldy_sigmoid(-40.0);
+    OUT[27] = goldy_sigmoid(1.0e10);
 }

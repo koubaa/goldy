@@ -294,6 +294,21 @@ pub mod gpu {
         unimplemented!("gpu::pow is only valid inside #[goldy::compute] bodies")
     }
 
+    /// Numerically stable hyperbolic tangent.
+    ///
+    /// `|x| >= 10` saturates to ±1, so a softcap at 25 or 30 cannot overflow `exp`.
+    pub fn tanh(_x: f32) -> f32 {
+        unimplemented!("gpu::tanh is only valid inside #[goldy::compute] bodies")
+    }
+
+    /// Numerically stable logistic sigmoid, `1 / (1 + exp(-x))`.
+    ///
+    /// Large positive inputs saturate to 1 and large negative inputs to 0.
+    /// `exp` is only evaluated on a non-positive argument.
+    pub fn sigmoid(_x: f32) -> f32 {
+        unimplemented!("gpu::sigmoid is only valid inside #[goldy::compute] bodies")
+    }
+
     pub fn sqrt(_x: f32) -> f32 {
         unimplemented!("gpu::sqrt is only valid inside #[goldy::compute] bodies")
     }
