@@ -37,8 +37,17 @@ pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 /// (longpathdash peaks at ~269), and an unfused 12-layer transformer decode step
 /// needs ~700; keep shader and Rust constants in sync.
 pub const FRAME_TABLE_ROW_STRIDE: u32 = 4096;
-/// Pipeline depth — number of row-groups in the staging/table buffers.
-pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
+/// In-flight rows for submissions that are not retained. The ring wraps; a
+/// later submit waits until the GPU has finished with the row it is about to
+/// overwrite.
+pub const FRAME_TABLE_TRANSIENT_ROWS: u32 = 8;
+/// Rows owned by retained command buffers. A retained buffer's bindings do not
+/// change, so its prologue keeps reading the same row and must not share the
+/// transient ring (that ring is only 8 deep, and pinning a ring row evicted the
+/// buffer on the next wrap).
+pub const FRAME_TABLE_PERSISTENT_ROWS: u32 = 512;
+/// Transient ring followed by the persistent retained-buffer rows.
+pub const FRAME_TABLE_MAX_ROWS: u32 = FRAME_TABLE_TRANSIENT_ROWS + FRAME_TABLE_PERSISTENT_ROWS;
 
 /// Total `u32` elements in staging and device-local table buffers.
 pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;

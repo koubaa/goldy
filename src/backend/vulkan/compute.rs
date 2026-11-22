@@ -1046,6 +1046,7 @@ pub(super) fn submit_with_scope(
                             on_graphics_queue: false,
                         },
                         data,
+                        false,
                     )?;
                     row_guard.set(row);
                 }
@@ -2130,6 +2131,7 @@ pub(super) fn submit_graph_with_scope(
                             on_graphics_queue: route_device,
                         },
                         data,
+                        retain_key.is_some(),
                     )?;
                     frame_table_row = Some(row);
                     row_guard.set(row);
@@ -2807,6 +2809,7 @@ pub(super) fn submit_graph_with_scope(
                             logical_device,
                             cmd,
                             &sync_data,
+                            frame_table_row.expect("frame-table prologue row"),
                             route_device,
                         )?;
                     } else {
@@ -2821,6 +2824,7 @@ pub(super) fn submit_graph_with_scope(
                                 on_graphics_queue: route_device,
                             },
                             &staging_data,
+                            retain_key.is_some(),
                         )?;
                         frame_table_row = Some(row);
                         row_guard.set(row);

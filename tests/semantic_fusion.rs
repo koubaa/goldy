@@ -761,3 +761,52 @@ fn contraction_with_a_generated_epilogue() {
     assert_one_semantic_region(twin.fused(), 2);
     assert_eq!(twin.fused().replay_stats().fusion_fallbacks, fallbacks + 1);
 }
+
+/// Turning fusion off after a plan has promoted must re-record, not resubmit a
+/// command buffer whose elided temporaries were just released.
+#[test]
+fn turning_fusion_off_after_promotion_resubmits() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let mut scheme = Scheme::new(&ctx);
+    scheme.set_automatic_fusion(true);
+    let n = 64u32;
+    let shape = TensorShape::vector(n);
+    let left = data(1, n);
+    let right = data(2, n);
+    let a = Tensor::from_f32(&device, shape, &left).unwrap();
+    let b = Tensor::from_f32(&device, shape, &right).unwrap();
+    let out = Tensor::zeros(&device, shape, goldy::TensorDType::F32).unwrap();
+    let scaled = {
+        let mut rec = kernels.recorder(&mut scheme);
+        let scaled = rec.mul("mul", a.view(), b.view()).unwrap();
+        rec.add_into("add", scaled.view(), a.view(), out.view()).unwrap();
+        scaled
+    };
+    let _keep = scaled;
+    let mut promoted = false;
+    for _ in 0..24 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+        promoted = scheme
+            .fusion_report()
+            .regions
+            .iter()
+            .any(|region| region.status == FusionRegionStatus::Promoted);
+        if promoted {
+            break;
+        }
+    }
+    assert!(promoted, "fusion did not promote");
+    scheme.set_automatic_fusion(false);
+    let mut sub = scheme.submit().expect("submit after fusion off");
+    let got = (&mut sub >> out.buffer()).take::<f32>().expect("take").to_vec();
+    drop(sub);
+    for (i, (got, (x, y))) in got.iter().zip(left.iter().zip(&right)).enumerate() {
+        let want = x * y + x;
+        assert!((got - want).abs() < 1e-4, "index {i}: {got} != {want}");
+    }
+    assert!(scheme.replay_stats().fusion_fallbacks >= 1);
+}

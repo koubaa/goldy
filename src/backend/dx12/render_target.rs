@@ -225,6 +225,8 @@ pub(super) fn record_render_pass_to_list_with_record(
     commands: &[RenderCommand],
     cmd_list: &ID3D12GraphicsCommandList7,
     frame_table_prologue_already_recorded: bool,
+    persistent: bool,
+    existing_row: Option<u32>,
 ) -> Result<(bool, Option<u32>)> {
     let logical_device = record.devices.get(&device_handle).context("Invalid device handle")?;
 
@@ -342,7 +344,13 @@ pub(super) fn record_render_pass_to_list_with_record(
     let mut prologue_row = None;
     if has_bindings {
         if frame_table_prologue_already_recorded {
-            super::frame_table::sync_table_row_to_device(record, device_handle, cmd_list, &staging_data)?;
+            super::frame_table::sync_table_row_to_device(
+                record,
+                device_handle,
+                cmd_list,
+                &staging_data,
+                existing_row.expect("frame-table prologue row"),
+            )?;
         } else if let Some(ctx) = recording_ctx {
             prologue_row = Some(super::frame_table::record_prologue(
                 record.contexts,
@@ -352,6 +360,7 @@ pub(super) fn record_render_pass_to_list_with_record(
                 &record.buffers.read().unwrap().entries,
                 cmd_list,
                 &staging_data,
+                persistent,
             )?);
         } else {
             prologue_row = Some(super::frame_table::record_prologue_legacy(
@@ -402,6 +411,8 @@ pub(super) fn record_render_pass_to_list(
         commands,
         cmd_list,
         frame_table_prologue_already_recorded,
+        false,
+        None,
     )
 }
 

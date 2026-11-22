@@ -674,6 +674,10 @@ pub struct ReplayStats {
     pub fusion_fallbacks: u64,
     /// Fused programs that failed to compile or bind; their regions run unfused.
     pub fusion_compile_failures: u64,
+    /// Retained command buffers dropped because a new submission needed their
+    /// frame-table row. Steady state on Vulkan and DX12 is zero: retained
+    /// buffers keep a row outside the transient ring.
+    pub retained_evictions: u64,
 }
 
 /// How much of a retained scheme the next [`Scheme::submit`] must rebuild.
@@ -930,6 +934,8 @@ pub struct Scheme {
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     stats: ReplayStats,
+    /// Last context-wide retained-eviction total folded into [`Self::stats`].
+    eviction_seen: u64,
     /// Process-unique identity for cross-scheme [`Submission`] pairing.
     scheme_id: u64,
     /// Record-time diagnostics flushed on [`Self::submit`].
@@ -990,6 +996,7 @@ impl Scheme {
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
+            eviction_seen: 0,
             specialization: crate::specialization::SchemePredictor::new(),
             fusion: crate::fusion_plan::FusionPlanner::new(),
             automatic_fusion: None,
@@ -2563,6 +2570,10 @@ impl Scheme {
         self.realize_matmul_nodes()?;
         self.step_fusion();
         if self.dirty == SchemeDirty::Structure {
+            // A demoted fusion plan frees temporaries the previous retained
+            // command buffer still reads. Wait for that buffer before releasing
+            // them; lavapipe faults if the queue thread touches a freed binding.
+            self.wait_for_retained_retirement();
             self.lower_temporaries()?;
         }
 
@@ -2616,6 +2627,19 @@ impl Scheme {
             deposit_resolutions: HashMap::new(),
             deposit_claims: HashMap::new(),
         })
+    }
+
+    /// Block until the previous retained command buffers have retired.
+    fn wait_for_retained_retirement(&self) {
+        if !self.ctx.waits_for_retained_storage() {
+            return;
+        }
+        let Some(tv) = self.submit_state.partition_last_tvs().iter().flatten().copied().max() else {
+            return;
+        };
+        if self.ctx.gpu_progress() < tv {
+            let _ = self.ctx.wait_until(tv);
+        }
     }
 
     /// Place the executed IR's temporaries on pool storage and track what it binds.
@@ -2773,6 +2797,10 @@ impl Scheme {
                 self.stats.resubmit_hits += 1;
             }
         }
+        let now = self.ctx.retained_evictions();
+        let delta = now.saturating_sub(self.eviction_seen);
+        self.eviction_seen = now;
+        self.stats.retained_evictions += delta;
 
         if structurally_dirty || topo_dirty || params_dirty {
             tracing::debug!(
