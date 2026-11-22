@@ -525,6 +525,7 @@ pub(super) fn begin_compute_encoder<'a>(
     logical_device: &super::types::LogicalDevice,
     device_handle: DeviceHandle,
 ) -> &'a mtl::ComputeCommandEncoderRef {
+    super::frame_table::stage_bindless_uploads(logical_device, command_buffer);
     let encoder = match pass {
         Some(pass) => command_buffer.compute_command_encoder_with_descriptor(pass),
         None => command_buffer.new_compute_command_encoder(),
@@ -591,7 +592,7 @@ pub(super) fn begin_compute_encoder<'a>(
         encoder.use_resources(&[tbl_res], mtl::MTLResourceUsage::Read);
     }
 
-    encoder.set_buffer(0, Some(&logical_device.argument_buffer), 0);
+    encoder.set_buffer(0, Some(logical_device.gpu_argument_buffer()), 0);
     encoder
 }
 
@@ -821,7 +822,7 @@ pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
                 if gpu_idle
                     && !has_recorded_gpu_work
                     && submission_has_gpu_encoder_work(commands)
-                    && !buf_state.flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                    && buf_state.placement.host_mapped()
                     && data.len() <= SMALL_WRITE_THRESHOLD
                 {
                     let ptr = buf_state.buffer.contents();
@@ -1492,16 +1493,16 @@ fn stage_uploads<C: Borrow<GpuCommand>>(
                 }
                 // Extract only what we need so the borrow of state.buffers ends
                 // before we mutably borrow state.devices below.
-                let (buf_flags, contents_null) = state
+                let (host_mapped, contents_null) = state
                     .buffers
                     .get(buf_handle)
-                    .map(|b| (b.flags, b.buffer.contents().is_null()))
-                    .unwrap_or((crate::types::BufferFlags::empty(), true));
+                    .map(|b| (b.placement.host_mapped(), b.buffer.contents().is_null()))
+                    .unwrap_or((false, true));
 
                 let fast_path = gpu_idle
                     && !would_have_gpu_work
                     && submission_has_gpu_encoder_work(commands)
-                    && !buf_flags.contains(crate::types::BufferFlags::GPU_ONLY)
+                    && host_mapped
                     && data.len() <= SMALL_WRITE_THRESHOLD
                     && !contents_null;
 
@@ -2150,6 +2151,7 @@ fn record_render_pass_to_buffer(
     if is_mesh {
         eprintln!("[goldy-mesh] record_render_pass_to_buffer is_mesh=true");
     }
+    super::frame_table::stage_bindless_uploads(logical_device, command_buffer);
     let encoder = if is_mesh {
         super::objc_catch::catch_objc("new_render_command_encoder(mesh)", || {
             command_buffer.new_render_command_encoder(render_pass)
@@ -2157,7 +2159,14 @@ fn record_render_pass_to_buffer(
     } else {
         command_buffer.new_render_command_encoder(render_pass)
     };
-    super::render_commands::declare_pass_resources(encoder, logical_device, &state.buffers, device_handle, is_mesh)?;
+    super::render_commands::declare_pass_resources(
+        encoder,
+        logical_device,
+        &state.buffers,
+        &state.textures,
+        device_handle,
+        is_mesh,
+    )?;
 
     encoder.set_viewport(mtl::MTLViewport {
         originX: 0.0,

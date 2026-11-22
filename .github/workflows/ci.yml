@@ -170,6 +170,9 @@ jobs:
   test-metal:
     name: Metal Tests (macOS)
     runs-on: macos-15
+    env:
+      MTL_DEBUG_LAYER: "1"
+      MTL_SHADER_VALIDATION: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -246,6 +249,30 @@ jobs:
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test -p goldy-ffi
+
+      # Private heaps and Private textures are legal on Apple silicon, so the
+      # same runner exercises the non-Apple placement. A Shared heap or texture
+      # in this mode panics.
+      - name: Run all tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
+        run: cargo test
+
+      - name: Run integration tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
+        run: cargo test --test '*'
+
+      - name: Run goldy-ffi integration tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
         run: cargo test -p goldy-ffi
 
   # Intel macOS (paravirtual GPU). The probe records whether Shared / Managed /
@@ -372,7 +399,6 @@ jobs:
           fi
 
       - name: Download Slang compiler
-        if: env.METAL_GPU_TESTS == '1'
         run: |
           cd slang
           chmod +x download.sh
@@ -403,6 +429,12 @@ jobs:
 
       - name: Storage-mode unit tests
         run: cargo test --lib metal_storage
+
+      - name: Runtime creation returns an error below the floor
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --lib creating_device_does_not_abort_when_below_floor -- --nocapture
 
       - name: Run Metal device, compute, and offscreen render
         if: env.METAL_GPU_TESTS == '1'

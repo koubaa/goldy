@@ -153,6 +153,14 @@ pub(super) fn create(
     // CPU uploads are blit copies from Shared staging buffers either way.
     let storage_mode = {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+        crate::backend::metal_storage::debug_refuse_shared_resource(
+            logical_device.memory.discrete,
+            matches!(
+                logical_device.memory.texture,
+                crate::backend::metal_storage::TextureStorage::Shared
+            ) && logical_device.memory.discrete,
+            "texture",
+        );
         super::device::texture_mtl_storage(logical_device.memory.texture)
     };
     descriptor.set_storage_mode(storage_mode);

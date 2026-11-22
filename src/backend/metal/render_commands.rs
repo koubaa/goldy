@@ -4,7 +4,7 @@
 
 use super::super::shared;
 use super::super::{BufferHandle, DeviceHandle, PipelineHandle, RenderCommand};
-use super::types::{LogicalDevice, PipelineState, PushLayout, RESOURCE_SLOT_BUFFER};
+use super::types::{LogicalDevice, PipelineState, PushLayout, TextureState, RESOURCE_SLOT_BUFFER};
 use super::utils::index_format_to_mtl;
 use crate::types::IndexFormat;
 use ::metal as mtl;
@@ -83,6 +83,7 @@ pub(super) fn declare_pass_resources(
     encoder: &mtl::RenderCommandEncoderRef,
     logical_device: &LogicalDevice,
     buffers: &HashMap<BufferHandle, super::types::BufferState>,
+    textures: &HashMap<super::super::TextureHandle, TextureState>,
     device_handle: DeviceHandle,
     is_mesh: bool,
 ) -> Result<()> {
@@ -111,6 +112,7 @@ pub(super) fn declare_pass_resources(
                     );
                 }
             }
+            declare_render_textures(encoder, textures, device_handle, render_stages);
             encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
         })?;
     } else {
@@ -133,13 +135,33 @@ pub(super) fn declare_pass_resources(
                 );
             }
         }
+        declare_render_textures(encoder, textures, device_handle, render_stages);
         {
             let ft = logical_device.frame_table.lock().unwrap();
             encoder.use_resource_at(ft.table_buffer(), mtl::MTLResourceUsage::Read, render_stages);
         }
     }
-    bind_goldy_argument_buffer(encoder, &logical_device.argument_buffer, is_mesh)?;
+    bind_goldy_argument_buffer(encoder, logical_device.gpu_argument_buffer(), is_mesh)?;
     Ok(())
+}
+
+fn declare_render_textures(
+    encoder: &mtl::RenderCommandEncoderRef,
+    textures: &HashMap<super::super::TextureHandle, TextureState>,
+    device_handle: DeviceHandle,
+    render_stages: mtl::MTLRenderStages,
+) {
+    for tex_state in textures.values() {
+        if tex_state.device_handle != device_handle {
+            continue;
+        }
+        let usage = if tex_state.is_storage_image {
+            mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write
+        } else {
+            mtl::MTLResourceUsage::Read
+        };
+        encoder.use_resource_at(&tex_state.texture, usage, render_stages);
+    }
 }
 
 /// Record render commands into a Metal render command encoder.

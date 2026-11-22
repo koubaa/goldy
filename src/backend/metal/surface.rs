@@ -93,12 +93,17 @@ pub(super) fn create(
     let (layer, width, height) = unsafe {
         let layer: id = msg_send![class!(CAMetalLayer), layer];
         let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
-        // Use RGBA8Unorm instead of BGRA8Unorm: on Apple Silicon, BGRA8Unorm
-        // does not support storage-class access (compute shader UAV writes),
-        // so writing to a BGRA swapchain drawable from a compute pass causes a
-        // GPU address fault (kIOGPUCommandBufferCallbackErrorPageFault).
-        // RGBA8Unorm supports both display and compute storage access.
-        let () = msg_send![layer, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
+        // Apple silicon keeps RGBA8Unorm: BGRA8Unorm there does not support
+        // storage-class access, so a compute write to the drawable faults.
+        // Non-Apple GPUs use BGRA8Unorm, which is on Apple's documented
+        // CAMetalLayer pixel-format list. Drawable UAV writes on those GPUs
+        // are best-effort and untested on hardware.
+        let pixel_format = if logical_device.memory.discrete {
+            MTLPixelFormat::BGRA8Unorm
+        } else {
+            MTLPixelFormat::RGBA8Unorm
+        };
+        let () = msg_send![layer, setPixelFormat: pixel_format];
         // Don't set framebufferOnly so the texture can be used with compute
         let () = msg_send![layer, setFramebufferOnly: NO];
 
@@ -116,7 +121,12 @@ pub(super) fn create(
             if is_metal != NO {
                 layer = existing;
                 let () = msg_send![layer, setDevice: logical_device.device.as_ptr()];
-                let () = msg_send![layer, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
+                let pixel_format = if logical_device.memory.discrete {
+                    MTLPixelFormat::BGRA8Unorm
+                } else {
+                    MTLPixelFormat::RGBA8Unorm
+                };
+                let () = msg_send![layer, setPixelFormat: pixel_format];
                 let () = msg_send![layer, setFramebufferOnly: NO];
                 let () = msg_send![layer, setContentsScale: scale];
             } else {

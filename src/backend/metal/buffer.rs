@@ -8,14 +8,6 @@ use ::metal as mtl;
 use anyhow::{Context, Result};
 use mtl::MTLResourceOptions;
 
-fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
-    if flags.contains(BufferFlags::GPU_ONLY) {
-        MTLResourceOptions::StorageModePrivate
-    } else {
-        MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache
-    }
-}
-
 /// Heap allocation, or a direct device buffer when the heap cannot hold this resource.
 ///
 /// Host-visible buffers are Shared. On Apple-family GPUs they come from the
@@ -32,27 +24,43 @@ fn allocate_mtl_storage_buffer(
     state: &mut MetalState,
     device_handle: DeviceHandle,
     allocation_size: u64,
+    kind: BufferKind,
     flags: BufferFlags,
-) -> Result<(mtl::Buffer, bool)> {
-    let options = mtl_resource_options(flags);
-    let gpu_only = flags.contains(BufferFlags::GPU_ONLY);
+) -> Result<(mtl::Buffer, bool, crate::backend::metal_storage::MetalBufferPlacement)> {
+    use crate::backend::metal_storage::{buffer_is_host_visible, MetalBufferPlacement};
+
+    let discrete = state
+        .devices
+        .get(&device_handle)
+        .context("Invalid device handle")?
+        .memory
+        .discrete;
+    let host = buffer_is_host_visible(kind, flags, discrete);
+    let oversize = allocation_size > MAX_HEAP_SIZE;
+    let placement = match (host, discrete, oversize) {
+        (true, false, false) => MetalBufferPlacement::SharedHeap,
+        (true, _, _) => MetalBufferPlacement::SharedDevice,
+        (false, true, false) => MetalBufferPlacement::PrivateHeap,
+        (false, _, _) => MetalBufferPlacement::PrivateDevice,
+    };
+    let options = match placement {
+        MetalBufferPlacement::SharedHeap | MetalBufferPlacement::SharedDevice => {
+            MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeDefaultCache
+        }
+        MetalBufferPlacement::PrivateHeap | MetalBufferPlacement::PrivateDevice => {
+            MTLResourceOptions::StorageModePrivate
+        }
+    };
+
+    if !placement.from_heap() {
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let buf = logical_device.device.new_buffer(allocation_size, options);
+        debug_assert_not_managed(&buf);
+        return Ok((buf, true, placement));
+    }
 
     {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        let from_heap = logical_device.memory.host_visible_buffers_from_heap();
-        let place_in_heap = if allocation_size > MAX_HEAP_SIZE {
-            false
-        } else if gpu_only {
-            !from_heap
-        } else {
-            from_heap
-        };
-        if !place_in_heap {
-            let buf = logical_device.device.new_buffer(allocation_size, options);
-            debug_assert_not_managed(&buf);
-            return Ok((buf, true));
-        }
-
         // Attempt 1: fast path — heap has space.
         if let Some(buf) = logical_device
             .heap_allocator
@@ -61,7 +69,7 @@ fn allocate_mtl_storage_buffer(
             .allocate(allocation_size, options)
         {
             debug_assert_not_managed(&buf);
-            return Ok((buf, false));
+            return Ok((buf, false, placement));
         }
     }
 
@@ -85,7 +93,7 @@ fn allocate_mtl_storage_buffer(
             .allocate(allocation_size, options)
         {
             debug_assert_not_managed(&buf);
-            return Ok((buf, false));
+            return Ok((buf, false, placement));
         }
     }
 
@@ -106,7 +114,12 @@ fn allocate_mtl_storage_buffer(
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
     let buf = logical_device.device.new_buffer(allocation_size, options);
     debug_assert_not_managed(&buf);
-    Ok((buf, true))
+    let placement = match placement {
+        MetalBufferPlacement::SharedHeap => MetalBufferPlacement::SharedDevice,
+        MetalBufferPlacement::PrivateHeap => MetalBufferPlacement::PrivateDevice,
+        other => other,
+    };
+    Ok((buf, true, placement))
 }
 
 fn debug_assert_not_managed(buffer: &mtl::BufferRef) {
@@ -126,6 +139,7 @@ fn insert_buffer_common(
     logical_size: u64,
     allocation_size: u64,
     is_device_allocated: bool,
+    placement: crate::backend::metal_storage::MetalBufferPlacement,
     access: BufferKind,
     element_stride: Option<u32>,
     flags: BufferFlags,
@@ -186,6 +200,7 @@ fn insert_buffer_common(
             size: logical_size,
             allocation_size,
             is_device_allocated,
+            placement,
             arg_buffer_index,
             flags,
             element_stride,
@@ -231,7 +246,8 @@ pub(super) fn create(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(state, device_handle, size, flags)?;
+    let (buffer, is_device_allocated, placement) =
+        allocate_mtl_storage_buffer(state, device_handle, size, access, flags)?;
 
     insert_buffer_common(
         state,
@@ -241,6 +257,7 @@ pub(super) fn create(
         size,
         size,
         is_device_allocated,
+        placement,
         access,
         element_stride,
         flags,
@@ -289,7 +306,8 @@ pub(super) fn create_with_capacity(
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
 
-    let (buffer, is_device_allocated) = allocate_mtl_storage_buffer(state, device_handle, capacity, flags)?;
+    let (buffer, is_device_allocated, placement) =
+        allocate_mtl_storage_buffer(state, device_handle, capacity, access, flags)?;
 
     insert_buffer_common(
         state,
@@ -299,6 +317,7 @@ pub(super) fn create_with_capacity(
         logical_size,
         capacity,
         is_device_allocated,
+        placement,
         access,
         element_stride,
         flags,
@@ -346,7 +365,7 @@ pub(super) fn hint_unused_above(state: &mut MetalState, buffer_handle: BufferHan
     let Some(b) = state.buffers.get(&buffer_handle) else {
         return;
     };
-    if b.flags.contains(BufferFlags::GPU_ONLY) {
+    if !b.placement.host_mapped() {
         return;
     }
     if b.parent_for_view.is_some() {
@@ -402,6 +421,7 @@ pub(super) fn create_view(
     let device_handle = parent.device_handle;
     let parent_mtl_buffer = parent.buffer.clone();
     let parent_flags = parent.flags;
+    let parent_placement = parent.placement;
 
     let handle = state.next_buffer_handle;
     state.next_buffer_handle += 1;
@@ -434,6 +454,7 @@ pub(super) fn create_view(
             size,
             allocation_size: parent.allocation_size,
             is_device_allocated: parent.is_device_allocated,
+            placement: parent_placement,
             arg_buffer_index,
             flags: parent_flags,
             element_stride,
@@ -475,8 +496,8 @@ pub(super) fn resize(
         anyhow::bail!("buffer size must be non-zero");
     }
 
-    let (new_buffer, is_device_allocated) =
-        allocate_mtl_storage_buffer(state, device_handle, new_size, old_state.flags)?;
+    let (new_buffer, is_device_allocated, placement) =
+        allocate_mtl_storage_buffer(state, device_handle, new_size, old_state.access, old_state.flags)?;
 
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
 
@@ -493,7 +514,7 @@ pub(super) fn resize(
     }
     if preserve_contents && new_size > copy_len {
         let tail = new_size - copy_len;
-        if !old_state.flags.contains(BufferFlags::GPU_ONLY) {
+        if placement.host_mapped() {
             unsafe {
                 let ptr = (new_buffer.contents() as *mut u8).add(copy_len as usize);
                 std::ptr::write_bytes(ptr, 0, tail as usize);
@@ -548,6 +569,7 @@ pub(super) fn resize(
         size: new_size,
         allocation_size: new_size,
         is_device_allocated,
+        placement,
         arg_buffer_index: old_state.arg_buffer_index,
         flags: old_state.flags,
         element_stride: old_state.element_stride,
@@ -692,15 +714,14 @@ pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64
         return Ok(());
     }
 
-    let gpu_only = buffer.flags.contains(BufferFlags::GPU_ONLY);
-    if !gpu_only {
+    if buffer.placement.host_mapped() {
         unsafe {
             let ptr = buffer.buffer.contents().add(offset as usize);
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
         }
     }
 
-    if buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
+    if buffer.flags.contains(BufferFlags::CPU_WRITABLE) && buffer.placement.host_mapped() {
         return Ok(());
     }
 
@@ -796,7 +817,7 @@ pub(super) fn clear(
         return Ok(());
     }
 
-    if !buffer.flags.contains(BufferFlags::GPU_ONLY) {
+    if buffer.placement.host_mapped() {
         unsafe {
             let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
             std::ptr::write_bytes(ptr, 0, clear_size as usize);
@@ -838,6 +859,7 @@ pub(super) fn alloc_readback_buffer(
             size,
             allocation_size: size,
             is_device_allocated: true,
+            placement: crate::backend::metal_storage::MetalBufferPlacement::SharedDevice,
             arg_buffer_index: 0,
             flags: BufferFlags::empty(),
             element_stride: None,

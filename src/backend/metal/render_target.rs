@@ -109,6 +109,7 @@ pub(super) fn render_to(
     );
 
     let command_buffer = logical_device.command_queue.new_command_buffer();
+    super::frame_table::stage_bindless_uploads(logical_device, command_buffer);
     let encoder = command_buffer.new_render_command_encoder(render_pass);
 
     let is_mesh = super::render_commands::commands_use_mesh(commands);
@@ -116,6 +117,7 @@ pub(super) fn render_to(
         encoder,
         logical_device,
         &state.buffers,
+        &state.textures,
         render_target.device_handle,
         is_mesh,
     )?;

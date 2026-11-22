@@ -5,7 +5,7 @@ use super::types::{
     DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
     TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
-use crate::backend::metal_storage::{HeapStorage, MetalMemoryFeatures, TextureStorage};
+use crate::backend::metal_storage::{HeapStorage, TextureStorage};
 use crate::backend::{AdapterInfo, BackendType};
 use crate::types::DeviceType;
 use ::metal as mtl;
@@ -23,10 +23,15 @@ use std::sync::{Arc, Mutex};
 const INITIAL_HEAP_SIZE: u64 = 64 * 1024 * 1024;
 use mtl::{Device as MTLDevice, MTLResourceOptions, MTLStorageMode};
 
-/// Enumerate available Metal devices/adapters.
+/// Enumerate Metal adapters that meet the hardware floor.
+///
+/// Unsupported GPUs (Polaris, the Intel CI paravirtual device, anything
+/// without Metal 3 or Tier 2) are omitted so adapter selection falls through
+/// to a GPU that can run.
 pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
     adapters
         .iter()
+        .filter(|entry| device_facts(&entry.device).meets_floor())
         .map(|entry| {
             let device = &entry.device;
             let name = device.name().to_string();
@@ -70,21 +75,34 @@ pub(super) fn adapter_capabilities(
     };
     if let Some(entry) = adapters.iter().find(|a| a.adapter_id == adapter_id) {
         let device = &entry.device;
+        let facts = device_facts(device);
+        let plan = facts.memory_features().plan();
+        if plan.discrete {
+            // Private parcels are not demand-paged, and madvise does not apply.
+            // CPU_READABLE buffers stay Shared, so zero-copy readback remains available.
+            caps.buffer_resize_cost = crate::types::BufferResizeCost::Copy;
+            caps.buffer_decommit_supported = false;
+            caps.buffer_page_size = host_page_size();
+        }
         let rt = device.supports_raytracing();
         caps.ray_query = rt;
         // Metal has no SBT / TraceRays; inline RayQuery is the RT path.
         caps.ray_tracing_pipelines = false;
-        // Mesh shaders need Apple GPU family 7+ (A14 / M1 and later) or Mac GPU
-        // family 2. `Metal3` is too broad: GitHub macos-15's "Apple Paravirtual
-        // device" reports Metal3 but debug validation asserts
-        // "device does not support mesh shaders" and aborts.
-        let paravirtual = device.name().to_lowercase().contains("paravirtual");
-        let mesh = !paravirtual
-            && (device.supports_family(mtl::MTLGPUFamily::Apple7) || device.supports_family(mtl::MTLGPUFamily::Mac2));
-        caps.mesh_shaders = mesh;
-        caps.amplification_shaders = mesh;
+        caps.mesh_shaders = facts.mesh_shaders();
+        caps.amplification_shaders = facts.mesh_shaders();
     }
     caps
+}
+
+fn host_page_size() -> u64 {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page > 0 {
+            return page as u64;
+        }
+    }
+    16 * 1024
 }
 
 /// Create a logical device from an adapter ID.
@@ -101,16 +119,21 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
 
     let command_queue = device.new_command_queue();
 
-    // Require Argument Buffers Tier 2.
-    // Supported on: Apple Silicon (all), Intel Macs 2017+, AMD GPUs 2015+.
-    anyhow::ensure!(
-        device.argument_buffers_support() == mtl::MTLArgumentBuffersTier::Tier2,
-        "Metal Argument Buffers Tier 2 is required but not supported on this GPU. \
-         Apple Silicon, Intel 2017+, and AMD 2015+ are all supported."
-    );
-    tracing::info!("Metal Argument Buffers Tier 2 confirmed — bindless enabled");
+    let facts = device_facts(&device);
+    if let Some(reason) = facts.floor_rejection() {
+        anyhow::bail!(
+            "{reason} ({}; apple_family={}, metal3={}, tier2={}, rw_texture_tier2={}, os_major={}). \
+             Intel and AMD Mac support is best-effort and untested on hardware.",
+            device.name(),
+            facts.apple_family,
+            facts.metal3,
+            facts.argument_buffers_tier2,
+            facts.read_write_texture_tier2,
+            facts.os_major,
+        );
+    }
 
-    let features = memory_features(&device);
+    let features = facts.memory_features();
     let memory = features.plan();
     tracing::info!(
         name = %device.name(),
@@ -124,9 +147,15 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         "Metal storage plan"
     );
 
-    // Create global argument buffer (stores resource device pointers).
-    // Standalone Shared buffer: legal on discrete Macs, and not a heap.
+    // CPU encodes into `argument_buffer`. On Apple silicon the GPU reads that
+    // same Shared buffer. Discrete placement keeps a Private copy and blits
+    // before each encoder (`stage_bindless_uploads`).
     let argument_buffer = device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
+    let argument_device = if memory.discrete {
+        Some(device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModePrivate))
+    } else {
+        None
+    };
     tracing::info!("Created argument buffer");
 
     // Heaps are Shared only for Apple-family GPUs (`supportsFamily(Apple1)`).
@@ -136,13 +165,22 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     // allocations (see `allocate_mtl_storage_buffer`). CPU cache mode on the
     // heap matches buffer allocations that come out of it.
     let heap_size = INITIAL_HEAP_SIZE;
+    crate::backend::metal_storage::debug_refuse_shared_resource(
+        memory.discrete,
+        matches!(memory.heap, HeapStorage::Shared),
+        "MTLHeap",
+    );
     let (heap_allocator, texture_heap) = create_heaps(&device, heap_size, memory.heap);
 
     let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder, accel_encoder) =
-        create_argument_encoders(&device);
+        create_argument_encoders(&device)?;
 
-    let frame_table =
-        super::frame_table::MetalFrameTable::init(device.as_ref(), argument_buffer.as_ref(), argument_encoder.as_ref());
+    let frame_table = super::frame_table::MetalFrameTable::init(
+        device.as_ref(),
+        argument_buffer.as_ref(),
+        argument_encoder.as_ref(),
+        memory.discrete,
+    );
 
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
@@ -161,6 +199,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         heap_allocator: Mutex::new(heap_allocator),
         texture_heap: Mutex::new(texture_heap),
         argument_buffer,
+        argument_device,
         argument_encoder,
         texture_encoder,
         storage_image_encoder,
@@ -184,13 +223,40 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     Ok(handle)
 }
 
-fn memory_features(device: &MTLDevice) -> MetalMemoryFeatures {
-    MetalMemoryFeatures {
+fn device_facts(device: &MTLDevice) -> crate::backend::metal_storage::MetalDeviceFacts {
+    use crate::backend::metal_storage::MetalDeviceFacts;
+    MetalDeviceFacts {
         has_unified_memory: device.has_unified_memory(),
-        // Apple1 is the base of the Apple GPU families; later families imply it.
         apple_family: device.supports_family(mtl::MTLGPUFamily::Apple1),
+        apple7: device.supports_family(mtl::MTLGPUFamily::Apple7),
         mac2_family: device.supports_family(mtl::MTLGPUFamily::Mac2),
+        metal3: device.supports_family(mtl::MTLGPUFamily::Metal3),
+        argument_buffers_tier2: device.argument_buffers_support() == mtl::MTLArgumentBuffersTier::Tier2,
+        read_write_texture_tier2: device.read_write_texture_support() == mtl::MTLReadWriteTextureTier::Tier2,
+        os_major: host_os_major(),
+        paravirtual: device.name().to_lowercase().contains("paravirtual"),
     }
+}
+
+fn host_os_major() -> u32 {
+    static MAJOR: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MAJOR.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = std::process::Command::new("sw_vers").arg("-productVersion").output() {
+                if let Ok(text) = std::str::from_utf8(&output.stdout) {
+                    if let Some(major) = text.trim().split('.').next().and_then(|part| part.parse().ok()) {
+                        return major;
+                    }
+                }
+            }
+            0
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            17
+        }
+    })
 }
 
 fn heap_mtl_storage(storage: HeapStorage) -> MTLStorageMode {
@@ -234,13 +300,13 @@ fn create_heaps(device: &MTLDevice, heap_size: u64, storage: HeapStorage) -> (He
 /// and samplers.
 pub(super) fn create_argument_encoders(
     device: &MTLDevice,
-) -> (
+) -> Result<(
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     mtl::ArgumentEncoder,
     Option<mtl::ArgumentEncoder>,
-) {
+)> {
     // Encoder for raw buffer pointers (RWStructuredBuffer / StructuredBuffer).
     let buffer_arg_desc = mtl::ArgumentDescriptor::new();
     buffer_arg_desc.set_index(0);
@@ -287,6 +353,10 @@ pub(super) fn create_argument_encoders(
     let sampler_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[sampler_arg_desc]));
     let sampler_stride = sampler_encoder.encoded_length();
     tracing::info!("Created sampler ArgumentEncoder (encoded_length={})", sampler_stride);
+    require_encoder_stride("buffer", argument_encoder.encoded_length())?;
+    require_encoder_stride("texture", texture_encoder.encoded_length())?;
+    require_encoder_stride("storage image", storage_image_encoder.encoded_length())?;
+    require_encoder_stride("sampler", sampler_stride)?;
 
     let accel_encoder = if device.supports_raytracing() {
         let accel_arg_desc = mtl::ArgumentDescriptor::new();
@@ -294,6 +364,7 @@ pub(super) fn create_argument_encoders(
         accel_arg_desc.set_data_type(mtl::MTLDataType::InstanceAccelerationStructure);
         accel_arg_desc.set_access(mtl::MTLArgumentAccess::ReadOnly);
         let accel_encoder = device.new_argument_encoder(mtl::Array::from_slice(&[accel_arg_desc]));
+        require_encoder_stride("acceleration structure", accel_encoder.encoded_length())?;
         tracing::info!(
             "Created accel ArgumentEncoder (encoded_length={})",
             accel_encoder.encoded_length()
@@ -304,25 +375,22 @@ pub(super) fn create_argument_encoders(
         None
     };
 
-    // Every resource category in the argument buffer is laid out as
-    // MAX_RESOURCES_PER_CATEGORY × 8 bytes.  ARGUMENT_BUFFER_SIZE is derived
-    // from that assumption.  Fail loudly at device creation if this GPU returns
-    // a different stride so that sampler offsets never silently diverge.
-    assert_eq!(
-        sampler_stride, 8,
-        "Metal sampler argument encoder reported encoded_length={sampler_stride}, \
-         expected 8 (MTLResourceID size on Apple Silicon / Intel / AMD). \
-         ARGUMENT_BUFFER_SIZE and the sampler slot layout assume an 8-byte stride; \
-         please update ARGUMENT_BUFFER_SIZE and GPU_RESOURCE_STRIDE to match."
-    );
-
-    (
+    Ok((
         argument_encoder,
         texture_encoder,
         storage_image_encoder,
         sampler_encoder,
         accel_encoder,
-    )
+    ))
+}
+
+fn require_encoder_stride(name: &str, encoded_length: u64) -> Result<()> {
+    anyhow::ensure!(
+        encoded_length == 8,
+        "Metal {name} argument encoder reported encoded_length={encoded_length}, expected 8. \
+         ARGUMENT_BUFFER_SIZE assumes an 8-byte stride (macOS 13+ C-layout argument buffers)."
+    );
+    Ok(())
 }
 
 /// Destroy a logical device and clean up resources owned by it.

@@ -92,7 +92,17 @@ mod heap_tests {
             .alloc_buffer(4096, BufferKind::Scattered, None, BufferFlags::GPU_ONLY)
             .unwrap();
         let after = device.buffer_heap_stats().unwrap().buffer_count;
-        assert_eq!(before, after, "GPU_ONLY buffers bypass the heap (device-allocated)");
+        let discrete = std::env::var("GOLDY_METAL_PLACEMENT")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("discrete"));
+        if discrete {
+            assert!(
+                after > before,
+                "discrete placement puts GPU_ONLY buffers in the Private heap: before={before} after={after}"
+            );
+        } else {
+            assert_eq!(before, after, "GPU_ONLY buffers bypass the heap on Apple silicon");
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]

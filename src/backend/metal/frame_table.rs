@@ -72,7 +72,10 @@ pub(super) struct MetalFrameTable {
     /// Kept alive for arg-buffer slot 0 encoding; not read at runtime on Metal.
     #[allow(dead_code)]
     selector: mtl::Buffer,
+    /// GPU-visible table. Shared on Apple silicon; Private when placement is discrete.
     pub table: mtl::Buffer,
+    /// CPU staging copy. `None` on Apple silicon, where `table` itself is Shared.
+    staging: Option<mtl::Buffer>,
     ring: FrameTableRing,
 }
 
@@ -81,8 +84,19 @@ impl MetalFrameTable {
         device: &mtl::DeviceRef,
         argument_buffer: &mtl::BufferRef,
         argument_encoder: &mtl::ArgumentEncoderRef,
+        discrete: bool,
     ) -> Self {
-        let table = device.new_buffer(FRAME_TABLE_TABLE_BYTES, MTLResourceOptions::StorageModeShared);
+        let (table, staging) = if discrete {
+            (
+                device.new_buffer(FRAME_TABLE_TABLE_BYTES, MTLResourceOptions::StorageModePrivate),
+                Some(device.new_buffer(FRAME_TABLE_TABLE_BYTES, MTLResourceOptions::StorageModeShared)),
+            )
+        } else {
+            (
+                device.new_buffer(FRAME_TABLE_TABLE_BYTES, MTLResourceOptions::StorageModeShared),
+                None,
+            )
+        };
         let selector = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
 
         let encoded_length = argument_encoder.encoded_length();
@@ -97,8 +111,13 @@ impl MetalFrameTable {
         Self {
             selector,
             table,
+            staging,
             ring: FrameTableRing::new(FRAME_TABLE_MAX_ROWS),
         }
+    }
+
+    pub(super) fn staging_buffer(&self) -> Option<&mtl::BufferRef> {
+        self.staging.as_deref()
     }
 
     pub(super) fn table_buffer(&self) -> &mtl::BufferRef {
@@ -128,7 +147,8 @@ impl MetalFrameTable {
         let copy_u32s = staging_data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
         let src = &staging_data[0..copy_u32s];
 
-        let table_ptr = self.table.contents() as *mut u32;
+        let writable = self.staging.as_ref().unwrap_or(&self.table);
+        let table_ptr = writable.contents() as *mut u32;
         anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
         let dest_ptr = unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 };
         unsafe {
@@ -257,6 +277,25 @@ pub(super) fn merge_staging_for_render_sync(graph: &[u32], render: &[u32]) -> Ve
     merged
 }
 
+/// Copy CPU argument-buffer and frame-table bytes to their Private GPU buffers.
+///
+/// No-op on Apple silicon, where those buffers are already Shared.
+pub(super) fn stage_bindless_uploads(ld: &LogicalDevice, command_buffer: &mtl::CommandBufferRef) {
+    let Some(arg_gpu) = ld.argument_device.as_ref() else {
+        return;
+    };
+    let ft = ld.frame_table.lock().unwrap();
+    let table_cpu = ft.staging.clone();
+    let table_gpu = ft.table.clone();
+    drop(ft);
+    let blit = command_buffer.new_blit_command_encoder();
+    blit.copy_from_buffer(&ld.argument_buffer, 0, arg_gpu, 0, ARGUMENT_BUFFER_SIZE);
+    if let Some(cpu) = table_cpu {
+        blit.copy_from_buffer(&cpu, 0, &table_gpu, 0, FRAME_TABLE_TABLE_BYTES);
+    }
+    blit.end_encoding();
+}
+
 /// Refresh the active row in the shared table without advancing the ring selector.
 pub(super) fn sync_table_row_to_device(ld: &LogicalDevice, data: &[u32], row: u32) -> Result<()> {
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
@@ -266,7 +305,8 @@ pub(super) fn sync_table_row_to_device(ld: &LogicalDevice, data: &[u32], row: u3
     // Resolve destination pointer under a short lock, then memcpy without holding it.
     let dest_ptr = {
         let ft = ld.frame_table.lock().unwrap();
-        let table_ptr = ft.table.contents() as *mut u32;
+        let writable = ft.staging.as_ref().unwrap_or(&ft.table);
+        let table_ptr = writable.contents() as *mut u32;
         anyhow::ensure!(!table_ptr.is_null(), "frame table buffer has null contents");
         unsafe { (table_ptr as *mut u8).add(row_byte_offset(row) as usize) as *mut u32 }
     };

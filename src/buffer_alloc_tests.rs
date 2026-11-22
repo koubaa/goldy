@@ -147,8 +147,16 @@ mod buffer_alloc_tests {
         let _ctx = device.create_context().expect("context");
         assert_eq!(device.backend_type(), BackendType::Metal);
         let caps = device.capabilities();
-        assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
-        assert!(caps.buffer_decommit_supported);
+        let discrete = std::env::var("GOLDY_METAL_PLACEMENT")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("discrete"));
+        if discrete {
+            assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Copy);
+            assert!(!caps.buffer_decommit_supported);
+        } else {
+            assert_eq!(caps.buffer_resize_cost, BufferResizeCost::Constant);
+            assert!(caps.buffer_decommit_supported);
+        }
     }
 
     #[cfg(feature = "vulkan")]

@@ -562,7 +562,7 @@ impl GpuBackend for MetalBackend {
 
     fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
         let buf = self.state.buffers.get(&buffer)?;
-        if buf.flags.contains(crate::types::BufferFlags::GPU_ONLY) {
+        if !buf.placement.host_mapped() {
             return None;
         }
         let ptr = buf.buffer.contents() as *const u8;
@@ -1339,7 +1339,7 @@ mod tests {
     /// buffers stay `contents()`-mapped on both paths.
     #[test]
     fn heap_storage_follows_apple_family() {
-        use crate::backend::metal_storage::{HeapStorage, HostVisibleBufferPlacement, TextureStorage};
+        use crate::backend::metal_storage::{HeapStorage, TextureStorage};
         use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 
         let mut backend = MetalBackend::new().unwrap();
@@ -1365,8 +1365,9 @@ mod tests {
             features.family_summary()
         );
         assert_eq!(plan, features.plan());
-        // Intel iGPUs report unified memory and are not Apple-family.
-        let heap_mode = if apple {
+        // `plan.discrete` includes GOLDY_METAL_PLACEMENT=discrete on Apple silicon.
+        let shared_heaps = !plan.discrete;
+        let heap_mode = if shared_heaps {
             ::metal::MTLStorageMode::Shared
         } else {
             ::metal::MTLStorageMode::Private
@@ -1375,7 +1376,7 @@ mod tests {
         assert_eq!(texture_heap, heap_mode);
         assert_eq!(
             plan.heap,
-            if apple {
+            if shared_heaps {
                 HeapStorage::Shared
             } else {
                 HeapStorage::Private
@@ -1412,29 +1413,31 @@ mod tests {
         .expect("texture");
 
         let host_state = backend.state.buffers.get(&host).unwrap();
-        assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Shared);
-        assert!(!host_state.buffer.contents().is_null(), "host-visible buffer is mapped");
-        assert_eq!(host_state.is_device_allocated, !apple);
-        assert_eq!(
-            plan.host_visible_buffer,
-            if apple {
-                HostVisibleBufferPlacement::SharedHeap
-            } else {
-                HostVisibleBufferPlacement::SharedStandalone
-            }
-        );
+        if shared_heaps {
+            assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Shared);
+            assert!(!host_state.buffer.contents().is_null(), "host-visible buffer is mapped");
+            assert!(!host_state.is_device_allocated);
+            assert!(host_state.placement.host_mapped());
+        } else {
+            // Unflagged parcels are Private heap allocations under discrete placement.
+            assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
+            assert!(host_state.buffer.contents().is_null());
+            assert!(!host_state.is_device_allocated);
+            assert!(!host_state.placement.host_mapped());
+        }
 
         let gpu_state = backend.state.buffers.get(&gpu).unwrap();
         assert_eq!(gpu_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
-        // Apple silicon: GPU_ONLY stays a device allocation. Non-Apple: Private heap.
-        assert_eq!(gpu_state.is_device_allocated, apple);
+        // Apple silicon: GPU_ONLY stays a device allocation. Discrete: Private heap.
+        assert_eq!(gpu_state.is_device_allocated, shared_heaps);
+        assert!(!gpu_state.placement.host_mapped());
 
         let tex_state = backend.state.textures.get(&tex).unwrap();
         assert_eq!(tex_state.texture.storage_mode(), heap_mode);
         assert!(tex_state.is_heap_allocated);
         assert_eq!(
             plan.texture,
-            if apple {
+            if shared_heaps {
                 TextureStorage::Shared
             } else {
                 TextureStorage::Private
@@ -1442,6 +1445,21 @@ mod tests {
         );
 
         backend.destroy_device(handle);
+    }
+
+    /// Paravirtual Intel CI has no Metal 3 / Tier 2 device. Creating a runtime
+    /// must return an error instead of aborting inside `newHeap:`.
+    #[test]
+    fn creating_device_does_not_abort_when_below_floor() {
+        let mut backend = MetalBackend::new().unwrap();
+        if !backend.enumerate_adapters().is_empty() {
+            return;
+        }
+        let err = backend.create_device(0);
+        assert!(
+            err.is_err(),
+            "a GPU below the Metal floor must return Err, not abort: {err:?}"
+        );
     }
 
     /// Regression test for issue #162 (secondary concern): the sampler argument
@@ -1474,7 +1492,8 @@ mod tests {
         use ::metal::Device as MTLDevice;
 
         let device = MTLDevice::system_default().expect("No Metal device available");
-        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) = create_argument_encoders(&device);
+        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) =
+            create_argument_encoders(&device).expect("argument encoder strides");
 
         // All four encoders must report the same 8-byte stride.
         assert_eq!(

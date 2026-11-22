@@ -746,8 +746,10 @@ pub(crate) struct LogicalDevice {
     pub heap_allocator: Mutex<HeapAllocator>,
     /// Multi-heap allocator for texture allocations (grows on demand)
     pub texture_heap: Mutex<TextureHeapAllocator>,
-    /// Global argument buffer containing resource IDs
+    /// CPU-visible argument buffer. On Apple silicon this is also what the GPU reads.
     pub argument_buffer: MTLBuffer,
+    /// Private copy the GPU reads when placement is discrete. `None` on Apple silicon.
+    pub argument_device: Option<MTLBuffer>,
     /// Encoder for writing buffers to the argument buffer
     pub argument_encoder: ArgumentEncoder,
     /// Encoder for writing sampled textures (ReadOnly) to the argument buffer
@@ -787,6 +789,11 @@ pub(crate) struct LogicalDevice {
 }
 
 impl LogicalDevice {
+    /// Buffer bound as `[[buffer(0)]]`. The Private copy when discrete placement stages uploads.
+    pub(crate) fn gpu_argument_buffer(&self) -> &MTLBuffer {
+        self.argument_device.as_ref().unwrap_or(&self.argument_buffer)
+    }
+
     /// Drop deferred resources whose barrier is `<= completed`.
     ///
     /// When `completed_by_context` is provided, also reclaim bindless slots whose
@@ -1462,6 +1469,8 @@ pub(crate) struct BufferState {
     pub allocation_size: u64,
     /// `true` when created via [`MTLDevice::new_buffer`] (jumbo) rather than a heap.
     pub is_device_allocated: bool,
+    /// Resolved once at allocation. `host_mapped()` is the CPU `contents()` check.
+    pub placement: crate::backend::metal_storage::MetalBufferPlacement,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
     pub flags: crate::types::BufferFlags,
