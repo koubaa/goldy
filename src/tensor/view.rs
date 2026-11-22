@@ -70,19 +70,19 @@ impl Tensor {
                 data.len()
             )));
         }
-        let mut padded = data.to_vec();
-        while !padded.len().is_multiple_of(4) {
-            padded.push(0);
-        }
-        let words: Vec<u32> = padded
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c))
-            .collect();
-        let buffer = runtime
-            .acquire_buffer_with_data(words.as_slice(), BufferKind::Scattered)
-            .map_err(GoldyError::from)?;
+        let buffer = if data.len().is_multiple_of(4) && (data.as_ptr() as usize).is_multiple_of(4) {
+            let words: &[u32] = bytemuck::cast_slice(data);
+            runtime
+                .acquire_buffer_with_data(words, BufferKind::Scattered)
+                .map_err(GoldyError::from)?
+        } else {
+            let mut padded = vec![0u8; data.len().next_multiple_of(4)];
+            padded[..data.len()].copy_from_slice(data);
+            let words: &[u32] = bytemuck::cast_slice(&padded);
+            runtime
+                .acquire_buffer_with_data(words, BufferKind::Scattered)
+                .map_err(GoldyError::from)?
+        };
         Tensor::from_buffer(buffer, layout)
     }
 
@@ -190,9 +190,8 @@ impl<'a> TensorView<'a> {
         Ok(Self { buffer, layout })
     }
 
-    /// Packed window of `shape` starting at element `storage_offset` in `buffer`.
     /// The same bytes viewed as a packed `u32` vector. Used by matmuls that
-    /// unpack BF16 or NVFP4 inside the dot. The byte length must be a multiple of 4.
+    /// unpack BF16 or block-scaled codes inside the dot.
     pub fn packed_u32_words(self) -> Result<Self, GoldyError> {
         let (byte_off, byte_len) = self.layout.byte_envelope()?;
         if !byte_off.is_multiple_of(4) {
@@ -216,6 +215,7 @@ impl<'a> TensorView<'a> {
         Self::packed_at(self.buffer, TensorDType::U32, byte_off / 4, shape)
     }
 
+    /// Packed window of `shape` starting at element `storage_offset` in `buffer`.
     pub fn packed_at(
         buffer: &'a Buffer,
         dtype: TensorDType,

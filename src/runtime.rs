@@ -614,7 +614,7 @@ pub(crate) struct DeviceInner {
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
     /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
-    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 2]>,
+    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 6]>,
     /// The backend's [`Validation`], read once so hot paths need not lock the backend.
     pub(crate) validation: Validation,
     /// Partition policy for this runtime. See [`resolve_compute_partition_split`].

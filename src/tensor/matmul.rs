@@ -5,15 +5,17 @@ use super::ops::TensorRecorder;
 use super::shape::TensorShape;
 use super::view::{Tensor, TensorView};
 use crate::error::GoldyError;
-use crate::ops::{MatMulDesc, MatMulView};
+use crate::ops::{MatMulBlock, MatMulDType, MatMulDesc, MatMulIndex, MatMulView, PackedElem, PackedScale};
 
-/// Packed NVFP4 expert stack. The tensors stay in device memory.
-pub struct Nvfp4Experts<'a> {
+/// Block-scaled matrix. Codes and scales stay packed. `global`, when set, is an
+/// f32 vector: length 1 broadcasts, and a longer vector is indexed by slab id.
+pub struct BlockScaled<'a> {
     pub codes: TensorView<'a>,
     pub scales: TensorView<'a>,
-    pub factors: TensorView<'a>,
-    pub ids: TensorView<'a>,
-    pub slot: u32,
+    pub elems: PackedElem,
+    pub scale: PackedScale,
+    pub block: [u32; 2],
+    pub global: Option<TensorView<'a>>,
 }
 
 impl<'a> TensorRecorder<'a> {
@@ -64,14 +66,10 @@ impl<'a> TensorRecorder<'a> {
 
     /// `out = weight[ids[slot]] @ x`.
     ///
-    /// `weight` is a packed `[experts, rows, k]` tensor. `ids` is a rank-1 `u32`
-    /// buffer. The selected slab is copied on device, then multiplied by the same
-    /// lowering as [`Self::matmul_into`], so a GEMV uses the matvec path and a
-    /// GEMM uses the native matmul when the backend has one. An id `>= experts`
-    /// copies zeros and does not read past `weight`.
-    ///
-    /// The returned tensor is the selected weight slab. Keep it alive for every
-    /// submit of the scheme; dropping it frees the parcel the gather writes.
+    /// `weight` is a packed `[experts, rows, k]` tensor of F32 or BF16. `ids` is
+    /// a rank-1 `u32` buffer. The GEMV reads the slab in place (`id * rows * k`);
+    /// it does not copy a tile. An id `>= experts` writes zeros. `x` is `[k]`
+    /// and `out` is `[rows]`.
     pub fn matmul_indexed_into(
         &mut self,
         label: &str,
@@ -80,8 +78,7 @@ impl<'a> TensorRecorder<'a> {
         ids: TensorView<'_>,
         slot: u32,
         out: TensorView<'_>,
-    ) -> Result<Tensor, GoldyError> {
-        weight.dtype().require_f32("matmul_indexed")?;
+    ) -> Result<(), GoldyError> {
         x.dtype().require_f32("matmul_indexed")?;
         out.dtype().require_f32("matmul_indexed")?;
         if weight.shape().rank() != 3 || !weight.is_contiguous() {
@@ -102,38 +99,73 @@ impl<'a> TensorRecorder<'a> {
         let experts = weight.shape().dim(0)?;
         let rows = weight.shape().dim(1)?;
         let k = weight.shape().dim(2)?;
-        let tile_shape = TensorShape::matrix(rows, k);
-        if matmul_out_shape(tile_shape, x.shape())? != out.shape() {
+        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
             return Err(GoldyError::Validation(
-                "matmul_indexed: out shape does not match weight[id] @ x".into(),
+                "matmul_indexed: x is [k] and out is [rows]".into(),
             ));
         }
-        let tile = Tensor::zeros(&self.kernels.runtime, tile_shape, TensorDType::F32)?;
-        let stride = rows.saturating_mul(k);
-        self.kernels
-            .ops
-            .gather_slab
-            .record(
-                self.scheme,
-                format!("{label}_slab"),
-                weight,
-                ids,
-                tile.view(),
-                slot,
-                stride,
-                experts,
-            )?
-            .over_1d(tile.view().numel_u32().max(1));
-        self.matmul_into(&format!("{label}_gemm"), tile.view(), x, out)?;
-        Ok(tile)
+        let elems = (experts as u64).saturating_mul(rows as u64).saturating_mul(k as u64);
+        if elems > u64::from(u32::MAX) {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: weight does not fit a u32 element index".into(),
+            ));
+        }
+        let dtype = match weight.dtype() {
+            TensorDType::F32 => MatMulDType::F32,
+            TensorDType::BF16 => MatMulDType::BF16,
+            _ => {
+                return Err(GoldyError::Validation(
+                    "matmul_indexed: weight must be F32 or BF16".into(),
+                ))
+            }
+        };
+        let mut desc = MatMulDesc::gemv(rows, k);
+        desc.dtype = dtype;
+        desc.index = Some(MatMulIndex {
+            slot,
+            experts,
+            stride_elems: rows.saturating_mul(k),
+            global_per_slab: false,
+        });
+        let a_buf = if dtype == MatMulDType::BF16 {
+            weight.packed_u32_words()?.buffer()
+        } else {
+            weight.buffer()
+        };
+        self.scheme
+            .matmul(label, desc)
+            .a(a_buf, MatMulView::packed())
+            .b(x.buffer(), MatMulView::packed())
+            .out(out.buffer(), MatMulView::packed())
+            .extra(ids.buffer(), MatMulView::packed())
+            .record();
+        Ok(())
     }
 
-    /// `out = weight @ x` with a packed bfloat16 weight and an f32 vector.
+    /// `out = cap * tanh(x / cap)`. `cap == 1` records a single `tanh`.
     ///
-    /// `weight` is `[rows, k]` BF16 and stays packed. Each dot promotes an
-    /// element to f32. `x` is `[k]` and `out` is `[rows]`. The f32 matmul
-    /// lowering is unchanged; a later backend can replace this kernel when it
-    /// has a native BF16 matvec.
+    /// Otherwise this records divide, tanh, and multiply. The returned tensors
+    /// are those intermediates; keep them alive for every submit.
+    pub fn tanh_scaled_into(
+        &mut self,
+        label: &str,
+        x: TensorView<'_>,
+        cap: f32,
+        out: TensorView<'_>,
+    ) -> Result<Vec<Tensor>, GoldyError> {
+        if cap == 1.0 {
+            self.tanh_into(label, x, out)?;
+            return Ok(Vec::new());
+        }
+        let scaled = self.div_scalar(&format!("{label}_div"), x, cap)?;
+        let curved = self.tanh(&format!("{label}_tanh"), scaled.view())?;
+        self.mul_scalar_into(label, curved.view(), cap, out)?;
+        Ok(vec![scaled, curved])
+    }
+
+    /// `out = weight @ x` for a packed BF16 matrix. Recorded as a [`MatMulDesc`]
+    /// with [`MatMulDType::BF16`], so a backend can select a native GEMM later.
+    /// The stdlib fallback promotes each element inside the dot.
     pub fn matmul_bf16_into(
         &mut self,
         label: &str,
@@ -150,99 +182,142 @@ impl<'a> TensorRecorder<'a> {
         out.dtype().require_f32("matmul_bf16")?;
         let rows = weight.shape().dim(0)?;
         let k = weight.shape().dim(1)?;
-        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
-            return Err(GoldyError::Validation("matmul_bf16: x is [k] and out is [rows]".into()));
+        if !weight.is_contiguous() {
+            return Err(GoldyError::Validation("matmul_bf16: weight must be contiguous".into()));
         }
+        if x.shape().rank() > 2 || out.shape().dims() != matmul_out_shape(weight.shape(), x.shape())?.dims() {
+            return Err(GoldyError::Validation(
+                "matmul_bf16: x is [k] or [k, n] and out matches weight @ x".into(),
+            ));
+        }
+        let n = if x.shape().rank() == 1 { 1 } else { x.shape().dim(1)? };
+        let mut desc = MatMulDesc::gemm(rows, n, k);
+        desc.dtype = MatMulDType::BF16;
         let bits = weight.packed_u32_words()?;
-        self.kernels
-            .ops
-            .matvec_bf16
-            .record(self.scheme, label, bits, x, out, k)?
-            .over_1d(rows.max(1));
+        self.scheme
+            .matmul(label, desc)
+            .a(bits.buffer(), MatMulView::packed())
+            .b(x.buffer(), MatMulView::packed())
+            .out(out.buffer(), MatMulView::packed())
+            .extra(self.kernels.unit_u32.buffer(), MatMulView::packed())
+            .record();
         Ok(())
     }
 
-    /// `out = dequant(weight[ids[slot]]) @ x`.
-    ///
-    /// NVFP4 layout of Inkling-2-Mini experts: `codes` is U8 `[experts, rows, k/2]`
-    /// with the even column in the low nibble, `scales` is F8E4M3
-    /// `[experts, rows, k/16]`, and `factors` is f32 `[experts]` equal to
-    /// `amax / outer_scale_denominator`. The packed tensors stay in device
-    /// memory; the dot dequantizes each element. An id past `experts` writes zeros.
-    pub fn matmul_nvfp4_indexed_into(
+    /// `out = dequant(weight) @ x` with `x` a vector. Recorded as a block-scaled
+    /// [`MatMulDesc`]. `ids` selects a slab when `codes` is rank 3.
+    pub fn matmul_block_scaled_into(
         &mut self,
         label: &str,
-        weight: Nvfp4Experts<'_>,
+        weight: BlockScaled<'_>,
         x: TensorView<'_>,
+        ids: Option<(TensorView<'_>, u32)>,
         out: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        let Nvfp4Experts {
-            codes,
-            scales,
-            factors,
-            ids,
-            slot,
-        } = weight;
-        if codes.dtype() != TensorDType::U8 || codes.shape().rank() != 3 {
+        x.dtype().require_f32("matmul_block")?;
+        out.dtype().require_f32("matmul_block")?;
+        let codes = weight.codes;
+        let scales = weight.scales;
+        if !codes.is_contiguous() || !scales.is_contiguous() {
             return Err(GoldyError::Validation(
-                "matmul_nvfp4: codes must be a rank-3 U8 tensor".into(),
+                "matmul_block: codes and scales must be contiguous".into(),
             ));
         }
-        if scales.dtype() != TensorDType::F8E4M3 || scales.shape().rank() != 3 {
+        let rank = codes.shape().rank();
+        if rank != 2 && rank != 3 {
             return Err(GoldyError::Validation(
-                "matmul_nvfp4: scales must be a rank-3 F8E4M3 tensor".into(),
+                "matmul_block: codes are [rows, packed] or [slabs, rows, packed]".into(),
             ));
         }
-        factors.dtype().require_f32("matmul_nvfp4")?;
-        x.dtype().require_f32("matmul_nvfp4")?;
-        out.dtype().require_f32("matmul_nvfp4")?;
-        if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
+        let (experts, rows, packed) = if rank == 2 {
+            (1, codes.shape().dim(0)?, codes.shape().dim(1)?)
+        } else {
+            (codes.shape().dim(0)?, codes.shape().dim(1)?, codes.shape().dim(2)?)
+        };
+        let per = match weight.elems {
+            PackedElem::E2M1 => 2,
+            PackedElem::E4M3 => 1,
+        };
+        let k = packed.saturating_mul(per);
+        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
             return Err(GoldyError::Validation(
-                "matmul_nvfp4: ids must be a rank-1 U32 tensor".into(),
+                "matmul_block: x is [k] and out is [rows]".into(),
             ));
         }
-        if slot >= ids.shape().dim(0)? {
-            return Err(GoldyError::Validation(
-                "matmul_nvfp4: slot is past the id buffer".into(),
-            ));
-        }
-        let experts = codes.shape().dim(0)?;
-        let rows = codes.shape().dim(1)?;
-        let packed = codes.shape().dim(2)?;
-        let k = packed.saturating_mul(2);
-        if scales.shape().dims() != [experts, rows, k / 16]
-            || factors.shape().dims() != [experts]
-            || x.shape().dims() != [k]
-            || out.shape().dims() != [rows]
+        let scale_cols = k / weight.block[1];
+        let scale_rows = rows / weight.block[0];
+        let expect_scale = if rank == 2 {
+            vec![scale_rows, scale_cols]
+        } else {
+            vec![experts, scale_rows, scale_cols]
+        };
+        if scales.dtype()
+            != match weight.scale {
+                PackedScale::E4M3 => TensorDType::F8E4M3,
+                PackedScale::E8M0 => TensorDType::U8,
+            }
+            || scales.shape().dims() != expect_scale
         {
             return Err(GoldyError::Validation(
-                "matmul_nvfp4: scales are [experts, rows, k/16], x is [k], out is [rows]".into(),
+                "matmul_block: scales do not match the block grid".into(),
             ));
         }
-        if k % 16 != 0 {
+        let code_dtype = match weight.elems {
+            PackedElem::E2M1 | PackedElem::E4M3 => TensorDType::U8,
+        };
+        if codes.dtype() != code_dtype && !(weight.elems == PackedElem::E4M3 && codes.dtype() == TensorDType::F8E4M3) {
             return Err(GoldyError::Validation(
-                "matmul_nvfp4: unpacked columns must be a multiple of 16".into(),
+                "matmul_block: codes must be U8, or F8E4M3 when the elements are E4M3".into(),
             ));
         }
+        let mut index = None;
+        let ids_buf = if let Some((ids, slot)) = ids {
+            if rank != 3 {
+                return Err(GoldyError::Validation(
+                    "matmul_block: an id selects a rank-3 code tensor".into(),
+                ));
+            }
+            if ids.dtype() != TensorDType::U32 || slot >= ids.shape().dim(0)? {
+                return Err(GoldyError::Validation(
+                    "matmul_block: ids is a rank-1 U32 tensor and slot is in range".into(),
+                ));
+            }
+            index = Some(MatMulIndex {
+                slot,
+                experts,
+                stride_elems: rows,
+                global_per_slab: weight.global.is_some_and(|g| g.shape().dim(0).unwrap_or(1) != 1),
+            });
+            ids.buffer()
+        } else {
+            self.kernels.unit_u32.buffer()
+        };
+        let global_buf = if let Some(global) = weight.global {
+            global.dtype().require_f32("matmul_block")?;
+            global.buffer()
+        } else {
+            self.kernels.unit_f32.buffer()
+        };
+        let mut desc = MatMulDesc::gemv(rows, k);
+        desc.dtype = MatMulDType::BlockScaled;
+        desc.block = Some(MatMulBlock {
+            elems: weight.elems,
+            scale: weight.scale,
+            block_rows: weight.block[0],
+            block_cols: weight.block[1],
+        });
+        desc.index = index;
         let code_bits = codes.packed_u32_words()?;
         let scale_bits = scales.packed_u32_words()?;
-        self.kernels
-            .ops
-            .matvec_nvfp4
-            .record(
-                self.scheme,
-                label,
-                code_bits,
-                scale_bits,
-                factors,
-                ids,
-                x,
-                out,
-                rows,
-                k,
-                slot,
-            )?
-            .over_1d(rows.max(1));
+        self.scheme
+            .matmul(label, desc)
+            .a(code_bits.buffer(), MatMulView::packed())
+            .b(x.buffer(), MatMulView::packed())
+            .out(out.buffer(), MatMulView::packed())
+            .extra(scale_bits.buffer(), MatMulView::packed())
+            .extra(global_buf, MatMulView::packed())
+            .extra(ids_buf, MatMulView::packed())
+            .record();
         Ok(())
     }
 

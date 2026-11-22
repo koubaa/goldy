@@ -1,6 +1,9 @@
 //! Backend-selected matrix multiply recorded as a scheme node.
 
-use super::matmul_kernel::{GemvF32Kernel, MatMulF32Kernel, FLAG_TRANSPOSE_A, FLAG_TRANSPOSE_B, GEMV_ROWS_PER_GROUP};
+use super::matmul_kernel::{
+    GemmBf16Kernel, GemvBf16Kernel, GemvBlockKernel, GemvF32IndexedKernel, GemvF32Kernel, MatMulF32Kernel,
+    FLAG_TRANSPOSE_A, FLAG_TRANSPOSE_B, GEMV_ROWS_PER_GROUP,
+};
 use crate::backend::{BufferHandle, ComputePipelineHandle};
 use crate::compute::ComputePipeline;
 use crate::error::GoldyError;
@@ -13,9 +16,55 @@ use std::sync::Arc;
 /// Element type for [`MatMulDesc`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MatMulDType {
-    /// IEEE-754 binary32. The only type in the first slice.
+    /// IEEE-754 binary32 for A, B, and C.
     #[default]
     F32,
+    /// Packed BF16 `A`, f32 `B` and `C`. The product promotes each element of `A`.
+    BF16,
+    /// Block-scaled packed `A`. The block shape and code format live on [`MatMulBlock`].
+    BlockScaled,
+}
+
+/// Code stored in a block-scaled matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackedElem {
+    /// Two E2M1 values per byte. The even column is the low nibble.
+    E2M1,
+    /// One E4M3 value per byte.
+    E4M3,
+}
+
+/// Scale stored beside a block-scaled matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackedScale {
+    /// OCP E4M3, one byte per block.
+    E4M3,
+    /// Power-of-two byte, value `2^(s - 127)`.
+    E8M0,
+}
+
+/// Block-scaled `A`: codes, one scale per block, optional f32 per-slab multiplier.
+///
+/// `block` is `[block_rows, block_cols]`. The supported layouts are `[1, 16]`
+/// with [`PackedElem::E2M1`] and [`PackedScale::E4M3`], and `[32, 32]` with
+/// [`PackedElem::E4M3`] and [`PackedScale::E8M0`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatMulBlock {
+    pub elems: PackedElem,
+    pub scale: PackedScale,
+    pub block_rows: u32,
+    pub block_cols: u32,
+}
+
+/// Device-selected slab. `a_off = ids[slot] * stride_elems` when `id < experts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatMulIndex {
+    pub slot: u32,
+    pub experts: u32,
+    pub stride_elems: u32,
+    /// When set, the f32 global-scale vector is indexed by the slab id.
+    /// Otherwise element 0 is the multiplier for every slab.
+    pub global_per_slab: bool,
 }
 
 /// Row-major `C[m, n] = alpha * op(A)[m, k] @ op(B)[k, n] + beta * C[m, n]`.
@@ -30,8 +79,12 @@ pub struct MatMulDesc {
     pub n: u32,
     /// Inner dimension shared by `op(A)` and `op(B)`.
     pub k: u32,
-    /// Input and output element type.
+    /// Element type of a dense `A`, or [`MatMulDType::BlockScaled`].
     pub dtype: MatMulDType,
+    /// Present when `dtype` is [`MatMulDType::BlockScaled`].
+    pub block: Option<MatMulBlock>,
+    /// Present when `A` is selected by a device id instead of a static offset.
+    pub index: Option<MatMulIndex>,
     /// Left-hand transpose.
     pub transpose_a: bool,
     /// Right-hand transpose.
@@ -51,6 +104,8 @@ impl Default for MatMulDesc {
             n: 0,
             k: 0,
             dtype: MatMulDType::F32,
+            block: None,
+            index: None,
             transpose_a: false,
             transpose_b: false,
             alpha: 1.0,
@@ -112,8 +167,49 @@ impl MatMulDesc {
                 "matmul: m, n, and k must be greater than zero".into(),
             ));
         }
-        if self.dtype != MatMulDType::F32 {
-            return Err(GoldyError::Validation("matmul: only F32 is supported".into()));
+        match self.dtype {
+            MatMulDType::F32 | MatMulDType::BF16 => {
+                if self.block.is_some() {
+                    return Err(GoldyError::Validation(
+                        "matmul: block metadata is only valid for a block-scaled matrix".into(),
+                    ));
+                }
+            }
+            MatMulDType::BlockScaled => {
+                let Some(block) = self.block else {
+                    return Err(GoldyError::Validation(
+                        "matmul: block-scaled matrix is missing its block descriptor".into(),
+                    ));
+                };
+                let nvfp4 = block.elems == PackedElem::E2M1
+                    && block.scale == PackedScale::E4M3
+                    && block.block_rows == 1
+                    && block.block_cols == 16;
+                let mxfp8 = block.elems == PackedElem::E4M3
+                    && block.scale == PackedScale::E8M0
+                    && block.block_rows == 32
+                    && block.block_cols == 32;
+                if !nvfp4 && !mxfp8 {
+                    return Err(GoldyError::Validation(
+                        "matmul: block-scaled layout must be E2M1/E4M3 [1, 16] or E4M3/E8M0 [32, 32]".into(),
+                    ));
+                }
+                if !self.k.is_multiple_of(block.block_cols) || !self.m.is_multiple_of(block.block_rows) {
+                    return Err(GoldyError::Validation(
+                        "matmul: rows and columns must be multiples of the block".into(),
+                    ));
+                }
+            }
+        }
+        if self.dtype != MatMulDType::F32 && (self.transpose_a || self.transpose_b) {
+            return Err(GoldyError::Validation(
+                "matmul: BF16 and block-scaled matrices are not transposed".into(),
+            ));
+        }
+        if self.dtype == MatMulDType::BlockScaled && self.n != 1 {
+            return Err(GoldyError::Validation(
+                "matmul: block-scaled stdlib kernel is a GEMV (n = 1)".into(),
+            ));
         }
         Ok(())
     }
@@ -129,6 +225,8 @@ impl std::hash::Hash for MatMulDesc {
         self.n.hash(state);
         self.k.hash(state);
         self.dtype.hash(state);
+        self.block.hash(state);
+        self.index.hash(state);
         self.transpose_a.hash(state);
         self.transpose_b.hash(state);
         self.alpha.to_bits().hash(state);
@@ -210,14 +308,35 @@ pub(crate) enum MatMulFallback {
     Gemm = 0,
     /// `gemv_f32`: `n = 1`, no transposes, any leading dimension.
     Gemv = 1,
+    /// `gemv_bf16`: packed BF16 `A`, f32 vector, 32 lanes per row.
+    GemvBf16 = 2,
+    /// `gemm_bf16`: packed BF16 `A`, f32 `B`, one thread per output.
+    GemmBf16 = 3,
+    /// `gemv_f32_indexed`: device slab id, no copied tile.
+    GemvIndexed = 4,
+    /// `gemv_block`: block-scaled `A`, 32 lanes per row.
+    GemvBlock = 5,
 }
 
 impl MatMulFallback {
     pub(crate) fn for_node(desc: &MatMulDesc, a: &MatMulOperand, b: &MatMulOperand, c: &MatMulOperand) -> Self {
-        if gemv_user_slots(desc, a, b, c).is_ok() {
-            Self::Gemv
-        } else {
-            Self::Gemm
+        match desc.dtype {
+            MatMulDType::BlockScaled => Self::GemvBlock,
+            MatMulDType::BF16 => {
+                if desc.n == 1 && !desc.transpose_a && !desc.transpose_b {
+                    Self::GemvBf16
+                } else {
+                    Self::GemmBf16
+                }
+            }
+            MatMulDType::F32 if desc.index.is_some() && desc.n == 1 => Self::GemvIndexed,
+            MatMulDType::F32 => {
+                if gemv_user_slots(desc, a, b, c).is_ok() {
+                    Self::Gemv
+                } else {
+                    Self::Gemm
+                }
+            }
         }
     }
 }
@@ -333,7 +452,7 @@ fn use_native_with(
     fallback: MatMulFallback,
     stdlib_gemm_ok: bool,
 ) -> bool {
-    if !backend_has_native(backend) {
+    if !backend_has_native(backend) || desc.dtype != MatMulDType::F32 || desc.index.is_some() {
         return false;
     }
     match policy {
@@ -342,17 +461,23 @@ fn use_native_with(
         MatMulPolicy::Default => match fallback {
             MatMulFallback::Gemv => !tuning.stdlib_gemv,
             MatMulFallback::Gemm => !(stdlib_gemm_ok && desc.n < tuning.library_min_n),
+            MatMulFallback::GemvBf16
+            | MatMulFallback::GemmBf16
+            | MatMulFallback::GemvIndexed
+            | MatMulFallback::GemvBlock => false,
         },
     }
 }
 
 pub(crate) fn fallback_workgroups(desc: &MatMulDesc, fallback: MatMulFallback) -> (u32, u32, u32) {
     match fallback {
-        MatMulFallback::Gemm => {
+        MatMulFallback::Gemm | MatMulFallback::GemmBf16 => {
             let threads = desc.m.saturating_mul(desc.n);
             (threads.div_ceil(256).max(1), 1, 1)
         }
-        MatMulFallback::Gemv => (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), 1, 1),
+        MatMulFallback::Gemv | MatMulFallback::GemvBf16 | MatMulFallback::GemvIndexed | MatMulFallback::GemvBlock => {
+            (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), 1, 1)
+        }
     }
 }
 
@@ -366,6 +491,9 @@ pub(crate) fn fallback_user_slots(
     match fallback {
         MatMulFallback::Gemm => Ok(gemm_user_slots(desc, a, b, c)?.to_vec()),
         MatMulFallback::Gemv => Ok(gemv_user_slots(desc, a, b, c)?.to_vec()),
+        MatMulFallback::GemvBf16 | MatMulFallback::GemmBf16 => Ok(bf16_user_slots(desc, a, b, c)?),
+        MatMulFallback::GemvIndexed => Ok(indexed_f32_user_slots(desc, a, b, c)?),
+        MatMulFallback::GemvBlock => Ok(block_user_slots(desc, a, b, c)?),
     }
 }
 
@@ -437,6 +565,7 @@ pub struct MatMulBuilder<'a> {
     a: Option<BoundOperand>,
     b: Option<BoundOperand>,
     c: Option<BoundOperand>,
+    extras: Vec<BoundOperand>,
 }
 
 pub(crate) struct BoundOperand {
@@ -456,6 +585,7 @@ impl<'a> MatMulBuilder<'a> {
             a: None,
             b: None,
             c: None,
+            extras: Vec::new(),
         }
     }
 
@@ -486,6 +616,17 @@ impl<'a> MatMulBuilder<'a> {
             packed_leading_dim(&self.desc, OperandKind::B),
         ) {
             Ok(bound) => self.b = Some(bound),
+            Err(msg) => self.scheme.push_record_error(msg),
+        }
+        self
+    }
+
+    /// An extra read-only buffer after `C`. Block-scaled and indexed kernels bind
+    /// scales, a global multiplier, or the id vector here, in kernel order.
+    #[allow(private_bounds)]
+    pub fn extra(mut self, buf: &impl SchemeBindable, view: MatMulView) -> Self {
+        match bind_operand(self.scheme, buf, NodeAccess::Read, view, 1) {
+            Ok(bound) => self.extras.push(bound),
             Err(msg) => self.scheme.push_record_error(msg),
         }
         self
@@ -583,8 +724,18 @@ impl<'a> MatMulBuilder<'a> {
             }
         };
         let site = site();
-        self.scheme
-            .push_matmul_node(self.label, self.desc, a, b, c, c_access, native, fallback, site);
+        self.scheme.push_matmul_node(
+            self.label,
+            self.desc,
+            a,
+            b,
+            c,
+            self.extras,
+            c_access,
+            native,
+            fallback,
+            site,
+        );
     }
 }
 
@@ -637,15 +788,98 @@ fn bind_operand(
 }
 
 pub(crate) fn prepare_stdlib(runtime: &Runtime, kind: MatMulFallback) -> anyhow::Result<Arc<ComputePipeline>> {
-    match kind {
-        MatMulFallback::Gemm => {
-            let kernel = MatMulF32Kernel::prepare(runtime).map_err(|e| anyhow::anyhow!("{e}"))?;
-            Ok(kernel.pipeline_arc())
-        }
-        MatMulFallback::Gemv => {
-            let kernel = GemvF32Kernel::prepare(runtime).map_err(|e| anyhow::anyhow!("{e}"))?;
-            Ok(kernel.pipeline_arc())
-        }
+    let pipeline = match kind {
+        MatMulFallback::Gemm => MatMulF32Kernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+        MatMulFallback::Gemv => GemvF32Kernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+        MatMulFallback::GemvBf16 => GemvBf16Kernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+        MatMulFallback::GemmBf16 => GemmBf16Kernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+        MatMulFallback::GemvIndexed => GemvF32IndexedKernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+        MatMulFallback::GemvBlock => GemvBlockKernel::prepare(runtime)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .pipeline_arc(),
+    };
+    Ok(pipeline)
+}
+
+fn bf16_user_slots(
+    desc: &MatMulDesc,
+    a: &MatMulOperand,
+    _b: &MatMulOperand,
+    _c: &MatMulOperand,
+) -> Result<Vec<u32>, GoldyError> {
+    let (experts, slot, stride, a_off) = index_slots(desc, a)?;
+    if desc.n == 1 {
+        Ok(vec![desc.m, desc.k, a_off, stride, experts, slot])
+    } else {
+        Ok(vec![desc.m, desc.n, desc.k, a_off, stride, experts, slot])
+    }
+}
+
+fn indexed_f32_user_slots(
+    desc: &MatMulDesc,
+    a: &MatMulOperand,
+    _b: &MatMulOperand,
+    _c: &MatMulOperand,
+) -> Result<Vec<u32>, GoldyError> {
+    let index = desc
+        .index
+        .ok_or_else(|| GoldyError::Validation("matmul: indexed GEMV is missing its id".into()))?;
+    Ok(vec![
+        desc.m,
+        desc.k,
+        a.leading_dim,
+        index.stride_elems,
+        index.experts,
+        index.slot,
+    ])
+}
+
+fn block_user_slots(
+    desc: &MatMulDesc,
+    a: &MatMulOperand,
+    _b: &MatMulOperand,
+    _c: &MatMulOperand,
+) -> Result<Vec<u32>, GoldyError> {
+    let block = desc
+        .block
+        .ok_or_else(|| GoldyError::Validation("matmul: missing block descriptor".into()))?;
+    let (experts, slot, _stride, _off) = index_slots(desc, a)?;
+    let elem = match block.elems {
+        PackedElem::E2M1 => 0,
+        PackedElem::E4M3 => 1,
+    };
+    let scale = match block.scale {
+        PackedScale::E4M3 => 0,
+        PackedScale::E8M0 => 1,
+    };
+    let per_slab = u32::from(desc.index.is_some_and(|i| i.global_per_slab));
+    let rows = desc.index.map(|i| i.stride_elems).unwrap_or(desc.m);
+    Ok(vec![
+        desc.m,
+        desc.k,
+        elem | (scale << 1),
+        block.block_cols,
+        experts,
+        slot,
+        rows,
+        per_slab,
+    ])
+}
+
+fn index_slots(desc: &MatMulDesc, a: &MatMulOperand) -> Result<(u32, u32, u32, u32), GoldyError> {
+    match desc.index {
+        Some(index) => Ok((index.experts, index.slot, index.stride_elems, 0)),
+        None => Ok((0, 0, 0, fit_offset("A", a.offset_elements)?)),
     }
 }
 

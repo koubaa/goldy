@@ -3,11 +3,10 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, GatherF32Kernel, GatherSlabF32Kernel, MatVecBf16Kernel, MatVecNvfp4Kernel, ReduceF32Kernel,
-    ScatterF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL,
-    OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX,
-    OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB,
-    OP_SUB_SCALAR, OP_SUM, OP_TANH,
+    CopyU32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, UnaryF32Kernel, OP_ABS,
+    OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN,
+    OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX,
+    OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::semantic;
 use super::shape::TensorShape;
@@ -69,9 +68,6 @@ pub(crate) struct PreparedOps {
     pub reduce: ReduceF32Kernel,
     pub gather: GatherF32Kernel,
     pub scatter: ScatterF32Kernel,
-    pub gather_slab: GatherSlabF32Kernel,
-    pub matvec_bf16: MatVecBf16Kernel,
-    pub matvec_nvfp4: MatVecNvfp4Kernel,
     pub batched: BatchedMatMulKernel,
     pub cast_f32_i32: CastF32I32Kernel,
     pub cast_f32_u32: CastF32U32Kernel,
@@ -88,9 +84,6 @@ impl PreparedOps {
             reduce: ReduceF32Kernel::prepare(runtime)?,
             gather: GatherF32Kernel::prepare(runtime)?,
             scatter: ScatterF32Kernel::prepare(runtime)?,
-            gather_slab: GatherSlabF32Kernel::prepare(runtime)?,
-            matvec_bf16: MatVecBf16Kernel::prepare(runtime)?,
-            matvec_nvfp4: MatVecNvfp4Kernel::prepare(runtime)?,
             batched: BatchedMatMulKernel::prepare(runtime)?,
             cast_f32_i32: CastF32I32Kernel::prepare(runtime)?,
             cast_f32_u32: CastF32U32Kernel::prepare(runtime)?,
@@ -107,6 +100,9 @@ impl PreparedOps {
 pub struct TensorKernels {
     pub(crate) runtime: Runtime,
     pub(crate) ops: PreparedOps,
+    /// Length-1 stand-ins so a matmul kernel can always bind an id or a global scale.
+    pub(crate) unit_u32: Tensor,
+    pub(crate) unit_f32: Tensor,
 }
 
 impl TensorKernels {
@@ -114,6 +110,8 @@ impl TensorKernels {
         Ok(Self {
             runtime: runtime.clone(),
             ops: PreparedOps::prepare(runtime)?,
+            unit_u32: Tensor::from_u32(runtime, TensorShape::vector(1), &[0])?,
+            unit_f32: Tensor::from_f32(runtime, TensorShape::vector(1), &[1.0])?,
         })
     }
 
@@ -624,6 +622,13 @@ impl<'a> TensorRecorder<'a> {
         out.layout().require_writeable("binary_scalar")?;
         a.dtype().require_f32("binary_scalar")?;
         out.dtype().require_f32("binary_scalar")?;
+        let identity = (op == super::kernels::OP_ADD_SCALAR && scalar == 0.0)
+            || (op == super::kernels::OP_SUB_SCALAR && scalar == 0.0)
+            || (op == super::kernels::OP_MUL_SCALAR && scalar == 1.0)
+            || (op == super::kernels::OP_DIV_SCALAR && scalar == 1.0);
+        if identity {
+            return self.copy(label, a, out);
+        }
         let a = a.broadcast_to(out.shape())?;
         // `b` is never read by a scalar op.
         let node = self
