@@ -979,6 +979,10 @@ pub(crate) trait ContextSubmitSession: Send + Sync {
     fn evict_retained(&self, ctx: ContextHandle, key: u64);
 
     /// Retained command buffers this context has dropped to reuse a frame-table row.
+    ///
+    /// Scheme stats do not read this. A scheme counts only the keys its own
+    /// ledger drops; this counter is the context total for diagnostics.
+    #[allow(dead_code)]
     fn retained_evictions(&self, _ctx: ContextHandle) -> u64 {
         0
     }

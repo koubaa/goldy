@@ -2800,7 +2800,7 @@ pub(super) fn submit_graph_with_scope(
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)
                             .map(|data| data.to_vec())
-                            .unwrap_or_else(|| vec![0u32; crate::frame_table::FRAME_TABLE_TABLE_U32S]);
+                            .unwrap_or_default();
                         let sync_data =
                             super::frame_table::merge_staging_for_render_sync(&graph_staging, &staging_data);
                         super::frame_table::sync_table_row_to_device(

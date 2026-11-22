@@ -22,6 +22,8 @@ pub(crate) struct CbReplayState {
     pub partition_last_tv: Vec<Option<TimelineValue>>,
     /// Per-partition set of present-slot combination keys (swapchain image variants).
     pub partition_slot_keys: Vec<Option<HashSet<u64>>>,
+    /// Retained command buffers this ledger dropped. Folded into the owning scheme.
+    pub evictions: u64,
 }
 
 impl CbReplayState {
@@ -29,8 +31,9 @@ impl CbReplayState {
         Self::default()
     }
 
-    pub fn ensure_partition_vecs(&mut self, partition_count: usize) {
+    pub fn ensure_partition_vecs(&mut self, ctx: &crate::Context, partition_count: usize) {
         if self.partition_keys.len() != partition_count {
+            self.evict_all(ctx);
             self.partition_keys = vec![None; partition_count];
             self.partition_slot_keys = vec![None; partition_count];
             self.partition_last_tv = vec![None; partition_count];
@@ -39,14 +42,49 @@ impl CbReplayState {
 
     /// Drop cached retention keys so the next submit re-records retained partitions.
     ///
-    /// Topology/structural dirtiness forces re-record even when the GPU has not
-    /// retired the prior partition timeline — do not gate re-record on stale TVs.
-    pub fn invalidate(&mut self) {
+    /// The backend command buffers are evicted too. Their rows and bindless slots
+    /// would otherwise stay pinned after the ledger forgot them. Topology or
+    /// structural dirtiness forces re-record even when the GPU has not retired
+    /// the prior partition timeline — do not gate re-record on stale TVs.
+    pub fn invalidate(&mut self, ctx: &crate::Context) {
+        self.evict_all(ctx);
         self.partition_keys.fill(None);
         for keys in &mut self.partition_slot_keys {
             *keys = None;
         }
         self.partition_last_tv.fill(None);
+    }
+
+    /// Point `indices` at `new_key`, evicting whatever backend buffer they named before.
+    pub fn install_keys(&mut self, ctx: &crate::Context, indices: &[usize], new_key: u64) {
+        let mut doomed = HashSet::new();
+        for &index in indices {
+            if let Some(old) = self.partition_keys.get(index).copied().flatten() {
+                if old != new_key {
+                    doomed.insert(old);
+                }
+            }
+        }
+        for key in doomed {
+            self.evict_one(ctx, key);
+        }
+        for &index in indices {
+            if let Some(slot) = self.partition_keys.get_mut(index) {
+                *slot = Some(new_key);
+            }
+        }
+    }
+
+    fn evict_all(&mut self, ctx: &crate::Context) {
+        let keys = self.all_backend_keys();
+        for key in keys {
+            self.evict_one(ctx, key);
+        }
+    }
+
+    fn evict_one(&mut self, ctx: &crate::Context, key: u64) {
+        ctx.submit_session().evict_retained(ctx.backend_handle(), key);
+        self.evictions += 1;
     }
 
     pub fn record_last_tv(&mut self, part_idx: usize, tv: TimelineValue) {
@@ -76,12 +114,7 @@ impl CbReplayState {
 
     /// Evict backend retained command lists, then clear the ledger.
     pub fn release_backend(&mut self, ctx: &crate::Context) {
-        let handle = ctx.backend_handle();
-        let session = ctx.submit_session();
-        for key in self.all_backend_keys() {
-            session.evict_retained(handle, key);
-        }
-        self.invalidate();
+        self.invalidate(ctx);
     }
 }
 

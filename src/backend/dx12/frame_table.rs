@@ -718,7 +718,7 @@ fn write_staging_persistent(
         row
     } else {
         frame_table.retained_evictions.fetch_add(1, Ordering::Relaxed);
-        let victim = FRAME_TABLE_TRANSIENT_ROWS;
+        let victim = crate::frame_table::least_recent_persistent_row(&frame_table.last_token_for_row, ROW_IN_USE);
         super::compute::evict_retained_pinning_row_for_context(contexts, frame_table, ld, ctx, victim);
         assert_not_pinned(frame_table, victim)?;
         pin_row(frame_table, victim)?;
@@ -839,6 +839,7 @@ pub(crate) fn prepare_render_commands(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    staging.check()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
 }

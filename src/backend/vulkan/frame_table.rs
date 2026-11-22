@@ -662,7 +662,7 @@ fn write_staging_persistent(
         row
     } else {
         ft.retained_evictions.fetch_add(1, Ordering::Relaxed);
-        let victim = FRAME_TABLE_TRANSIENT_ROWS;
+        let victim = crate::frame_table::least_recent_persistent_row(&ft.last_token_for_row, ROW_IN_USE);
         super::compute::evict_retained_pinning_row_for_context(contexts, ft, ld, ctx, victim);
         assert_not_pinned(ft, victim)?;
         pin_row(ft, victim)?;
@@ -862,6 +862,7 @@ pub(crate) fn prepare_render_commands(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    staging.check()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
 }
@@ -886,10 +887,8 @@ mod tests {
 
     #[test]
     fn merge_staging_overlays_render_indices_without_dropping_compute() {
-        let mut graph = vec![0u32; FRAME_TABLE_TABLE_U32S];
-        graph[0] = 7;
-        let mut render = vec![0u32; FRAME_TABLE_TABLE_U32S];
-        render[1] = 42;
+        let graph = vec![7u32];
+        let render = vec![0u32, 42];
         let merged = merge_staging_for_render_sync(&graph, &render);
         assert_eq!(merged[0], 7);
         assert_eq!(merged[1], 42);

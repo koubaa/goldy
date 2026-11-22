@@ -120,10 +120,8 @@ fn raster_fingerprint(
     }
     // Graph lowering clears BindResourcesRaw.indices into the staging table; hash the
     // active row so bind identity changes bust retained list reuse.
-    for word in staging_data
-        .iter()
-        .take(crate::frame_table::FRAME_TABLE_ROW_STRIDE as usize)
-    {
+    // The slice is the indices this submission wrote, not a zero-padded row.
+    for word in staging_data {
         word.hash(&mut hash);
     }
     for command in commands {
@@ -1355,6 +1353,7 @@ fn prepare_cuda_render_commands(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    staging.check()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
 }

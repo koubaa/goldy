@@ -790,7 +790,11 @@ fn compute_barriers(
 ///
 /// If any wave contains a [`NodeKind::RenderPass`] node.  Use
 /// [`emit_graph_commands`] for graphs that include render passes.
-pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
+pub(crate) fn emit_waves_to_commands(
+    ir: &GraphIR,
+    waves: &[Wave],
+    resolver: Option<&SlotResolver>,
+) -> Result<Vec<GpuCommand>, crate::error::GoldyError> {
     let mut commands = Vec::new();
     let mut frame_table = FrameTableStaging::new();
 
@@ -1147,6 +1151,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
 
     // Only insert the staging prefix when at least one dispatch wrote bind data.
     // Pure copy/write/barrier streams must not bump the submission counter.
+    frame_table.check()?;
     if !commands.is_empty() && frame_table.has_bindings() {
         commands.insert(
             0,
@@ -1156,7 +1161,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
         );
     }
 
-    commands
+    Ok(commands)
 }
 
 /// Emit a flat `Vec<GpuCommand>` from a graph IR and its compiled schedule.
@@ -1172,7 +1177,7 @@ pub(crate) fn emit_waves_to_commands(ir: &GraphIR, waves: &[Wave], resolver: Opt
 /// If the graph contains [`NodeKind::RenderPass`], use [`emit_graph_commands`] instead.
 #[cfg(test)]
 pub fn emit_commands(ir: &GraphIR, schedule: &CompiledSchedule, resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
-    emit_waves_to_commands(ir, &schedule.waves, resolver)
+    emit_waves_to_commands(ir, &schedule.waves, resolver).expect("frame table row fits the test graph")
 }
 
 /// Partition the compiled schedule into multiple command streams for pipelined
@@ -1210,7 +1215,7 @@ pub fn emit_partitioned_commands(
         .into_iter()
         .map(|range| {
             let waves = &schedule.waves[range];
-            emit_waves_to_commands(ir, waves, resolver)
+            emit_waves_to_commands(ir, waves, resolver).expect("frame table row fits the test graph")
         })
         .collect()
 }
@@ -1710,7 +1715,7 @@ pub(crate) fn emit_graph_commands_for_waves(
     ir: &GraphIR,
     waves: &[Wave],
     resolver: Option<&SlotResolver>,
-) -> Vec<GraphCommand> {
+) -> Result<Vec<GraphCommand>, crate::error::GoldyError> {
     let mut commands = Vec::new();
     let mut frame_table = FrameTableStaging::new();
 
@@ -1984,11 +1989,18 @@ pub(crate) fn emit_graph_commands_for_waves(
         );
     }
 
-    commands
+    frame_table.check()?;
+    Ok(commands)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn emit_waves_to_commands_ok(ir: &GraphIR, waves: &[Wave], resolver: Option<&SlotResolver>) -> Vec<GpuCommand> {
+        emit_waves_to_commands(ir, waves, resolver).expect("frame table row fits the test graph")
+    }
+
     use super::*;
     use crate::task_graph::ir::{DispatchDim, GroupId, GroupInfo, NodeKind, ResourceBinding, TaskNode};
     use std::sync::Arc;
@@ -2348,7 +2360,7 @@ mod tests {
             ..Default::default()
         };
 
-        let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        let commands = emit_waves_to_commands_ok(&ir, &schedule.waves, Some(&resolver));
         // Bind-free copy must NOT receive a FrameTableStaging prefix.
         assert!(matches!(
             commands.as_slice(),
@@ -2389,7 +2401,7 @@ mod tests {
             ..Default::default()
         };
 
-        let commands = emit_waves_to_commands(&ir, &schedule.waves, Some(&resolver));
+        let commands = emit_waves_to_commands_ok(&ir, &schedule.waves, Some(&resolver));
         // A bind-free copy must NOT receive a FrameTableStaging prefix.
         // Inserting one bumps the submission counter and silently overwrites
         // the selector with zeros, corrupting every in-flight frame.
@@ -2408,7 +2420,7 @@ mod tests {
             ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
-        let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
+        let cmds = emit_waves_to_commands_ok(&ir, &schedule.waves, None);
         let has_staging = cmds.iter().any(|c| matches!(c, GpuCommand::FrameTableStaging { .. }));
         assert!(
             !has_staging,
@@ -2439,7 +2451,7 @@ mod tests {
             ..Default::default()
         };
         let schedule = schedule_waves(&ir, &build_edges(&ir));
-        let cmds = emit_waves_to_commands(&ir, &schedule.waves, None);
+        let cmds = emit_waves_to_commands_ok(&ir, &schedule.waves, None);
         assert!(
             matches!(cmds.first(), Some(GpuCommand::FrameTableStaging { .. })),
             "dispatch with resource_slots must start with FrameTableStaging; got {cmds:?}"

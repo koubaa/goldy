@@ -674,9 +674,8 @@ pub struct ReplayStats {
     pub fusion_fallbacks: u64,
     /// Fused programs that failed to compile or bind; their regions run unfused.
     pub fusion_compile_failures: u64,
-    /// Retained command buffers dropped because a new submission needed their
-    /// frame-table row. Steady state on Vulkan and DX12 is zero: retained
-    /// buffers keep a row outside the transient ring.
+    /// Retained command buffers this scheme dropped: it replaced a key, or its
+    /// ledger was invalidated. Another scheme's eviction is not counted here.
     pub retained_evictions: u64,
 }
 
@@ -934,8 +933,6 @@ pub struct Scheme {
     /// Parcels this scheme registered on at the last record (for silent edge teardown).
     prev_topology_parcels: Vec<(ResourceKey, Arc<crate::parcel::ParcelStamp>)>,
     stats: ReplayStats,
-    /// Last context-wide retained-eviction total folded into [`Self::stats`].
-    eviction_seen: u64,
     /// Process-unique identity for cross-scheme [`Submission`] pairing.
     scheme_id: u64,
     /// Record-time diagnostics flushed on [`Self::submit`].
@@ -996,7 +993,6 @@ impl Scheme {
             topology_dirty: Arc::new(AtomicBool::new(false)),
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
-            eviction_seen: 0,
             specialization: crate::specialization::SchemePredictor::new(),
             fusion: crate::fusion_plan::FusionPlanner::new(),
             automatic_fusion: None,
@@ -2563,18 +2559,20 @@ impl Scheme {
     fn prepare_ir_submit(&mut self) -> Result<IrSubmitPrep, GoldyError> {
         if !self.desc.all_stamps_alive() {
             // Dropping a retained-pool resource invalidates schemes that still bind it.
-            self.submit_state.invalidate_retention();
+            self.submit_state.invalidate_retention(&self.ctx);
             return Err(GoldyError::StaleResource);
         }
 
         self.realize_matmul_nodes()?;
         self.step_fusion();
         if self.dirty == SchemeDirty::Structure {
-            // A demoted fusion plan frees temporaries the previous retained
-            // command buffer still reads. Wait for that buffer before releasing
-            // them; lavapipe faults if the queue thread touches a freed binding.
-            self.wait_for_retained_retirement();
-            self.lower_temporaries()?;
+            // The previous command buffer still names these temporaries until the
+            // GPU retires it. Drop the buffer from the replay ledger first, and
+            // park the buffers it read until that timeline value. A CPU wait here
+            // would also stall fusion promotion and schemes that release nothing.
+            let hold_until = self.submit_state.partition_last_tvs().iter().flatten().copied().max();
+            self.submit_state.release_backend_retained_graphs(&self.ctx);
+            self.lower_temporaries(hold_until)?;
         }
 
         let topo_dirty = self.topology_dirty.load(Ordering::Acquire);
@@ -2593,7 +2591,7 @@ impl Scheme {
         {
             let _tz = crate::tracy_zone!("scheme.submit.dirty_check");
             if structurally_dirty || topo_dirty {
-                self.submit_state.invalidate_retention();
+                self.submit_state.invalidate_retention(&self.ctx);
             }
         }
 
@@ -2629,21 +2627,8 @@ impl Scheme {
         })
     }
 
-    /// Block until the previous retained command buffers have retired.
-    fn wait_for_retained_retirement(&self) {
-        if !self.ctx.waits_for_retained_storage() {
-            return;
-        }
-        let Some(tv) = self.submit_state.partition_last_tvs().iter().flatten().copied().max() else {
-            return;
-        };
-        if self.ctx.gpu_progress() < tv {
-            let _ = self.ctx.wait_until(tv);
-        }
-    }
-
     /// Place the executed IR's temporaries on pool storage and track what it binds.
-    fn lower_temporaries(&mut self) -> Result<(), GoldyError> {
+    fn lower_temporaries(&mut self, hold_until: Option<crate::timeline::TimelineValue>) -> Result<(), GoldyError> {
         let (ir, uses) = match self.fusion.plan_mut() {
             Some(plan) => (&mut plan.ir, &plan.temporary_uses),
             None => (&mut self.desc.ir, &self.desc.temporary_uses),
@@ -2653,7 +2638,7 @@ impl Scheme {
         }
         let lowered = self
             .temporary_storage
-            .lower(&self.ctx, ir, uses, &self.desc.temporaries)?;
+            .lower(&self.ctx, ir, uses, &self.desc.temporaries, hold_until)?;
         for resource in lowered.released {
             self.desc.forget_stamp(resource);
         }
@@ -2797,10 +2782,7 @@ impl Scheme {
                 self.stats.resubmit_hits += 1;
             }
         }
-        let now = self.ctx.retained_evictions();
-        let delta = now.saturating_sub(self.eviction_seen);
-        self.eviction_seen = now;
-        self.stats.retained_evictions += delta;
+        self.stats.retained_evictions += self.submit_state.take_retained_evictions();
 
         if structurally_dirty || topo_dirty || params_dirty {
             tracing::debug!(

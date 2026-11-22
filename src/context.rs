@@ -121,6 +121,7 @@ impl Context {
         &self.inner.device
     }
 
+    #[allow(dead_code)]
     pub(crate) fn retained_evictions(&self) -> u64 {
         self.inner
             .submit_session
@@ -129,6 +130,7 @@ impl Context {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn waits_for_retained_storage(&self) -> bool {
         self.inner
             .submit_session
