@@ -50,15 +50,17 @@ if CommandLine.arguments.contains("--shared-heap") {
 guard let mode else { exit(0) }
 let name = modeName(mode)
 
+// Match Goldy's heap descriptor (tracked, automatic, default cache). 4 MB is
+// large enough for devices that reject a 64 KB heap as too small; Goldy's
+// runtime heaps are 64 MB. An illegal storage mode aborts inside makeHeap
+// instead of returning nil.
 let desc = MTLHeapDescriptor()
-desc.size = 64 * 1024
+desc.size = 4 * 1024 * 1024
 desc.storageMode = mode
 desc.cpuCacheMode = .defaultCache
 desc.type = .automatic
 desc.hazardTrackingMode = .tracked
 
-// `makeHeap` validates the descriptor. Shared (and Managed) abort the process
-// on GPUs that disallow that mode; they do not return nil.
 guard let heap = device.makeHeap(descriptor: desc) else {
     fputs("HEAP=\(name) nil\n", stderr)
     exit(3)
