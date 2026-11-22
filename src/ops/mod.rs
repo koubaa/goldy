@@ -7,4 +7,6 @@
 pub mod matmul;
 pub(crate) mod matmul_kernel;
 
-pub use matmul::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
+pub use matmul::{
+    MatMulBlock, MatMulBuilder, MatMulDType, MatMulDesc, MatMulIndex, MatMulView, PackedElem, PackedScale,
+};

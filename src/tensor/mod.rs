@@ -25,6 +25,7 @@ mod contract;
 
 pub use dtype::TensorDType;
 pub use layout::{GoldyTensorLayout, TensorLayout};
+pub use matmul::BlockScaled;
 pub use ops::{ScatterMode, TensorKernels, TensorRecorder, TensorScalar};
 pub use shape::TensorShape;
 pub use view::{Tensor, TensorView};

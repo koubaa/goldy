@@ -308,30 +308,6 @@ fn tensor_batched_matmul_f32(
     }
 }
 
-/// Copy slab `ids[slot]` out of a packed `[n_slabs, stride]` tensor.
-///
-/// An id past `n_slabs` writes zeros and does not read `src`.
-#[goldy::compute(workgroup_size = [256, 1, 1])]
-fn tensor_gather_slab_f32(
-    src: goldy::gpu::Tensor<f32>,
-    ids: goldy::gpu::Tensor<u32>,
-    dst: goldy::gpu::TensorWrite<f32>,
-    slot: u32,
-    stride: u32,
-    n_slabs: u32,
-) {
-    let i = goldy::gpu::global_id().x;
-    if i >= dst.len() {
-        return;
-    }
-    let id = ids[slot];
-    if id >= n_slabs || i >= stride {
-        dst[i] = 0.0;
-        return;
-    }
-    dst[i] = src[id * stride + i];
-}
-
 pub use tensor_batched_matmul_f32::Kernel as BatchedMatMulKernel;
 pub use tensor_binary_f32::Kernel as BinaryF32Kernel;
 pub use tensor_cast_f32_i32::Kernel as CastF32I32Kernel;
@@ -340,7 +316,6 @@ pub use tensor_cast_i32_f32::Kernel as CastI32F32Kernel;
 pub use tensor_cast_u32_f32::Kernel as CastU32F32Kernel;
 pub use tensor_copy_u32::Kernel as CopyU32Kernel;
 pub use tensor_gather_f32::Kernel as GatherF32Kernel;
-pub use tensor_gather_slab_f32::Kernel as GatherSlabF32Kernel;
 pub use tensor_reduce_f32::Kernel as ReduceF32Kernel;
 pub use tensor_scatter_f32::Kernel as ScatterF32Kernel;
 pub use tensor_unary_f32::Kernel as UnaryF32Kernel;

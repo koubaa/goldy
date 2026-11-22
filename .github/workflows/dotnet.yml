@@ -54,10 +54,27 @@ jobs:
     - name: Install Vulkan SDK (Linux)
       if: runner.os == 'Linux'
       run: |
-        wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-        sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
-        sudo apt update
-        sudo apt install -y vulkan-sdk
+        set -euo pipefail
+        # LunarG publishes apt repos through noble only. ubuntu-latest is now
+        # newer than that, and its libvulkan-dev Breaks the noble vulkan-sdk
+        # meta-package. The upstream tarball does not go through apt.
+        SDK_VERSION=1.4.313.0
+        SDK_SHA256=4e957b66ade85eeaee95932aa7e3b45aea64db373c58a5eaefc8228cc71445c2
+        curl -fsSL -o /tmp/vulkan-sdk.tar.xz \
+          "https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/linux/vulkan-sdk.tar.xz"
+        echo "${SDK_SHA256}  /tmp/vulkan-sdk.tar.xz" | sha256sum -c -
+        sudo mkdir -p /opt/vulkan
+        sudo tar -xJf /tmp/vulkan-sdk.tar.xz -C /opt/vulkan
+        # shellcheck disable=SC1091
+        source "/opt/vulkan/${SDK_VERSION}/setup-env.sh"
+        {
+          echo "VULKAN_SDK=${VULKAN_SDK}"
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+          echo "VK_ADD_LAYER_PATH=${VK_ADD_LAYER_PATH}"
+        } >> "$GITHUB_ENV"
+        echo "${VULKAN_SDK}/bin" >> "$GITHUB_PATH"
+        test -x "${VULKAN_SDK}/bin/vulkaninfo"
+        test -e "${VULKAN_SDK}/lib/libvulkan.so"
 
     - name: Download Slang
       shell: bash

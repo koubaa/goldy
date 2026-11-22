@@ -2135,6 +2135,7 @@ impl Scheme {
         a: crate::ops::matmul::BoundOperand,
         b: crate::ops::matmul::BoundOperand,
         c: crate::ops::matmul::BoundOperand,
+        extras: Vec<crate::ops::matmul::BoundOperand>,
         c_access: NodeAccess,
         native: bool,
         fallback: crate::ops::matmul::MatMulFallback,
@@ -2144,29 +2145,38 @@ impl Scheme {
         if let Some(site) = site {
             self.desc.semantic_sites.insert(self.desc.ir.nodes.len() as u32, site);
         }
+        let mut bindings = vec![
+            ResourceBinding {
+                resource: a.resource,
+                access: NodeAccess::Read,
+            },
+            ResourceBinding {
+                resource: b.resource,
+                access: NodeAccess::Read,
+            },
+            ResourceBinding {
+                resource: c.resource,
+                access: c_access,
+            },
+        ];
+        let mut resource_slots = vec![a.slot, b.slot, c.slot];
+        for extra in extras {
+            bindings.push(ResourceBinding {
+                resource: extra.resource,
+                access: NodeAccess::Read,
+            });
+            resource_slots.push(extra.slot);
+        }
         self.desc.ir.nodes.push(TaskNode {
             group: None,
             label,
-            bindings: vec![
-                ResourceBinding {
-                    resource: a.resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: b.resource,
-                    access: NodeAccess::Read,
-                },
-                ResourceBinding {
-                    resource: c.resource,
-                    access: c_access,
-                },
-            ],
+            bindings,
             kind: NodeKind::MatMul(crate::ops::matmul::MatMulNode {
                 desc,
                 a: a.operand,
                 b: b.operand,
                 c: c.operand,
-                resource_slots: vec![a.slot, b.slot, c.slot],
+                resource_slots,
                 native,
                 fallback,
                 fallback_pipeline: None,
@@ -2631,7 +2641,14 @@ impl Scheme {
 
     fn realize_matmul_nodes(&mut self) -> Result<(), GoldyError> {
         use crate::ops::matmul::MatMulFallback;
-        for kind in [MatMulFallback::Gemm, MatMulFallback::Gemv] {
+        for kind in [
+            MatMulFallback::Gemm,
+            MatMulFallback::Gemv,
+            MatMulFallback::GemvBf16,
+            MatMulFallback::GemmBf16,
+            MatMulFallback::GemvIndexed,
+            MatMulFallback::GemvBlock,
+        ] {
             let pending = |n: &TaskNode| {
                 matches!(
                     &n.kind,

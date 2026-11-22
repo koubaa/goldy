@@ -14,6 +14,9 @@ pub enum GoldyTensorDType {
     F32 = 0,
     U32 = 1,
     I32 = 2,
+    BF16 = 3,
+    U8 = 4,
+    F8E4M3 = 5,
 }
 
 impl From<GoldyTensorDType> for TensorDType {
@@ -22,6 +25,9 @@ impl From<GoldyTensorDType> for TensorDType {
             GoldyTensorDType::F32 => TensorDType::F32,
             GoldyTensorDType::U32 => TensorDType::U32,
             GoldyTensorDType::I32 => TensorDType::I32,
+            GoldyTensorDType::BF16 => TensorDType::BF16,
+            GoldyTensorDType::U8 => TensorDType::U8,
+            GoldyTensorDType::F8E4M3 => TensorDType::F8E4M3,
         }
     }
 }
@@ -32,6 +38,9 @@ impl From<TensorDType> for GoldyTensorDType {
             TensorDType::F32 => GoldyTensorDType::F32,
             TensorDType::U32 => GoldyTensorDType::U32,
             TensorDType::I32 => GoldyTensorDType::I32,
+            TensorDType::BF16 => GoldyTensorDType::BF16,
+            TensorDType::U8 => GoldyTensorDType::U8,
+            TensorDType::F8E4M3 => GoldyTensorDType::F8E4M3,
         }
     }
 }
@@ -139,6 +148,9 @@ pub unsafe extern "C" fn goldy_runtime_acquire_tensor(
                 let n = bytes.len() / 4;
                 let vals = slice::from_raw_parts(bytes.as_ptr() as *const i32, n);
                 Tensor::from_i32(&(*runtime).inner, shape, vals)
+            }
+            TensorDType::BF16 | TensorDType::U8 | TensorDType::F8E4M3 => {
+                Tensor::from_bytes(&(*runtime).inner, shape, dt, bytes)
             }
         }
     };

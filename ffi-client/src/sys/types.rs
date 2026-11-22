@@ -261,6 +261,9 @@ pub enum GoldyTensorDType {
     GOLDY_TENSOR_D_TYPE_F32 = 0,
     GOLDY_TENSOR_D_TYPE_U32 = 1,
     GOLDY_TENSOR_D_TYPE_I32 = 2,
+    GOLDY_TENSOR_D_TYPE_BF16 = 3,
+    GOLDY_TENSOR_D_TYPE_U8 = 4,
+    GOLDY_TENSOR_D_TYPE_F8_E4M3 = 5,
 }
 
 #[repr(C)]

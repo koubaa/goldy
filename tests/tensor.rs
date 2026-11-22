@@ -720,8 +720,202 @@ fn tensor_shape_contract_wrong_rank() {
     assert!(err.to_string().contains("expected rank 1"), "{err}");
 }
 
-#[allow(dead_code)]
-fn _compile_view_helpers(v: TensorView<'_>) {
-    let _ = v.dtype();
-    let _ = BufferKind::Scattered;
+fn bf16_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 2);
+    for v in values {
+        let bits = ((*v).to_bits() >> 16) as u16;
+        out.extend_from_slice(&bits.to_le_bytes());
+    }
+    out
+}
+
+fn e2m1(nib: u8) -> f32 {
+    let mag = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0][(nib & 7) as usize];
+    if nib & 8 == 0 {
+        mag
+    } else {
+        -mag
+    }
+}
+
+fn f8_e4m3(b: u8) -> f32 {
+    let sign = (b >> 7) & 1;
+    let exp = (b >> 3) & 0xF;
+    let mant = b & 7;
+    let val = if exp == 0 {
+        mant as f32 * 2f32.powi(-9)
+    } else if exp == 15 && mant == 7 {
+        f32::NAN
+    } else {
+        (1.0 + mant as f32 / 8.0) * 2f32.powi(exp as i32 - 7)
+    };
+    if sign == 0 {
+        val
+    } else {
+        -val
+    }
+}
+
+#[test]
+fn bf16_matvec_promotes_inside_the_dot() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // [[1, 0], [0, 2]] @ [3, 4] = [3, 8]
+    let weight = Tensor::from_bytes(
+        &device,
+        TensorShape::matrix(2, 2),
+        TensorDType::BF16,
+        &bf16_bytes(&[1.0, 0.0, 0.0, 2.0]),
+    )
+    .unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_bf16_into("bf16", weight.view(), x.view(), out.view())
+        .unwrap();
+    let got = read_f32(&mut scheme, out.buffer());
+    assert_eq!(got, vec![3.0, 8.0], "{got:?}");
+}
+
+const TORCH_E4M3_BITS: [u32; 256] = [
+    0x00000000, 0x3b000000, 0x3b800000, 0x3bc00000, 0x3c000000, 0x3c200000, 0x3c400000, 0x3c600000, 0x3c800000,
+    0x3c900000, 0x3ca00000, 0x3cb00000, 0x3cc00000, 0x3cd00000, 0x3ce00000, 0x3cf00000, 0x3d000000, 0x3d100000,
+    0x3d200000, 0x3d300000, 0x3d400000, 0x3d500000, 0x3d600000, 0x3d700000, 0x3d800000, 0x3d900000, 0x3da00000,
+    0x3db00000, 0x3dc00000, 0x3dd00000, 0x3de00000, 0x3df00000, 0x3e000000, 0x3e100000, 0x3e200000, 0x3e300000,
+    0x3e400000, 0x3e500000, 0x3e600000, 0x3e700000, 0x3e800000, 0x3e900000, 0x3ea00000, 0x3eb00000, 0x3ec00000,
+    0x3ed00000, 0x3ee00000, 0x3ef00000, 0x3f000000, 0x3f100000, 0x3f200000, 0x3f300000, 0x3f400000, 0x3f500000,
+    0x3f600000, 0x3f700000, 0x3f800000, 0x3f900000, 0x3fa00000, 0x3fb00000, 0x3fc00000, 0x3fd00000, 0x3fe00000,
+    0x3ff00000, 0x40000000, 0x40100000, 0x40200000, 0x40300000, 0x40400000, 0x40500000, 0x40600000, 0x40700000,
+    0x40800000, 0x40900000, 0x40a00000, 0x40b00000, 0x40c00000, 0x40d00000, 0x40e00000, 0x40f00000, 0x41000000,
+    0x41100000, 0x41200000, 0x41300000, 0x41400000, 0x41500000, 0x41600000, 0x41700000, 0x41800000, 0x41900000,
+    0x41a00000, 0x41b00000, 0x41c00000, 0x41d00000, 0x41e00000, 0x41f00000, 0x42000000, 0x42100000, 0x42200000,
+    0x42300000, 0x42400000, 0x42500000, 0x42600000, 0x42700000, 0x42800000, 0x42900000, 0x42a00000, 0x42b00000,
+    0x42c00000, 0x42d00000, 0x42e00000, 0x42f00000, 0x43000000, 0x43100000, 0x43200000, 0x43300000, 0x43400000,
+    0x43500000, 0x43600000, 0x43700000, 0x43800000, 0x43900000, 0x43a00000, 0x43b00000, 0x43c00000, 0x43d00000,
+    0x43e00000, 0x7fc00000, 0x80000000, 0xbb000000, 0xbb800000, 0xbbc00000, 0xbc000000, 0xbc200000, 0xbc400000,
+    0xbc600000, 0xbc800000, 0xbc900000, 0xbca00000, 0xbcb00000, 0xbcc00000, 0xbcd00000, 0xbce00000, 0xbcf00000,
+    0xbd000000, 0xbd100000, 0xbd200000, 0xbd300000, 0xbd400000, 0xbd500000, 0xbd600000, 0xbd700000, 0xbd800000,
+    0xbd900000, 0xbda00000, 0xbdb00000, 0xbdc00000, 0xbdd00000, 0xbde00000, 0xbdf00000, 0xbe000000, 0xbe100000,
+    0xbe200000, 0xbe300000, 0xbe400000, 0xbe500000, 0xbe600000, 0xbe700000, 0xbe800000, 0xbe900000, 0xbea00000,
+    0xbeb00000, 0xbec00000, 0xbed00000, 0xbee00000, 0xbef00000, 0xbf000000, 0xbf100000, 0xbf200000, 0xbf300000,
+    0xbf400000, 0xbf500000, 0xbf600000, 0xbf700000, 0xbf800000, 0xbf900000, 0xbfa00000, 0xbfb00000, 0xbfc00000,
+    0xbfd00000, 0xbfe00000, 0xbff00000, 0xc0000000, 0xc0100000, 0xc0200000, 0xc0300000, 0xc0400000, 0xc0500000,
+    0xc0600000, 0xc0700000, 0xc0800000, 0xc0900000, 0xc0a00000, 0xc0b00000, 0xc0c00000, 0xc0d00000, 0xc0e00000,
+    0xc0f00000, 0xc1000000, 0xc1100000, 0xc1200000, 0xc1300000, 0xc1400000, 0xc1500000, 0xc1600000, 0xc1700000,
+    0xc1800000, 0xc1900000, 0xc1a00000, 0xc1b00000, 0xc1c00000, 0xc1d00000, 0xc1e00000, 0xc1f00000, 0xc2000000,
+    0xc2100000, 0xc2200000, 0xc2300000, 0xc2400000, 0xc2500000, 0xc2600000, 0xc2700000, 0xc2800000, 0xc2900000,
+    0xc2a00000, 0xc2b00000, 0xc2c00000, 0xc2d00000, 0xc2e00000, 0xc2f00000, 0xc3000000, 0xc3100000, 0xc3200000,
+    0xc3300000, 0xc3400000, 0xc3500000, 0xc3600000, 0xc3700000, 0xc3800000, 0xc3900000, 0xc3a00000, 0xc3b00000,
+    0xc3c00000, 0xc3d00000, 0xc3e00000, 0x7fc00000,
+];
+
+#[test]
+fn e4m3_matches_the_torch_table_and_e2m1_is_complete() {
+    for b in 0..256u16 {
+        let got = f8_e4m3(b as u8);
+        let bits = TORCH_E4M3_BITS[b as usize];
+        if b == 127 || b == 255 {
+            assert!(got.is_nan(), "{b}");
+            continue;
+        }
+        let expect = f32::from_bits(bits);
+        assert_eq!(got.to_bits(), expect.to_bits(), "byte {b}");
+    }
+    let mags = [0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    for nib in 0..16u8 {
+        let expect = if nib < 8 {
+            mags[nib as usize]
+        } else {
+            -mags[(nib & 7) as usize]
+        };
+        assert_eq!(e2m1(nib).to_bits(), expect.to_bits());
+    }
+}
+
+#[test]
+fn block_scaled_matvec_distinguishes_nibble_order() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // Expert 0, one row, k = 16. First byte is nibbles (1.0, 2.0). Scale is 2.0.
+    // A swapped nibble order changes the dot because x[0] != x[1].
+    let mut codes = vec![0u8; 2 * 8];
+    codes[0] = 2 | (4 << 4);
+    for b in 8..16 {
+        codes[b] = 0xAA;
+    }
+    let mut scales = vec![0u8; 2];
+    scales[0] = 0x40;
+    scales[1] = 0x38;
+    let codes_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[2, 1, 8]).unwrap(),
+        TensorDType::U8,
+        &codes,
+    )
+    .unwrap();
+    let scales_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[2, 1, 1]).unwrap(),
+        TensorDType::F8E4M3,
+        &scales,
+    )
+    .unwrap();
+    let factors = Tensor::from_f32(&device, TensorShape::vector(2), &[1.5, -2.0]).unwrap();
+    let mut x_vals = [0.0f32; 16];
+    for i in 0..16 {
+        x_vals[i] = ((i % 17) as f32 - 8.0) / 8.0;
+    }
+    let x = Tensor::from_f32(&device, TensorShape::vector(16), &x_vals).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(1), TensorDType::F32).unwrap();
+    let run = |scheme: &mut Scheme, id: u32| {
+        ids.buffer().write(0, bytemuck::cast_slice(&[id])).unwrap();
+        kernels
+            .recorder(scheme)
+            .matmul_block_scaled_into(
+                "block",
+                goldy::BlockScaled {
+                    codes: codes_t.view(),
+                    scales: scales_t.view(),
+                    elems: goldy::ops::PackedElem::E2M1,
+                    scale: goldy::ops::PackedScale::E4M3,
+                    block: [1, 16],
+                    global: Some(factors.view()),
+                },
+                x.view(),
+                Some((ids.view(), 0)),
+                out.view(),
+            )
+            .unwrap();
+        read_f32(scheme, out.buffer())[0]
+    };
+    let mut scheme = Scheme::new(&ctx);
+    let got = run(&mut scheme, 0);
+    let mut expect = 0.0f32;
+    for col in 0..16 {
+        let byte = codes[col / 2];
+        let nib = if col % 2 == 0 { byte & 0xF } else { byte >> 4 };
+        expect += e2m1(nib) * f8_e4m3(scales[0]) * 1.5 * x_vals[col];
+    }
+    assert!((got - expect).abs() < 1e-5, "expert 0 {got} want {expect}");
+    let swapped = e2m1(4) * f8_e4m3(scales[0]) * 1.5 * x_vals[0] + e2m1(2) * f8_e4m3(scales[0]) * 1.5 * x_vals[1];
+    assert!((swapped - expect).abs() > 1e-3, "nibble swap must change the reference");
+
+    let mut scheme = Scheme::new(&ctx);
+    let got = run(&mut scheme, 1);
+    let mut expect = 0.0f32;
+    for col in 0..16 {
+        expect += e2m1(0xA) * f8_e4m3(scales[1]) * -2.0 * x_vals[col];
+    }
+    assert!((got - expect).abs() < 1e-4, "expert 1 {got} want {expect}");
+
+    let mut scheme = Scheme::new(&ctx);
+    let got = run(&mut scheme, 9);
+    assert_eq!(got, 0.0);
 }

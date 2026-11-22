@@ -176,6 +176,10 @@ pub(crate) fn matmul(
             }
         }
         // C[i, j] = sum{s}(A[i, s] * B[s, j]), labels i, j and s.
+        MatMulFallback::GemvBf16
+        | MatMulFallback::GemmBf16
+        | MatMulFallback::GemvIndexed
+        | MatMulFallback::GemvBlock => return None,
         MatMulFallback::Gemm => {
             let (m64, n64, k64) = (i64::from(m), i64::from(n), i64::from(k));
             let a_strides = if desc.transpose_a { [1, m64] } else { [k64, 1] };
