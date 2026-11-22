@@ -219,6 +219,12 @@ pub mod test_support {
     #[cfg(all(feature = "cuda", feature = "graphics", feature = "dx12", target_os = "windows"))]
     use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+    /// How many fused kernels this runtime has started compiling. A cache hit
+    /// does not increment it.
+    pub fn fusion_compiles_started(runtime: &Runtime) -> u64 {
+        runtime.inner.fusion_compiles.lock().unwrap().started()
+    }
+
     pub fn mock_runtime() -> Arc<Runtime> {
         Arc::new(Runtime::from_backend(Box::new(MockBackend::new())).expect("mock device"))
     }

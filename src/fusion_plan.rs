@@ -393,9 +393,21 @@ type Compiled = Result<Arc<PreparedKernel>, String>;
 
 /// Fused pipelines by program identity, shared with compile workers.
 #[derive(Default)]
-struct Compiles {
+pub(crate) struct Compiles {
     done: HashMap<KernelId, Compiled>,
     running: HashSet<KernelId>,
+    /// Compiles actually started. A second scheme with the same program reuses `done`.
+    started: u64,
+}
+
+pub(crate) fn new_compile_cache() -> Arc<Mutex<Compiles>> {
+    Arc::new(Mutex::new(Compiles::default()))
+}
+
+impl Compiles {
+    pub(crate) fn started(&self) -> u64 {
+        self.started
+    }
 }
 
 /// The planner a [`crate::Scheme`] owns.
@@ -422,12 +434,12 @@ impl Drop for FusionPlanner {
 }
 
 impl FusionPlanner {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(compiles: Arc<Mutex<Compiles>>) -> Self {
         Self {
             phase: Phase::Settling,
             regions: Vec::new(),
             rejected: Vec::new(),
-            compiles: Arc::new(Mutex::new(Compiles::default())),
+            compiles,
             workers: Vec::new(),
             failures_seen: HashSet::new(),
             plan: None,
@@ -800,6 +812,7 @@ impl FusionPlanner {
                 if compiles.done.contains_key(&region.id) || !compiles.running.insert(region.id) {
                     continue;
                 }
+                compiles.started += 1;
             }
             started = true;
             let (forwarded, elided) = region.program.locality();

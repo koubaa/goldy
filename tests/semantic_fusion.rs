@@ -810,3 +810,54 @@ fn turning_fusion_off_after_promotion_resubmits() {
     }
     assert!(scheme.replay_stats().fusion_fallbacks >= 1);
 }
+
+/// Two schemes that record the same fused program compile it once.
+#[test]
+fn fused_program_compiles_once_per_runtime() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let n = 64u32;
+    let shape = TensorShape::vector(n);
+    let mut schemes = Vec::new();
+    for _ in 0..2 {
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(true);
+        let a = Tensor::from_f32(&device, shape, &data(1, n)).unwrap();
+        let b = Tensor::from_f32(&device, shape, &data(2, n)).unwrap();
+        let out = Tensor::zeros(&device, shape, goldy::TensorDType::F32).unwrap();
+        let scaled = {
+            let mut rec = kernels.recorder(&mut scheme);
+            let scaled = rec.mul("mul", a.view(), b.view()).unwrap();
+            rec.add_into("add", scaled.view(), a.view(), out.view()).unwrap();
+            scaled
+        };
+        schemes.push((scheme, scaled, a, b, out));
+    }
+    for (scheme, _, _, _, _) in &mut schemes {
+        for _ in 0..24 {
+            drop(scheme.submit().expect("submit"));
+            goldy::test_support::wait_for_fusion_compiles(scheme);
+            if scheme
+                .fusion_report()
+                .regions
+                .iter()
+                .any(|region| region.status == FusionRegionStatus::Promoted)
+            {
+                break;
+            }
+        }
+    }
+    assert!(
+        schemes.iter().all(|(scheme, _, _, _, _)| {
+            scheme
+                .fusion_report()
+                .regions
+                .iter()
+                .any(|region| region.status == FusionRegionStatus::Promoted)
+        }),
+        "both schemes should promote"
+    );
+    assert_eq!(goldy::test_support::fusion_compiles_started(&device), 1);
+}
