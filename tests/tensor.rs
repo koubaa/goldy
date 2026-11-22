@@ -160,6 +160,36 @@ fn matmul_gemv_matches_semantic_node() {
 }
 
 #[test]
+fn matmul_indexed_reads_the_u32_expert_and_replays() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // expert 0 is identity, expert 1 scales the two rows by 2 and 3.
+    let weight = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[2, 2, 2]).unwrap(),
+        &[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0],
+    )
+    .unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(2), &[1, 0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let _slab = kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_into("expert", weight.view(), x.view(), ids.view(), 0, out.view())
+        .unwrap();
+    assert_eq!(read_f32(&mut scheme, out.buffer()), vec![6.0, 12.0]);
+
+    ids.buffer().write(0, bytemuck::cast_slice(&[0u32, 1u32])).unwrap();
+    assert_eq!(read_f32(&mut scheme, out.buffer()), vec![3.0, 4.0]);
+
+    ids.buffer().write(0, bytemuck::cast_slice(&[9u32, 0u32])).unwrap();
+    assert_eq!(read_f32(&mut scheme, out.buffer()), vec![0.0, 0.0]);
+}
+
+#[test]
 fn strided_narrow_views_alias_parent() {
     let _gpu = gpu_lock();
     let device = runtime();

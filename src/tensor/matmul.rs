@@ -53,6 +53,72 @@ impl<'a> TensorRecorder<'a> {
         )))
     }
 
+    /// `out = weight[ids[slot]] @ x`.
+    ///
+    /// `weight` is a packed `[experts, rows, k]` tensor. `ids` is a rank-1 `u32`
+    /// buffer. The selected slab is copied on device, then multiplied by the same
+    /// lowering as [`Self::matmul_into`], so a GEMV uses the matvec path and a
+    /// GEMM uses the native matmul when the backend has one. An id `>= experts`
+    /// copies zeros and does not read past `weight`.
+    ///
+    /// The returned tensor is the selected weight slab. Keep it alive for every
+    /// submit of the scheme; dropping it frees the parcel the gather writes.
+    pub fn matmul_indexed_into(
+        &mut self,
+        label: &str,
+        weight: TensorView<'_>,
+        x: TensorView<'_>,
+        ids: TensorView<'_>,
+        slot: u32,
+        out: TensorView<'_>,
+    ) -> Result<Tensor, GoldyError> {
+        weight.dtype().require_f32("matmul_indexed")?;
+        x.dtype().require_f32("matmul_indexed")?;
+        out.dtype().require_f32("matmul_indexed")?;
+        if weight.shape().rank() != 3 || !weight.is_contiguous() {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: weight must be a packed [experts, rows, k] tensor".into(),
+            ));
+        }
+        if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: ids must be a rank-1 U32 tensor".into(),
+            ));
+        }
+        if slot >= ids.shape().dim(0)? {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: slot is past the id buffer".into(),
+            ));
+        }
+        let experts = weight.shape().dim(0)?;
+        let rows = weight.shape().dim(1)?;
+        let k = weight.shape().dim(2)?;
+        let tile_shape = TensorShape::matrix(rows, k);
+        if matmul_out_shape(tile_shape, x.shape())? != out.shape() {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: out shape does not match weight[id] @ x".into(),
+            ));
+        }
+        let tile = Tensor::zeros(&self.kernels.runtime, tile_shape, TensorDType::F32)?;
+        let stride = rows.saturating_mul(k);
+        self.kernels
+            .ops
+            .gather_slab
+            .record(
+                self.scheme,
+                format!("{label}_slab"),
+                weight,
+                ids,
+                tile.view(),
+                slot,
+                stride,
+                experts,
+            )?
+            .over_1d(tile.view().numel_u32().max(1));
+        self.matmul_into(&format!("{label}_gemm"), tile.view(), x, out)?;
+        Ok(tile)
+    }
+
     fn matmul_semantic(
         &mut self,
         label: &str,
