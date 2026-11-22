@@ -106,6 +106,39 @@ fn close(got: f32, expected: f64) -> bool {
     abs_ok && rel_ok
 }
 
+/// 1001 samples of `[-0.3, 0.3]`, inclusive.
+fn fine_grid() -> Vec<f32> {
+    (0..1001).map(|i| -0.3 + (i as f32) * (0.6 / 1000.0)).collect()
+}
+
+fn wide_grid() -> Vec<f32> {
+    let mut values: Vec<f32> = (0..801).map(|i| -8.0 + (i as f32) * (16.0 / 800.0)).collect();
+    values.extend_from_slice(&[
+        1.0e-8, -1.0e-8, 1.0e-4, -1.0e-4, 4.0, -4.0, 10.0, -10.0, 25.0, -25.0, 30.0, -30.0, 80.0, -80.0,
+    ]);
+    values
+}
+
+fn assert_abs(what: &str, got: &[f32], inputs: &[f32], expected: impl Fn(f64) -> f64, tol: f64) {
+    assert_eq!(got.len(), inputs.len(), "{what}: length");
+    let mut worst = 0.0_f64;
+    let mut worst_at = 0;
+    for (i, (&g, &x)) in got.iter().zip(inputs).enumerate() {
+        let err = (f64::from(g) - expected(f64::from(x))).abs();
+        if err > worst {
+            worst = err;
+            worst_at = i;
+        }
+    }
+    let x = inputs[worst_at];
+    let g = got[worst_at];
+    assert!(
+        worst < tol,
+        "{what}: max abs err {worst} at input={x:?} got={g:?} expected={} (limit {tol})",
+        expected(f64::from(x))
+    );
+}
+
 fn assert_close(what: &str, got: &[f32], inputs: &[f32], expected: impl Fn(f64) -> f64) {
     assert_eq!(got.len(), inputs.len(), "{what}: length");
     for (i, (&g, &x)) in got.iter().zip(inputs).enumerate() {
@@ -197,6 +230,55 @@ pub fn assert_activations(device: &Runtime) {
         &inputs,
         sigmoid_f64,
     );
+
+    // Absolute error against libm, on the intrinsic and on the tensor ops.
+    let fine = fine_grid();
+    assert_eq!(fine.len(), 1001, "the small-magnitude sweep is 1001 points");
+    for (label, inputs) in [("fine", fine), ("wide", wide_grid())] {
+        let n = inputs.len() as u32;
+        let shape = TensorShape::vector(n);
+        let src = Tensor::from_f32(device, shape, &inputs).unwrap();
+        let tanh_out = Tensor::zeros(device, shape, TensorDType::F32).unwrap();
+        let sigmoid_out = Tensor::zeros(device, shape, TensorDType::F32).unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        kernel
+            .record(&mut scheme, "grid", src.view(), tanh_out.view(), sigmoid_out.view())
+            .unwrap()
+            .over_1d(n);
+        assert_abs(
+            &format!("gpu::tanh {label} on {where_ran}"),
+            &read_f32(&mut scheme, tanh_out.buffer()),
+            &inputs,
+            f64::tanh,
+            1e-6,
+        );
+        assert_abs(
+            &format!("gpu::sigmoid {label} on {where_ran}"),
+            &read_f32(&mut scheme, sigmoid_out.buffer()),
+            &inputs,
+            sigmoid_f64,
+            1e-6,
+        );
+        let mut scheme = Scheme::new(&ctx);
+        let mut rec = kernels.recorder(&mut scheme);
+        let t = rec.tanh("grid_tanh", src.view()).unwrap();
+        let s = rec.sigmoid("grid_sigmoid", src.view()).unwrap();
+        drop(rec);
+        assert_abs(
+            &format!("tensor tanh {label} on {where_ran}"),
+            &read_f32(&mut scheme, t.buffer()),
+            &inputs,
+            f64::tanh,
+            1e-6,
+        );
+        assert_abs(
+            &format!("tensor sigmoid {label} on {where_ran}"),
+            &read_f32(&mut scheme, s.buffer()),
+            &inputs,
+            sigmoid_f64,
+            1e-6,
+        );
+    }
 }
 
 #[allow(dead_code)]

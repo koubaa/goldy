@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`tanh` and `sigmoid`** — unary tensor ops (`TensorRecorder::tanh` / `sigmoid` and
   the `_into` forms) and shader-dialect intrinsics `goldy::gpu::tanh` /
-  `goldy::gpu::sigmoid`. Both are stable for large `|x|`: `tanh` saturates to ±1
-  for `|x| >= 10` (so softcaps at 25 and 30 stay finite) and `sigmoid` never
-  evaluates `exp` of a large positive argument. They participate in semantic
+  `goldy::gpu::sigmoid`. For `|x| < 0.5` both use the odd Taylor series through
+  `x^11`. `tanh` saturates to ±1 for `|x| >= 10` (so softcaps at 25 and 30 stay
+  finite) and `sigmoid` never evaluates `exp` of a large positive argument. They participate in semantic
   fusion the same way as `exp`. `goldy_shader_ir::algebra::UnaryOp` and
   `goldy::kernel::ir::BuiltinFn` gain `Tanh` and `Sigmoid`; exhaustive matches
   need a new arm. Generated Slang calls `goldy_tanh` / `goldy_sigmoid` in

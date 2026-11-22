@@ -333,12 +333,15 @@ impl Eval<'_> {
     }
 }
 
-/// Same rule as `goldy_tanh`: Taylor polynomial for `|x| < 0.5`, saturation at 10.
+/// Same rule as `goldy_tanh`: odd Taylor series through `x^11` for `|x| < 0.5`.
 fn stable_tanh(x: f32) -> f32 {
     let a = x.abs();
     if a < 0.5 {
         let x2 = x * x;
-        return x * (1.0 + x2 * ((-1.0 / 3.0) + x2 * ((2.0 / 15.0) - x2 * (17.0 / 315.0))));
+        return x
+            * (1.0
+                + x2 * (-1.0 / 3.0
+                    + x2 * (2.0 / 15.0 + x2 * (-17.0 / 315.0 + x2 * (62.0 / 2835.0 + x2 * (-1382.0 / 155925.0))))));
     }
     if a >= 10.0 {
         return if x < 0.0 { -1.0 } else { 1.0 };
@@ -352,8 +355,17 @@ fn stable_tanh(x: f32) -> f32 {
     }
 }
 
-/// Same split as `goldy_sigmoid`: `exp` is only evaluated on a non-positive argument.
+/// Same rule as `goldy_sigmoid`: odd Taylor series through `x^11` for `|x| < 0.5`.
 fn stable_sigmoid(x: f32) -> f32 {
+    let a = x.abs();
+    if a < 0.5 {
+        let x2 = x * x;
+        return 0.5
+            + x * (1.0 / 4.0
+                + x2 * (-1.0 / 48.0
+                    + x2 * (1.0 / 480.0
+                        + x2 * (-17.0 / 80640.0 + x2 * (31.0 / 1_451_520.0 + x2 * (-691.0 / 319_334_400.0))))));
+    }
     if x >= 0.0 {
         1.0 / (1.0 + (-x).exp())
     } else {
