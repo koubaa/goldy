@@ -16,7 +16,14 @@ fn mtl_resource_options(flags: BufferFlags) -> MTLResourceOptions {
     }
 }
 
-/// Heap allocation, direct device buffer for GPU-only / jumbo sizes ([`MAX_HEAP_SIZE`]).
+/// Heap allocation, or a direct device buffer when the heap cannot hold this resource.
+///
+/// Host-visible buffers are Shared. On unified memory they come from the Shared
+/// heap. On Intel and discrete Macs the heap is Private, so those buffers are
+/// standalone Shared allocations (`contents()` stays coherent; Managed would
+/// need `didModifyRange` / `synchronize`). GPU-only buffers are Private: Apple
+/// silicon keeps the historical device allocation, and discrete GPUs place
+/// them in the Private heap.
 ///
 /// When the heap is saturated (overflow cap reached), performs a non-blocking
 /// drain-and-retry first, then if still full, waits for the oldest in-flight command
@@ -33,7 +40,15 @@ fn allocate_mtl_storage_buffer(
 
     {
         let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
-        if gpu_only || allocation_size > MAX_HEAP_SIZE {
+        let from_heap = logical_device.memory.host_visible_buffers_from_heap();
+        let place_in_heap = if allocation_size > MAX_HEAP_SIZE {
+            false
+        } else if gpu_only {
+            !from_heap
+        } else {
+            from_heap
+        };
+        if !place_in_heap {
             let buf = logical_device.device.new_buffer(allocation_size, options);
             return Ok((buf, true));
         }
@@ -472,6 +487,7 @@ pub(super) fn resize(
                 let ptr = (new_buffer.contents() as *mut u8).add(copy_len as usize);
                 std::ptr::write_bytes(ptr, 0, tail as usize);
             }
+            super::coherency::note_cpu_write(&new_buffer, copy_len, tail);
         }
         let range = mtl::NSRange::new(copy_len, tail);
         blit.fill_buffer(&new_buffer, range, 0);
@@ -672,6 +688,7 @@ pub(super) fn write(state: &MetalState, buffer_handle: BufferHandle, offset: u64
             let ptr = buffer.buffer.contents().add(offset as usize);
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
         }
+        super::coherency::note_cpu_write(&buffer.buffer, offset, data.len() as u64);
     }
 
     if buffer.flags.contains(BufferFlags::CPU_WRITABLE) {
@@ -720,9 +737,11 @@ pub(super) fn bindless_index(state: &MetalState, buffer_handle: BufferHandle) ->
 ///
 /// # Why both a CPU memset and a queue-ordered blit
 ///
-/// Metal buffers on Apple Silicon use `StorageModeShared`, so the CPU and
-/// GPU ultimately observe the same bytes of physical memory. But the two
-/// paths have asymmetric visibility:
+/// Host-visible Metal buffers use `StorageModeShared` (a Shared heap on Apple
+/// silicon, a standalone Shared buffer on Intel and discrete Macs), so the CPU
+/// and GPU ultimately observe the same bytes. Managed buffers would not: those
+/// need `didModifyRange` after this memset. The two paths still have
+/// asymmetric visibility:
 ///
 /// * A `contents()` + `write_bytes()` is **immediately** visible to any
 ///   subsequent CPU read of the same buffer (tests and readback paths rely
@@ -774,6 +793,7 @@ pub(super) fn clear(
             let ptr = (buffer.buffer.contents() as *mut u8).add(offset as usize);
             std::ptr::write_bytes(ptr, 0, clear_size as usize);
         }
+        super::coherency::note_cpu_write(&buffer.buffer, offset, clear_size);
     }
 
     let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
@@ -864,6 +884,9 @@ pub(super) fn read_texture_readback_staging(
         anyhow::bail!("read_texture_readback_staging size mismatch");
     }
     let buffer = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
+    if let Some(logical_device) = state.devices.get(&buffer.device_handle) {
+        super::coherency::prepare_cpu_read(&logical_device.command_queue, &buffer.buffer);
+    }
     if !buffer.is_withdraw_staging {
         anyhow::bail!("read_texture_readback_staging requires a withdraw staging buffer");
     }
@@ -888,6 +911,9 @@ pub(super) fn read_readback_buffer(state: &MetalState, buffer_handle: BufferHand
     }
     if output.len() as u64 > buffer.size {
         anyhow::bail!("read_readback_buffer would exceed buffer bounds");
+    }
+    if let Some(logical_device) = state.devices.get(&buffer.device_handle) {
+        super::coherency::prepare_cpu_read(&logical_device.command_queue, &buffer.buffer);
     }
     unsafe {
         let ptr = buffer.buffer.contents() as *const u8;

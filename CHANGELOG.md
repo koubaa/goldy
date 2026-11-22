@@ -225,6 +225,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Intel Mac Metal heaps** — creating a device no longer aborts with
+  `Shared storage mode disallowed`. `MTLHeap` is Shared only when the device
+  reports unified memory (Apple silicon). Intel and discrete Macs get Private
+  heaps; host-visible buffers are standalone Shared allocations, and textures
+  stay Private and are uploaded by blit. Apple silicon placement is unchanged.
+
 - **Background compiles at exit** — dropping a `Scheme` joins its specialization and
   fusion compile threads. They were detached, so a compile still inside Slang when the
   process exited could crash in the library's static destructors.

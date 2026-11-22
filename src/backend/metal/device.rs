@@ -5,6 +5,7 @@ use super::types::{
     DeletionQueue, DescriptorRegistry, HeapAllocator, LogicalDevice, MetalAdapterInfo, MetalState,
     TextureHeapAllocator, ARGUMENT_BUFFER_SIZE,
 };
+use crate::backend::metal_storage::{HeapStorage, MetalMemoryFeatures, TextureStorage};
 use crate::backend::{AdapterInfo, BackendType};
 use crate::types::DeviceType;
 use ::metal as mtl;
@@ -20,10 +21,7 @@ use std::sync::{Arc, Mutex};
 /// the likelihood of overflow allocations. See types.rs `MAX_HEAP_SIZE` for the
 /// upper bound.
 const INITIAL_HEAP_SIZE: u64 = 64 * 1024 * 1024;
-use mtl::{
-    Device as MTLDevice, HeapDescriptor, MTLCPUCacheMode, MTLHazardTrackingMode, MTLHeapType, MTLResourceOptions,
-    MTLStorageMode,
-};
+use mtl::{Device as MTLDevice, MTLResourceOptions, MTLStorageMode};
 
 /// Enumerate available Metal devices/adapters.
 pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
@@ -112,15 +110,32 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     );
     tracing::info!("Metal Argument Buffers Tier 2 confirmed — bindless enabled");
 
-    // Create global argument buffer (stores resource device pointers)
+    let features = memory_features(&device);
+    let memory = features.plan();
+    tracing::info!(
+        name = %device.name(),
+        family = features.family_summary(),
+        unified = features.has_unified_memory,
+        apple_family = features.apple_family,
+        mac2 = features.mac2_family,
+        heap = ?memory.heap,
+        host_buffers = ?memory.host_visible_buffer,
+        textures = ?memory.texture,
+        "Metal storage plan"
+    );
+
+    // Create global argument buffer (stores resource device pointers).
+    // Standalone Shared buffer: legal on discrete Macs, and not a heap.
     let argument_buffer = device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
     tracing::info!("Created argument buffer");
 
-    // Create heaps for resource allocation.
-    // Use Shared storage so the CPU can write via replace_region() / contents().
-    // IMPORTANT: CPU cache mode must match between heap and buffer allocation.
+    // Heaps are Shared only when `hasUnifiedMemory` is set. Intel and discrete
+    // Macs abort `newHeap:` with "Shared storage mode disallowed"; they get
+    // Private heaps. Host-visible buffers on those GPUs are standalone Shared
+    // allocations (see `allocate_mtl_storage_buffer`). CPU cache mode on the
+    // heap matches buffer allocations that come out of it.
     let heap_size = INITIAL_HEAP_SIZE;
-    let (heap_allocator, texture_heap) = create_heaps(&device, heap_size);
+    let (heap_allocator, texture_heap) = create_heaps(&device, heap_size, memory.heap);
 
     let (argument_encoder, texture_encoder, storage_image_encoder, sampler_encoder, accel_encoder) =
         create_argument_encoders(&device);
@@ -141,6 +156,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let ld = Arc::new(LogicalDevice {
         device,
         command_queue,
+        memory,
         heap_allocator: Mutex::new(heap_allocator),
         texture_heap: Mutex::new(texture_heap),
         argument_buffer,
@@ -167,46 +183,46 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     Ok(handle)
 }
 
+fn memory_features(device: &MTLDevice) -> MetalMemoryFeatures {
+    MetalMemoryFeatures {
+        has_unified_memory: device.has_unified_memory(),
+        // Apple1 is the base of the Apple GPU families; later families imply it.
+        apple_family: device.supports_family(mtl::MTLGPUFamily::Apple1),
+        mac2_family: device.supports_family(mtl::MTLGPUFamily::Mac2),
+    }
+}
+
+fn heap_mtl_storage(storage: HeapStorage) -> MTLStorageMode {
+    match storage {
+        HeapStorage::Shared => MTLStorageMode::Shared,
+        HeapStorage::Private => MTLStorageMode::Private,
+    }
+}
+
+pub(super) fn texture_mtl_storage(storage: TextureStorage) -> MTLStorageMode {
+    match storage {
+        TextureStorage::Shared => MTLStorageMode::Shared,
+        TextureStorage::Private => MTLStorageMode::Private,
+    }
+}
+
 /// Create the buffer and texture heap allocators for a logical device.
-fn create_heaps(device: &MTLDevice, heap_size: u64) -> (HeapAllocator, TextureHeapAllocator) {
-    tracing::info!("Creating buffer heap allocator...");
-    let buffer_heap_desc = HeapDescriptor::new();
-    buffer_heap_desc.set_size(heap_size);
-    buffer_heap_desc.set_storage_mode(MTLStorageMode::Shared);
-    buffer_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
-    buffer_heap_desc.set_heap_type(MTLHeapType::Automatic);
-    // Tracked (not Untracked): switching to Untracked was investigated as a
-    // potential perf win (avoiding Metal's implicit hazard-tracking overhead)
-    // but turned out to break frame pipelining in practice.
-    //
-    // The explicit synchronisation Untracked requires is:
-    //   • MTLFence at blit↔compute encoder boundaries within a command buffer
-    //   • MTLSharedEvent waits between standalone blit CBs (buffer writes/clears)
-    //     and the following compute CB, to ensure cache coherency
-    //   • A per-resource "written buffers" annotation that lets consecutive
-    //     compute CBs skip the event wait when they share no written resources
-    //
-    //
-    // The net result is that the synchronisation overhead for Untracked exceeds
-    // the savings from bypassing implicit hazard tracking for this workload.
-    // Revisit if Apple exposes a lighter cross-CB barrier primitive.
-    buffer_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
-    let buffer_heap = device.new_heap(&buffer_heap_desc);
+///
+/// Both heaps use the same storage mode. Tracked (not Untracked): switching to
+/// Untracked was investigated as a potential perf win but broke frame
+/// pipelining. The explicit synchronisation Untracked requires (fences at
+/// blit/compute boundaries, shared-event waits, a written-buffer annotation)
+/// costs more than implicit hazard tracking for this workload. Textures are a
+/// harder case still — render-target hazards span multiple command buffers.
+fn create_heaps(device: &MTLDevice, heap_size: u64, storage: HeapStorage) -> (HeapAllocator, TextureHeapAllocator) {
+    let mode = heap_mtl_storage(storage);
+    tracing::info!("Creating buffer heap allocator ({:?})...", mode);
+    let buffer_heap = super::types::new_tracked_heap(device, heap_size, mode);
     let heap_allocator = HeapAllocator::new(device.clone(), buffer_heap, heap_size);
     tracing::info!("Created buffer heap allocator (primary={}MB)", heap_size / 1024 / 1024);
 
-    tracing::info!("Creating texture heap...");
-    let texture_heap_desc = HeapDescriptor::new();
-    texture_heap_desc.set_size(heap_size);
-    texture_heap_desc.set_storage_mode(MTLStorageMode::Shared);
-    texture_heap_desc.set_cpu_cache_mode(MTLCPUCacheMode::DefaultCache);
-    texture_heap_desc.set_heap_type(MTLHeapType::Automatic);
-    // Tracked: same rationale as the buffer heap above. Textures are an even
-    // harder case for Untracked — render-target hazards (coarse→fine, ping-pong
-    // filter layers, swapchain copies) span multiple command buffers, and
-    // MTLSharedEvent ordering alone did not restore correctness there.
-    texture_heap_desc.set_hazard_tracking_mode(MTLHazardTrackingMode::Tracked);
-    let texture_heap_raw = device.new_heap(&texture_heap_desc);
+    tracing::info!("Creating texture heap ({:?})...", mode);
+    let texture_heap_raw = super::types::new_tracked_heap(device, heap_size, mode);
     let texture_heap = TextureHeapAllocator::new(device.clone(), texture_heap_raw, heap_size);
     tracing::info!("Created texture heap (size={}MB)", heap_size / 1024 / 1024);
 

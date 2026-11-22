@@ -14,6 +14,7 @@
 mod accel;
 pub(super) mod api_log;
 mod buffer;
+mod coherency;
 mod compute;
 mod context;
 mod device;
@@ -1333,6 +1334,114 @@ mod tests {
         assert!(backend.is_device_valid(device));
         backend.destroy_device(device);
         assert!(!backend.is_device_valid(device));
+    }
+
+    /// Issue #330: heap storage follows `hasUnifiedMemory`, and host-visible
+    /// buffers stay `contents()`-mapped on both paths.
+    #[test]
+    fn heap_storage_follows_unified_memory() {
+        use crate::backend::metal_storage::{HeapStorage, HostVisibleBufferPlacement, TextureStorage};
+        use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
+
+        let mut backend = MetalBackend::new().unwrap();
+        let handle = backend.create_device(0).expect("create Metal device");
+        let (unified, apple, mac2, plan, buffer_heap, texture_heap) = {
+            let ld = backend.state.devices.get(&handle).expect("logical device");
+            (
+                ld.device.has_unified_memory(),
+                ld.device.supports_family(::metal::MTLGPUFamily::Apple1),
+                ld.device.supports_family(::metal::MTLGPUFamily::Mac2),
+                ld.memory,
+                ld.heap_allocator.lock().unwrap().heap_storage_mode(),
+                ld.texture_heap.lock().unwrap().heap_storage_mode(),
+            )
+        };
+        let features = crate::backend::metal_storage::MetalMemoryFeatures {
+            has_unified_memory: unified,
+            apple_family: apple,
+            mac2_family: mac2,
+        };
+        println!(
+            "metal storage: device family={} plan={plan:?} buffer_heap={buffer_heap:?} texture_heap={texture_heap:?}",
+            features.family_summary()
+        );
+        assert_eq!(plan, features.plan());
+        let heap_mode = if unified {
+            ::metal::MTLStorageMode::Shared
+        } else {
+            ::metal::MTLStorageMode::Private
+        };
+        assert_eq!(buffer_heap, heap_mode);
+        assert_eq!(texture_heap, heap_mode);
+        assert_eq!(
+            plan.heap,
+            if unified {
+                HeapStorage::Shared
+            } else {
+                HeapStorage::Private
+            }
+        );
+
+        let host = super::buffer::create(
+            &mut backend.state,
+            handle,
+            256,
+            crate::backend::BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("host-visible buffer");
+        let gpu = super::buffer::create(
+            &mut backend.state,
+            handle,
+            256,
+            crate::backend::BufferKind::Scattered,
+            None,
+            BufferFlags::GPU_ONLY,
+        )
+        .expect("gpu-only buffer");
+        let tex = super::texture::create(
+            &mut backend.state,
+            handle,
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::empty(),
+        )
+        .expect("texture");
+
+        let host_state = backend.state.buffers.get(&host).unwrap();
+        assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Shared);
+        assert!(!host_state.buffer.contents().is_null(), "host-visible buffer is mapped");
+        assert_eq!(host_state.is_device_allocated, !unified);
+        assert_eq!(
+            plan.host_visible_buffer,
+            if unified {
+                HostVisibleBufferPlacement::SharedHeap
+            } else {
+                HostVisibleBufferPlacement::SharedStandalone
+            }
+        );
+
+        let gpu_state = backend.state.buffers.get(&gpu).unwrap();
+        assert_eq!(gpu_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
+        // Apple silicon: GPU_ONLY stays a device allocation. Discrete: Private heap.
+        assert_eq!(gpu_state.is_device_allocated, unified);
+
+        let tex_state = backend.state.textures.get(&tex).unwrap();
+        assert_eq!(tex_state.texture.storage_mode(), heap_mode);
+        assert!(tex_state.is_heap_allocated);
+        assert_eq!(
+            plan.texture,
+            if unified {
+                TextureStorage::Shared
+            } else {
+                TextureStorage::Private
+            }
+        );
+
+        backend.destroy_device(handle);
     }
 
     /// Regression test for issue #162 (secondary concern): the sampler argument

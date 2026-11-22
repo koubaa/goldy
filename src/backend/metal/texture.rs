@@ -6,7 +6,7 @@ use super::utils::format_to_mtl;
 use crate::types::{TextureFlags, TextureFormat, TextureKind};
 use ::metal as mtl;
 use anyhow::{Context, Result};
-use mtl::{MTLStorageMode, MTLTextureUsage, TextureDescriptor};
+use mtl::{MTLTextureUsage, TextureDescriptor};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,14 +141,21 @@ pub(super) fn create(
     if flags.contains(TextureFlags::RENDER_TARGET) {
         mtl_usage |= MTLTextureUsage::RenderTarget;
     }
-    // COPY_SRC: Metal's blit encoder can copy any StorageModeShared texture without
-    // a special usage bit, but we mirror the Vulkan TRANSFER_SRC convention so that
-    // internal assertions stay consistent across backends.
+    // COPY_SRC: the blit encoder copies Shared and Private textures without a
+    // dedicated usage bit. ShaderRead mirrors Vulkan TRANSFER_SRC so internal
+    // assertions stay consistent across backends.
     if flags.contains(TextureFlags::COPY_SRC) {
         mtl_usage |= MTLTextureUsage::ShaderRead;
     }
     descriptor.set_usage(mtl_usage);
-    descriptor.set_storage_mode(MTLStorageMode::Shared);
+    // Match the texture heap. Shared on unified memory; Private on Intel and
+    // discrete Macs (Shared textures are illegal there, and heaps reject Managed).
+    // CPU uploads are blit copies from Shared staging buffers either way.
+    let storage_mode = {
+        let logical_device = state.devices.get(&device_handle).context("Invalid device handle")?;
+        super::device::texture_mtl_storage(logical_device.memory.texture)
+    };
+    descriptor.set_storage_mode(storage_mode);
 
     let (texture, is_heap_allocated) = allocate_mtl_texture(state, device_handle, &descriptor)?;
 
