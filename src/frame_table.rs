@@ -103,6 +103,10 @@ pub fn staging_row_payload_byte_offset(row: u32) -> u64 {
 ///
 /// `in_use` is the sentinel a submitter stores while it still owns the row on
 /// the CPU. Those rows lose to any row the GPU has already been given.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"))),
+    allow(dead_code)
+)]
 pub fn least_recent_persistent_row(tokens: &[std::sync::atomic::AtomicU64], in_use: u64) -> u32 {
     let mut victim = FRAME_TABLE_TRANSIENT_ROWS;
     let mut oldest = u64::MAX;
