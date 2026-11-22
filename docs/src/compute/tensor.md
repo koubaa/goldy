@@ -122,7 +122,7 @@ single boundary that translates foreign offsets into validated `TensorView`s.
 | Family | Ops | Notes |
 |--------|-----|-------|
 | Construction | `zeros`, `from_f32` / `from_u32` / `from_i32`, `fill`, `copy`, `contiguous`, `cast` | Per-op dtype support |
-| Unary | `neg`, `abs`, `exp`, `log`, `sqrt`, `reciprocal`, `tanh`, `sigmoid` | F32. `tanh` and `sigmoid` saturate for large `|x|` instead of overflowing `exp` |
+| Unary | `neg`, `abs`, `exp`, `log`, `sqrt`, `reciprocal`, `tanh`, `sigmoid` | F32. For `|x| < 0.5`, `tanh` and `sigmoid` use the odd Taylor series through `x^11`. `tanh(|x| >= 10)` is ±1 in f32, so that range skips `exp` |
 | Binary | `add` / `sub` / `mul` / `div` / `min` / `max` and `*_scalar` | F32, NumPy-style broadcasting |
 | Reductions | `sum`, `max_reduce`, `min_reduce`, `mean` | One axis; squeezed by default |
 | Gather / scatter | `gather`; `scatter` with [`ScatterMode`] | Modes are explicit: `UniqueWrite`, `Add`, `Min`, `Max` |

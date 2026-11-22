@@ -86,6 +86,28 @@ fn sigmoid_f64(x: f64) -> f64 {
     }
 }
 
+/// Inputs in `(0, 0.25)` where the exp form of tanh cancels in f32.
+fn small_magnitudes() -> Vec<f32> {
+    let mut values = Vec::new();
+    for &x in &[1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 0.1, 0.2, 0.24] {
+        values.push(x);
+        values.push(-x);
+    }
+    values
+}
+
+fn assert_rel(what: &str, got: &[f32], inputs: &[f32], expected: impl Fn(f64) -> f64, rel_tol: f64) {
+    assert_eq!(got.len(), inputs.len(), "{what}: length");
+    for (i, (&g, &x)) in got.iter().zip(inputs).enumerate() {
+        let e = expected(f64::from(x));
+        let rel = (f64::from(g) - e).abs() / e.abs();
+        assert!(
+            rel <= rel_tol,
+            "{what}[{i}] input={x:?} got={g:?} expected={e:?} rel_err={rel} (limit {rel_tol})"
+        );
+    }
+}
+
 fn close(got: f32, expected: f64) -> bool {
     if expected.is_nan() {
         return got.is_nan();
@@ -229,6 +251,52 @@ pub fn assert_activations(device: &Runtime) {
         &read_f32(&mut scheme, into.buffer()),
         &inputs,
         sigmoid_f64,
+    );
+
+    // Relative error on (0, 0.25), where an absolute tolerance hides cancellation.
+    let small = small_magnitudes();
+    let n = small.len() as u32;
+    let shape = TensorShape::vector(n);
+    let src = Tensor::from_f32(device, shape, &small).unwrap();
+    let tanh_out = Tensor::zeros(device, shape, TensorDType::F32).unwrap();
+    let sigmoid_out = Tensor::zeros(device, shape, TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernel
+        .record(&mut scheme, "small", src.view(), tanh_out.view(), sigmoid_out.view())
+        .unwrap()
+        .over_1d(n);
+    assert_rel(
+        &format!("gpu::tanh small on {where_ran}"),
+        &read_f32(&mut scheme, tanh_out.buffer()),
+        &small,
+        f64::tanh,
+        1e-6,
+    );
+    assert_rel(
+        &format!("gpu::sigmoid small on {where_ran}"),
+        &read_f32(&mut scheme, sigmoid_out.buffer()),
+        &small,
+        sigmoid_f64,
+        1e-6,
+    );
+    let mut scheme = Scheme::new(&ctx);
+    let mut rec = kernels.recorder(&mut scheme);
+    let t = rec.tanh("small_tanh", src.view()).unwrap();
+    let s = rec.sigmoid("small_sigmoid", src.view()).unwrap();
+    drop(rec);
+    assert_rel(
+        &format!("tensor tanh small on {where_ran}"),
+        &read_f32(&mut scheme, t.buffer()),
+        &small,
+        f64::tanh,
+        1e-6,
+    );
+    assert_rel(
+        &format!("tensor sigmoid small on {where_ran}"),
+        &read_f32(&mut scheme, s.buffer()),
+        &small,
+        sigmoid_f64,
+        1e-6,
     );
 
     // Absolute error against libm, on the intrinsic and on the tensor ops.
