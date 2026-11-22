@@ -24,6 +24,16 @@ fn reference_inputs() -> Vec<f32> {
     vec![
         0.0,
         -0.0,
+        1.0e-8,
+        -1.0e-8,
+        1.0e-6,
+        -1.0e-6,
+        1.0e-4,
+        -1.0e-4,
+        1.0e-2,
+        -1.0e-2,
+        0.1,
+        -0.1,
         0.25,
         -0.25,
         0.5,
@@ -81,7 +91,19 @@ fn close(got: f32, expected: f64) -> bool {
         return got.is_nan();
     }
     let diff = (f64::from(got) - expected).abs();
-    diff <= 1e-5 + 1e-4 * expected.abs()
+    if expected == 0.0 {
+        return diff == 0.0;
+    }
+    // Below the smallest positive f32 normal, the device result is 0.
+    const F32_MIN_POS: f64 = 1.175_494_4e-38;
+    if expected.abs() < F32_MIN_POS {
+        return got == 0.0 || diff <= F32_MIN_POS;
+    }
+    // Absolute slack covers saturation at ±1. Relative error catches the
+    // cancellation of the exp form of tanh near zero, which atol 1e-5 hides.
+    let abs_ok = diff <= 1e-5 + 1e-4 * expected.abs();
+    let rel_ok = diff / expected.abs() <= 1e-4;
+    abs_ok && rel_ok
 }
 
 fn assert_close(what: &str, got: &[f32], inputs: &[f32], expected: impl Fn(f64) -> f64) {

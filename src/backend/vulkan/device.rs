@@ -188,7 +188,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let enable_if_present = |bit: vk::Bool32, name: &'static str| -> vk::Bool32 {
         if bit == vk::FALSE {
             tracing::warn!(
-                "{name} is not available; shaders that need it fail at pipeline creation rather than device creation"
+                "{name} is not available. A shader that declares it is invalid here; Goldy does not reject that module before dispatch"
             );
             vk::FALSE
         } else {
@@ -209,10 +209,14 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
     let shader_int8 = supported_12.shader_int8 == vk::TRUE;
     let shader_draw_parameters = supported_11.shader_draw_parameters == vk::TRUE;
     if !shader_float16 {
-        tracing::warn!("shaderFloat16 is not available; half-precision shaders fail at pipeline creation");
+        tracing::warn!(
+            "shaderFloat16 is not available. A shader that declares Float16 is invalid here; Goldy does not reject that module before dispatch"
+        );
     }
     if !shader_int8 {
-        tracing::warn!("shaderInt8 is not available; 8-bit integer shaders fail at pipeline creation");
+        tracing::warn!(
+            "shaderInt8 is not available. A shader that declares Int8 is invalid here; Goldy does not reject that module before dispatch"
+        );
     }
     if !shader_draw_parameters {
         tracing::warn!("shaderDrawParameters is not available; vertex SV_InstanceID is unavailable");
@@ -768,6 +772,7 @@ pub(super) fn create(state: &mut VulkanState, adapter_id: u32) -> Result<DeviceH
             sparse_binding_queue,
             command_pool,
             supports_sparse_buffer: supports_sparse,
+            has_swapchain: available_device_exts.contains("VK_KHR_swapchain"),
             sparse_buffer_block_size,
             sparse_memory_type_index,
             sparse_page_pool: Mutex::new(sparse_page_pool),

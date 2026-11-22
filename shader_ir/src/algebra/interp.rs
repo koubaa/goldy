@@ -333,9 +333,13 @@ impl Eval<'_> {
     }
 }
 
-/// Same saturation rule as `goldy_tanh`: `|x| >= 10` is ±1 in f32.
+/// Same rule as `goldy_tanh`: Taylor polynomial for `|x| < 0.5`, saturation at 10.
 fn stable_tanh(x: f32) -> f32 {
     let a = x.abs();
+    if a < 0.5 {
+        let x2 = x * x;
+        return x * (1.0 + x2 * ((-1.0 / 3.0) + x2 * ((2.0 / 15.0) - x2 * (17.0 / 315.0))));
+    }
     if a >= 10.0 {
         return if x < 0.0 { -1.0 } else { 1.0 };
     }

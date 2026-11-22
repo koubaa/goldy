@@ -180,8 +180,9 @@ Windows, `VK_KHR_android_surface` on Android) are enabled only when the loader
 advertises both. `VK_KHR_swapchain`, `fragmentStoresAndAtomics`,
 `shaderDrawParameters`, `shaderFloat16`, `shaderInt8`, `shaderInt16`, and
 `shaderInt64` are enabled only when the device supports them. Devices that have
-those features still enable them. Shaders that need a missing feature fail when
-the pipeline is created, not when the device is.
+those features still enable them. A shader that declares a capability the device
+did not enable is invalid. Goldy does not scan `OpCapability` before dispatch, so
+that case is not reported as a clean pipeline error.
 
 A graphics queue is still required. The device command pool, the device-owner
 timeline, and presentation are created on a queue family with

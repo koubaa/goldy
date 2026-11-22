@@ -474,7 +474,17 @@ fn download_slang_to_vendored(
     // that zip.
     #[cfg(target_os = "windows")]
     {
-        let status = std::process::Command::new("tar")
+        // bsdtar in System32 reads zip. A GNU tar earlier on PATH does not.
+        let system_tar = std::env::var_os("SystemRoot").map(|root| {
+            let mut path = PathBuf::from(root);
+            path.push("System32");
+            path.push("tar.exe");
+            path
+        });
+        let tar = system_tar
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("tar.exe"));
+        let status = std::process::Command::new(&tar)
             .args(["-xf"])
             .arg(&zip_path)
             .arg("-C")

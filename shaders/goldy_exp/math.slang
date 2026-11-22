@@ -66,14 +66,18 @@ public float goldy_sigmoid(float x) {
     return e / (1.0 + e);
 }
 
-/// Hyperbolic tangent, stable for large |x|.
+/// Hyperbolic tangent, stable for large |x| and accurate for small |x|.
 ///
-/// `tanh(x) = sign(x) * (1 - exp(-2|x|)) / (1 + exp(-2|x|))`. In f32, `|x| >= 10`
-/// is already ±1 (as are the softcaps at 25 and 30), so those inputs return ±1
-/// without calling `exp`. A huge finite value therefore cannot overflow the
-/// exponent into a NaN.
+/// For `|x| < 0.5` the odd Taylor polynomial is used. The identity
+/// `(1 - exp(-2|x|)) / (1 + exp(-2|x|))` cancels in f32 near zero
+/// (`tanh(1e-6)` would be off by about a percent). `|x| >= 10` is already ±1
+/// in f32, including the softcaps at 25 and 30, so those inputs skip `exp`.
 public float goldy_tanh(float x) {
     float a = abs(x);
+    if (a < 0.5) {
+        float x2 = x * x;
+        return x * (1.0 + x2 * ((-1.0 / 3.0) + x2 * ((2.0 / 15.0) - x2 * (17.0 / 315.0))));
+    }
     if (a >= 10.0) {
         if (x < 0.0) {
             return -1.0;

@@ -3,8 +3,9 @@
 //! Targets Vulkan 1.4+ with dynamic rendering.
 //! Supports surface presentation on Windows (`VK_KHR_win32_surface`), Linux
 //! (`VK_KHR_wayland_surface`), and Android (`VK_KHR_android_surface`) when the
-//! loader advertises them. A headless loader still creates an instance; present
-//! fails later if a surface is requested.
+//! loader advertises them. A headless loader still creates an instance.
+//! `create_surface` returns an error when the surface extension or
+//! `VK_KHR_swapchain` was not enabled.
 //!
 //! ## Module Structure
 //!
@@ -189,7 +190,7 @@ fn instance_extension_names(entry: &ash::Entry) -> Result<HashSet<String>> {
 
 /// Enable `VK_KHR_surface` and the platform surface extension when the loader
 /// advertises both. Otherwise leave the instance headless.
-fn push_advertised_surface_extensions(extensions: &mut Vec<*const c_char>, available: &HashSet<String>) {
+fn push_advertised_surface_extensions(extensions: &mut Vec<*const c_char>, available: &HashSet<String>) -> bool {
     let surface = khr::surface::NAME;
     #[cfg(target_os = "windows")]
     let platform = khr::win32_surface::NAME;
@@ -200,7 +201,7 @@ fn push_advertised_surface_extensions(extensions: &mut Vec<*const c_char>, avail
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android")))]
     {
         let _ = (extensions, available, surface);
-        return;
+        return false;
     }
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
     {
@@ -209,11 +210,13 @@ fn push_advertised_surface_extensions(extensions: &mut Vec<*const c_char>, avail
         if available.contains(surface_name.as_ref()) && available.contains(platform_name.as_ref()) {
             extensions.push(surface.as_ptr());
             extensions.push(platform.as_ptr());
+            true
         } else {
             tracing::info!(
                 "instance extensions {surface_name} and {platform_name} are not both available; \
                  creating a headless Vulkan instance (presentation needs both)"
             );
+            false
         }
     }
 }
@@ -259,7 +262,7 @@ impl VulkanBackend {
         // loader that does not advertise them still creates an instance.
         let advertised = instance_extension_names(&entry)?;
         let mut extensions: Vec<*const c_char> = Vec::new();
-        push_advertised_surface_extensions(&mut extensions, &advertised);
+        let surface_extensions = push_advertised_surface_extensions(&mut extensions, &advertised);
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
         let mut enabled_layers: Vec<*const c_char> = Vec::new();
@@ -409,6 +412,7 @@ impl VulkanBackend {
             debug_utils: debug_utils_loader,
             debug_messenger,
             validation_sink,
+            surface_extensions,
         };
 
         Ok(Self { state })
@@ -1094,6 +1098,17 @@ impl GpuBackend for VulkanBackend {
         display: &dyn raw_window_handle::HasDisplayHandle,
         depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<SurfaceHandle> {
+        if !self.state.surface_extensions {
+            anyhow::bail!("this Vulkan instance has no surface extension; presentation is unavailable");
+        }
+        let device = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        if !device.has_swapchain {
+            anyhow::bail!("this Vulkan device has no VK_KHR_swapchain; presentation is unavailable");
+        }
         surface::create(
             &self.state.entry,
             &self.state.instance,
