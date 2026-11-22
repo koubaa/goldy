@@ -949,3 +949,59 @@ fn fused_program_compiles_once_per_runtime() {
     );
     assert_eq!(goldy::test_support::fusion_compiles_started(&device), 1);
 }
+
+/// An in-range indexed GEMV plus a scale is one kernel, matching the unfused dot.
+#[test]
+fn indexed_gemv_scale_fuses() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_matmul(&device) {
+        return;
+    }
+    let (experts, rows, k, slot) = (3u32, 8u32, 16u32, 1u32);
+    let weight = data(1, experts * rows * k);
+    let x = data(2, k);
+    let ids = [0u32, 1, 2];
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let mut scheme = Scheme::new(&ctx);
+    scheme.set_automatic_fusion(true);
+    let w = Tensor::from_f32(&device, TensorShape::from_dims(&[experts, rows, k]).unwrap(), &weight).unwrap();
+    let xv = Tensor::from_f32(&device, TensorShape::vector(k), &x).unwrap();
+    let idt = Tensor::from_u32(&device, TensorShape::vector(3), &ids).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(rows), goldy::TensorDType::F32).unwrap();
+    let scaled = Tensor::zeros(&device, TensorShape::vector(rows), goldy::TensorDType::F32).unwrap();
+    {
+        let mut rec = kernels.recorder(&mut scheme);
+        rec.matmul_indexed_into("expert", w.view(), xv.view(), idt.view(), slot, out.view())
+            .unwrap();
+        rec.mul_scalar_into("scale", out.view(), 2.0, scaled.view()).unwrap();
+    }
+    let mut promoted = false;
+    for _ in 0..24 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
+        promoted = scheme
+            .fusion_report()
+            .regions
+            .iter()
+            .any(|region| region.status == FusionRegionStatus::Promoted);
+        if promoted {
+            break;
+        }
+    }
+    assert!(promoted, "{:?}", scheme.fusion_report());
+    assert_eq!(scheme.executed_node_count(), 1);
+    let mut sub = scheme.submit().expect("read");
+    let got = (&mut sub >> scaled.buffer()).take::<f32>().expect("take").to_vec();
+    drop(sub);
+    let expert = ids[slot as usize] as usize;
+    for i in 0..rows as usize {
+        let mut acc = 0.0f32;
+        for s in 0..k as usize {
+            acc += weight[(expert * rows as usize + i) * k as usize + s] * x[s];
+        }
+        let want = acc * 2.0;
+        assert!((got[i] - want).abs() < 1e-4, "row {i}: {} != {want}", got[i]);
+    }
+}

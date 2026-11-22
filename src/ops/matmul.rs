@@ -718,9 +718,10 @@ impl<'a> MatMulBuilder<'a> {
                 (&b.operand, b.parcel?),
                 (&c.operand, c.parcel?),
             ];
+            let ids = self.extras.first().and_then(|extra| extra.parcel);
             match native {
                 true => crate::semantic_fusion::library_matmul(&self.desc, fallback, operands),
-                false => crate::semantic_fusion::matmul(&self.desc, fallback, operands),
+                false => crate::semantic_fusion::matmul(&self.desc, fallback, operands, ids),
             }
         };
         let site = site();
