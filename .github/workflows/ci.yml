@@ -593,17 +593,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python SSL libraries
+      - name: Install system Python
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libssl3 ca-certificates \
-            || apt-get install -y --no-install-recommends libssl3t64 ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3 python3-pip python3-venv python3-dev ca-certificates
+          python3 -m venv /opt/py
+          echo "/opt/py/bin" >> "$GITHUB_PATH"
           rm -rf /var/lib/apt/lists/*
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
 
       - name: Install Slang download deps
         run: |
