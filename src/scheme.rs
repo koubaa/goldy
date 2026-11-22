@@ -5238,6 +5238,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 specialization_warms: 0,
                 specialization_promotions: 0,
                 specialization_demotions: 0,
+                // Adding a node replaces the retained command buffer.
+                retained_evictions: 1,
                 ..Default::default()
             }
         );
@@ -5272,6 +5274,8 @@ void cs_main(DirectSpatial<float4> dst, ThreadId id) {
                 specialization_warms: 0,
                 specialization_promotions: 0,
                 specialization_demotions: 0,
+                // Swapping the pipeline replaces the retained command buffer.
+                retained_evictions: 1,
                 ..Default::default()
             }
         );
