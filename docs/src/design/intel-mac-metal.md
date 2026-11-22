@@ -1,6 +1,6 @@
 # Intel and Discrete Macs on Metal
 
-**Status**: Proposal (**Designed**, not shipped). Tracks [#330](https://github.com/koubaa/goldy/issues/330); reviews [#333](https://github.com/koubaa/goldy/pull/333).
+**Status**: Proposal (**Designed**, not shipped). Tracks [#330](https://github.com/koubaa/goldy/issues/330); reviews [#333](https://github.com/koubaa/goldy/pull/333). The full per-site inventory is in [Metal on Intel and AMD Macs: Audit](./metal-discrete-audit.md).
 
 Goldy's Metal backend aborts on every Intel Mac at device creation:
 
