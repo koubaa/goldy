@@ -3,6 +3,7 @@
 # - Linux: lavapipe (Mesa's Vulkan software renderer)
 #          Requires Mesa 25.0+ for Vulkan 1.4 support in lavapipe.
 # - macOS: Native Metal backend (Apple Silicon GPU, Tier 2, pinned macos-15)
+#            plus macos-15-intel for non-unified-memory heap placement (#330)
 # - Windows: DX12 on WARP (GOLDY_DX12_ALLOW_WARP=1; no discrete GPU on hosted runners)
 # - WebGPU (wgpu): Linux Vulkan/lavapipe, macOS Metal, Windows DX12/WARP
 #   (`--no-default-features --features webgpu`, GOLDY_BACKEND=webgpu)
@@ -246,6 +247,188 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test -p goldy-ffi
+
+  # Intel macOS (paravirtual GPU). Shared MTLHeaps abort here when the device
+  # has no unified memory — issue #330. The probe records that rejection
+  # without failing the job; the Goldy tests must then succeed with Private heaps.
+  test-metal-intel:
+    name: Metal Tests (macOS Intel)
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Host and display
+        run: |
+          echo "=== host ==="
+          uname -m
+          sw_vers
+          system_profiler SPDisplaysDataType || true
+
+      - name: Probe Metal heap storage modes
+        id: metal_probe
+        run: |
+          set +e
+          swift scripts/metal_shared_heap_probe.swift > "$RUNNER_TEMP/metal-info.txt" 2>&1
+          info_status=$?
+          set -e
+          echo "=== device ==="
+          cat "$RUNNER_TEMP/metal-info.txt"
+          {
+            echo "## Intel Metal device"
+            echo '```'
+            cat "$RUNNER_TEMP/metal-info.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$info_status" -eq 2 ]; then
+            echo "METAL_GPU_TESTS=0" >> "$GITHUB_ENV"
+            echo "No MTLDevice on this runner. GPU tests skipped; storage-mode unit tests still run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$info_status" -ne 0 ]; then
+            echo "Metal capability probe failed with exit $info_status"
+            exit 1
+          fi
+
+          unified=$(grep -o 'unified=[^ ]*' "$RUNNER_TEMP/metal-info.txt" | head -1 | cut -d= -f2)
+          tier2=$(grep -o 'tier2=[^ ]*' "$RUNNER_TEMP/metal-info.txt" | head -1 | cut -d= -f2)
+          echo "unified=$unified tier2=$tier2"
+
+          probe_heap() {
+            local flag="$1"
+            local out="$RUNNER_TEMP/heap-${flag}.txt"
+            set +e
+            swift scripts/metal_shared_heap_probe.swift "$flag" > "$out" 2>&1
+            local status=$?
+            set -e
+            echo "=== $flag exit=$status ==="
+            cat "$out" || true
+            echo "$status"
+          }
+
+          # Capture exit codes from the last line of each probe.
+          shared_status=$(probe_heap --shared-heap | tail -1)
+          managed_status=$(probe_heap --managed-heap | tail -1)
+          private_status=$(probe_heap --private-heap | tail -1)
+          # The echo of logs happens inside probe_heap on stdout mixed with the status.
+          # Re-print saved logs for the summary. The function also printed them live.
+          {
+            echo "## Heap probes (exit status)"
+            echo "- shared: \`$shared_status\`"
+            echo "- managed: \`$managed_status\`"
+            echo "- private: \`$private_status\`"
+            echo '```'
+            echo "--- shared ---"
+            cat "$RUNNER_TEMP/heap---shared-heap.txt" || true
+            echo "--- managed ---"
+            cat "$RUNNER_TEMP/heap---managed-heap.txt" || true
+            echo "--- private ---"
+            cat "$RUNNER_TEMP/heap---private-heap.txt" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$private_status" != "0" ]; then
+            echo "Private MTLHeap was not created (exit $private_status); discrete placement cannot work."
+            exit 1
+          fi
+
+          echo "=== shared heap log ==="
+          cat "$RUNNER_TEMP/heap---shared-heap.txt" || true
+          echo "=== managed heap log ==="
+          cat "$RUNNER_TEMP/heap---managed-heap.txt" || true
+          echo "=== private heap log ==="
+          cat "$RUNNER_TEMP/heap---private-heap.txt" || true
+
+          # 134/133/132 are SIGABRT/SIGTRAP/SIGILL — Metal's heap validator aborts.
+          is_metal_abort() {
+            case "$1" in
+              132|133|134|138|139) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ "$unified" = "true" ]; then
+            if [ "$shared_status" != "0" ]; then
+              echo "Unified device rejected a Shared heap (exit $shared_status)."
+              exit 1
+            fi
+            echo "Runner reports unified memory; Shared heaps are legal. This does not reproduce #330." >> "$GITHUB_STEP_SUMMARY"
+          else
+            if [ "$shared_status" = "0" ]; then
+              echo "Non-unified device accepted a Shared heap. #330 would not reproduce here."
+              exit 1
+            fi
+            if grep -qi "shared storage mode" "$RUNNER_TEMP/heap---shared-heap.txt"; then
+              echo "Reproduced #330 on this GPU: Shared MTLHeap aborts with 'Shared storage mode disallowed'." >> "$GITHUB_STEP_SUMMARY"
+            elif is_metal_abort "$shared_status"; then
+              echo "Shared MTLHeap aborted (exit $shared_status) without the assertion text in the captured log." >> "$GITHUB_STEP_SUMMARY"
+              echo "Treating the abort as the #330 rejection. See the shared heap log above."
+            else
+              echo "Shared heap failed with exit $shared_status, not an assertion abort."
+              exit 1
+            fi
+          fi
+
+          # Managed heaps are illegal on macOS (unified or not). Record the result;
+          # a successful Managed heap would mean the assumption in the fix is wrong.
+          if [ "$managed_status" = "0" ]; then
+            echo "Managed MTLHeap was accepted; the fix assumes macOS heaps reject Managed."
+            exit 1
+          fi
+
+          if [ "$tier2" = "true" ]; then
+            echo "METAL_GPU_TESTS=1" >> "$GITHUB_ENV"
+          else
+            echo "METAL_GPU_TESTS=0" >> "$GITHUB_ENV"
+            echo "Metal device has no Argument Buffers Tier 2. Goldy GPU tests skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Download Slang compiler
+        if: env.METAL_GPU_TESTS == '1'
+        run: |
+          cd slang
+          chmod +x download.sh
+          ./download.sh
+          if [ "$(uname -m)" = "arm64" ]; then
+            SLANG_DIR="$(pwd)/bin/macos-aarch64"
+          else
+            SLANG_DIR="$(pwd)/bin/macos-x86_64"
+          fi
+          SLANG_LIB="$SLANG_DIR/libslang.dylib"
+          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
+          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+          echo "Slang libraries:"
+          ls -la "$SLANG_DIR" || echo "Directory not found"
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-metal-intel-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-metal-intel-
+
+      - name: Storage-mode unit tests
+        run: cargo test --lib metal_storage
+
+      - name: Run Metal device, compute, and offscreen render
+        if: env.METAL_GPU_TESTS == '1'
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          cargo test --lib heap_storage_follows_unified_memory
+          cargo test --lib test_metal_device_creation
+          cargo test --test scheme_compute_integration -- scheme_compute_write_and_readback scheme_cpu_readable_compute_write_and_read scheme_write_texture_round_trip scheme_compute_with_uav_parcel
+          cargo test --test scheme_screenshot_tests -- scheme_solid_red scheme_rgb_triangle
 
   # Build documentation
   docs:
