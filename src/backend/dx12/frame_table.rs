@@ -527,7 +527,7 @@ fn write_row_payload(ft: &ContextFrameTable, data: &[u32], row: u32) {
 /// that work's fence value (bounded pipeline backpressure) before overwriting upload bytes.
 pub(crate) fn write_staging_for_submission(
     contexts: &super::types::SharedContextMap,
-    ld: &super::types::SharedLogicalDevice,
+    _ld: &super::types::SharedLogicalDevice,
     ctx: super::ContextHandle,
     frame_table: &ContextFrameTable,
     data: &[u32],
@@ -724,15 +724,14 @@ fn write_staging_persistent(
         pin_row(frame_table, victim)?;
         victim
     };
-    let fence = {
+    let sc_arc = {
         let contexts_read = contexts.read().unwrap();
-        let sc_arc = contexts_read
+        contexts_read
             .get(&ctx)
             .with_context(|| format!("frame table staging: invalid context {ctx}"))?
-            .clone();
-        drop(contexts_read);
-        sc_arc.lock().unwrap().fence.clone()
+            .clone()
     };
+    let fence = sc_arc.lock().unwrap().fence.clone();
     if let Err(err) = reserve_row_with_backpressure(frame_table, row, &fence) {
         unpin_row(frame_table, row);
         return Err(err);

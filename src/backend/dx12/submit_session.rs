@@ -357,7 +357,7 @@ impl crate::backend::ContextSubmitSession for Dx12SubmitSession {
 
     fn retained_evictions(&self, ctx: ContextHandle) -> u64 {
         let _ = ctx;
-        self.frame_table()
+        self.frame_table
             .retained_evictions
             .load(std::sync::atomic::Ordering::Relaxed)
     }

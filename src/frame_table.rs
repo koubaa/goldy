@@ -34,9 +34,10 @@ pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
 /// Maximum bindless indices routed through the table per submission row.
 /// A coarse/fine pipeline can exceed 256 indices in a single submission
-/// (longpathdash peaks at ~269), and an unfused 12-layer transformer decode step
-/// needs ~700; keep shader and Rust constants in sync.
-pub const FRAME_TABLE_ROW_STRIDE: u32 = 4096;
+/// (longpathdash peaks at ~269). An unfused 12-layer step needs ~700, and one
+/// Inkling Mini token needs about 25k. Keep this in sync with
+/// `GOLDY_FRAME_TABLE_ROW_STRIDE` in `access.slang`.
+pub const FRAME_TABLE_ROW_STRIDE: u32 = 32768;
 /// In-flight rows for submissions that are not retained. The ring wraps; a
 /// later submit waits until the GPU has finished with the row it is about to
 /// overwrite.
