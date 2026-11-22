@@ -410,7 +410,7 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: |
-          cargo test --lib heap_storage_follows_unified_memory
+          cargo test --lib heap_storage_follows_apple_family
           cargo test --lib test_metal_device_creation
           cargo test --test scheme_compute_integration -- scheme_compute_write_and_readback scheme_cpu_readable_compute_write_and_read scheme_write_texture_round_trip scheme_compute_with_uav_parcel
           cargo test --test scheme_screenshot_tests -- scheme_solid_red scheme_rgb_triangle

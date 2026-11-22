@@ -14,7 +14,6 @@
 mod accel;
 pub(super) mod api_log;
 mod buffer;
-mod coherency;
 mod compute;
 mod context;
 mod device;
@@ -1336,10 +1335,10 @@ mod tests {
         assert!(!backend.is_device_valid(device));
     }
 
-    /// Issue #330: heap storage follows `hasUnifiedMemory`, and host-visible
+    /// Issue #330: heap storage follows `supportsFamily(Apple1)`, and host-visible
     /// buffers stay `contents()`-mapped on both paths.
     #[test]
-    fn heap_storage_follows_unified_memory() {
+    fn heap_storage_follows_apple_family() {
         use crate::backend::metal_storage::{HeapStorage, HostVisibleBufferPlacement, TextureStorage};
         use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
 
@@ -1366,7 +1365,8 @@ mod tests {
             features.family_summary()
         );
         assert_eq!(plan, features.plan());
-        let heap_mode = if unified {
+        // Intel iGPUs report unified memory and are not Apple-family.
+        let heap_mode = if apple {
             ::metal::MTLStorageMode::Shared
         } else {
             ::metal::MTLStorageMode::Private
@@ -1375,7 +1375,7 @@ mod tests {
         assert_eq!(texture_heap, heap_mode);
         assert_eq!(
             plan.heap,
-            if unified {
+            if apple {
                 HeapStorage::Shared
             } else {
                 HeapStorage::Private
@@ -1414,10 +1414,10 @@ mod tests {
         let host_state = backend.state.buffers.get(&host).unwrap();
         assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Shared);
         assert!(!host_state.buffer.contents().is_null(), "host-visible buffer is mapped");
-        assert_eq!(host_state.is_device_allocated, !unified);
+        assert_eq!(host_state.is_device_allocated, !apple);
         assert_eq!(
             plan.host_visible_buffer,
-            if unified {
+            if apple {
                 HostVisibleBufferPlacement::SharedHeap
             } else {
                 HostVisibleBufferPlacement::SharedStandalone
@@ -1426,15 +1426,15 @@ mod tests {
 
         let gpu_state = backend.state.buffers.get(&gpu).unwrap();
         assert_eq!(gpu_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
-        // Apple silicon: GPU_ONLY stays a device allocation. Discrete: Private heap.
-        assert_eq!(gpu_state.is_device_allocated, unified);
+        // Apple silicon: GPU_ONLY stays a device allocation. Non-Apple: Private heap.
+        assert_eq!(gpu_state.is_device_allocated, apple);
 
         let tex_state = backend.state.textures.get(&tex).unwrap();
         assert_eq!(tex_state.texture.storage_mode(), heap_mode);
         assert!(tex_state.is_heap_allocated);
         assert_eq!(
             plan.texture,
-            if unified {
+            if apple {
                 TextureStorage::Shared
             } else {
                 TextureStorage::Private

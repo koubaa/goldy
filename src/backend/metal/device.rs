@@ -129,9 +129,10 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
     let argument_buffer = device.new_buffer(ARGUMENT_BUFFER_SIZE, MTLResourceOptions::StorageModeShared);
     tracing::info!("Created argument buffer");
 
-    // Heaps are Shared only when `hasUnifiedMemory` is set. Intel and discrete
-    // Macs abort `newHeap:` with "Shared storage mode disallowed"; they get
-    // Private heaps. Host-visible buffers on those GPUs are standalone Shared
+    // Heaps are Shared only for Apple-family GPUs (`supportsFamily(Apple1)`).
+    // Intel iGPUs report `hasUnifiedMemory` and still abort `newHeap:` with
+    // "Shared storage mode disallowed". Those GPUs, and AMD discrete Macs, get
+    // Private heaps. Host-visible buffers there are standalone Shared
     // allocations (see `allocate_mtl_storage_buffer`). CPU cache mode on the
     // heap matches buffer allocations that come out of it.
     let heap_size = INITIAL_HEAP_SIZE;

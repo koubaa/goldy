@@ -833,7 +833,6 @@ pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
                                 data.len(),
                             );
                         }
-                        super::coherency::note_cpu_write(&buf_state.buffer, *offset, data.len() as u64);
                         continue;
                     }
                 }

@@ -60,8 +60,9 @@ Goldy's Metal backend is native (no MoltenVK) and requires **Argument Buffers Ti
 
 - Apple Silicon: All models (M1/M2/M3/M4, A14+)
 - Intel Macs: 2017+ (different iGPUs; some very early Intel UHD may not qualify).
-  These GPUs have no unified memory, so Goldy uses Private `MTLHeap`s there and
-  keeps CPU-visible buffers in standalone Shared allocations.
+  Intel iGPUs can report unified memory and still reject Shared `MTLHeap`s, so
+  Goldy uses Private heaps unless the GPU is Apple-family, and keeps
+  CPU-visible buffers in standalone Shared allocations.
 - AMD discrete GPUs in Macs: 2015+ (same Private-heap placement as Intel)
 
 Older Intel integrated GPUs (pre-2017 Macs) are **not supported** — they lack Argument Buffers Tier 2.

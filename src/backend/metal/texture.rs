@@ -148,7 +148,7 @@ pub(super) fn create(
         mtl_usage |= MTLTextureUsage::ShaderRead;
     }
     descriptor.set_usage(mtl_usage);
-    // Match the texture heap. Shared on unified memory; Private on Intel and
+    // Match the texture heap. Shared on Apple-family GPUs; Private on Intel and
     // discrete Macs (Shared textures are illegal there, and heaps reject Managed).
     // CPU uploads are blit copies from Shared staging buffers either way.
     let storage_mode = {

@@ -6,8 +6,9 @@
 //!
 //! The Metal backend uses Argument Buffers Tier 2 for bindless resource access:
 //! - Resources are allocated from MTLHeap for efficient residency management.
-//!   Heaps are `Shared` on unified memory and `Private` on Intel/discrete Macs
-//!   (Shared heaps abort there). Host-visible buffers on those GPUs are
+//!   Heaps are `Shared` on Apple-family GPUs and `Private` on Intel and
+//!   discrete Macs (Shared heaps abort there, including Intel iGPUs that
+//!   report unified memory). Host-visible buffers on those GPUs are
 //!   standalone Shared allocations; see `crate::backend::metal_storage`.
 //! - A global argument buffer stores GPU resource IDs (gpuResourceID)
 //! - At render time, useHeap() declares residency for all resources
@@ -500,8 +501,8 @@ fn resource_storage_mode(options: MTLResourceOptions) -> mtl::MTLStorageMode {
     }
 }
 
-/// Tracked automatic heap. `storage` must be legal for this device: Shared
-/// only with unified memory, otherwise Private. Managed is not a heap mode.
+/// Tracked automatic heap. `storage` is Shared on Apple-family GPUs and
+/// Private otherwise. Managed is not a heap mode.
 pub(super) fn new_tracked_heap(device: &MTLDevice, size: u64, storage: mtl::MTLStorageMode) -> Heap {
     let desc = mtl::HeapDescriptor::new();
     desc.set_size(size);

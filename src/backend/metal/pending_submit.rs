@@ -72,7 +72,6 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
         unsafe {
             std::ptr::copy_nonoverlapping(w.data.as_ptr(), ptr.add(offset_usize) as *mut u8, w.data.len());
         }
-        super::coherency::note_cpu_write(&w.buffer, w.offset, w.data.len() as u64);
     }
     Ok(())
 }
