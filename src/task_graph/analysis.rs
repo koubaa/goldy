@@ -563,13 +563,24 @@ pub fn schedule_waves(ir: &GraphIR, edges: &[(usize, usize)]) -> CompiledSchedul
     // A barrier is needed for resource R before wave W if:
     //   - some node in a prior wave writes R, and some node in wave W accesses R
     //   - OR some node in a prior wave reads R, and some node in wave W writes R
+    //
+    // Bucket crossing edges by the consumer's depth once. Scanning every edge
+    // for every wave is quadratic in a long chain (one node per wave), which is
+    // what one recorded token looks like.
+    let mut edges_into_depth: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_waves];
+    for &(from, to) in edges {
+        let consumer = depth[to];
+        if depth[from] < consumer {
+            edges_into_depth[consumer].push((from, to));
+        }
+    }
     let waves = expanded
         .into_iter()
         .map(|(d, node_indices)| {
             let barriers_before = if d == 0 {
                 BarrierSet::default()
             } else {
-                compute_barriers(ir, edges, &depth, d, &node_indices)
+                compute_barriers(ir, &edges_into_depth[d], &depth, d, &node_indices)
             };
             Wave {
                 node_indices,
@@ -2142,6 +2153,25 @@ mod tests {
                 height: 1,
             },
         }
+    }
+
+    #[test]
+    fn long_copy_chain_schedules_without_rescanning_every_edge() {
+        let n = 3000;
+        let nodes = (0..n)
+            .map(|i| copy_buffer_node("copy", buf(i as u64), buf(i as u64 + 1)))
+            .collect();
+        let ir = GraphIR {
+            nodes,
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let schedule = schedule_waves(&ir, &build_edges(&ir));
+        let elapsed = started.elapsed();
+        assert_eq!(schedule.waves.len(), n);
+        assert!(schedule.waves[0].barriers_before.is_empty());
+        assert!(!schedule.waves[n - 1].barriers_before.is_empty());
+        assert!(elapsed.as_millis() < 2_000, "chain of {n} took {elapsed:?}");
     }
 
     #[test]
