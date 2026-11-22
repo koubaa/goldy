@@ -848,6 +848,73 @@ fn nvfp4_indexed_matvec_matches_the_reference_dequant() {
     assert_eq!(read_f32(&mut scheme, out.buffer()), vec![0.0]);
 }
 
+/// Opt-in: `GOLDY_NVFP4_ROW=/tmp/nvrow` with `codes.bin`, `scales.bin`,
+/// `amax.bin`, and `denom.bin` for one real Inkling-2-Mini expert row
+/// (k = 2304). Not run in CI.
+#[test]
+fn nvfp4_real_mini_row_matches_when_present() {
+    let Some(dir) = std::env::var_os("GOLDY_NVFP4_ROW") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let codes = std::fs::read(dir.join("codes.bin")).unwrap();
+    let scales = std::fs::read(dir.join("scales.bin")).unwrap();
+    let amax = f32::from_le_bytes(std::fs::read(dir.join("amax.bin")).unwrap().try_into().unwrap());
+    let denom = f32::from_le_bytes(std::fs::read(dir.join("denom.bin")).unwrap().try_into().unwrap());
+    let factor = amax / denom;
+    let k = 2304usize;
+    assert_eq!(codes.len(), k / 2);
+    assert_eq!(scales.len(), k / 16);
+    let mut expect = 0.0f32;
+    for col in 0..k {
+        let byte = codes[col / 2];
+        let nib = if col % 2 == 0 { byte & 0xF } else { byte >> 4 };
+        expect += e2m1(nib) * f8_e4m3(scales[col / 16]) * factor;
+    }
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let codes_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[1, 1, (k / 2) as u32]).unwrap(),
+        TensorDType::U8,
+        &codes,
+    )
+    .unwrap();
+    let scales_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[1, 1, (k / 16) as u32]).unwrap(),
+        TensorDType::F8E4M3,
+        &scales,
+    )
+    .unwrap();
+    let factors = Tensor::from_f32(&device, TensorShape::vector(1), &[factor]).unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(k as u32), &vec![1.0; k]).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(1), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_nvfp4_indexed_into(
+            "real",
+            goldy::Nvfp4Experts {
+                codes: codes_t.view(),
+                scales: scales_t.view(),
+                factors: factors.view(),
+                ids: ids.view(),
+                slot: 0,
+            },
+            x.view(),
+            out.view(),
+        )
+        .unwrap();
+    let got = read_f32(&mut scheme, out.buffer())[0];
+    let err = (got - expect).abs();
+    eprintln!("real mini row dot got {got} expect {expect} abs {err} factor {factor}");
+    assert!(err < 1e-2, "got {got} expect {expect} abs {err}");
+}
+
 #[allow(dead_code)]
 fn _compile_view_helpers(v: TensorView<'_>) {
     let _ = v.dtype();
