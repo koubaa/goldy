@@ -31,7 +31,24 @@ use mtl::{Device as MTLDevice, MTLResourceOptions, MTLStorageMode};
 pub(super) fn enumerate(adapters: &[MetalAdapterInfo]) -> Vec<AdapterInfo> {
     adapters
         .iter()
-        .filter(|entry| device_facts(&entry.device).meets_floor())
+        .filter(|entry| {
+            let facts = device_facts(&entry.device);
+            if let Some(reason) = facts.floor_rejection() {
+                eprintln!(
+                    "goldy: skipping Metal adapter '{}' ({reason}; apple={} metal3={} tier2={} rw_tier2={} os={} paravirtual={})",
+                    entry.device.name(),
+                    facts.apple_family,
+                    facts.metal3,
+                    facts.argument_buffers_tier2,
+                    facts.read_write_texture_tier2,
+                    facts.os_major,
+                    facts.paravirtual,
+                );
+                false
+            } else {
+                true
+            }
+        })
         .map(|entry| {
             let device = &entry.device;
             let name = device.name().to_string();
@@ -243,20 +260,26 @@ fn host_os_major() -> u32 {
     *MAJOR.get_or_init(|| {
         #[cfg(target_os = "macos")]
         {
-            if let Ok(output) = std::process::Command::new("sw_vers").arg("-productVersion").output() {
-                if let Ok(text) = std::str::from_utf8(&output.stdout) {
-                    if let Some(major) = text.trim().split('.').next().and_then(|part| part.parse().ok()) {
+            // `sw_vers` is not required: the plist is present on every macOS install.
+            if let Ok(text) = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist") {
+                if let Some(version) = plist_string(&text, "ProductVersion") {
+                    if let Some(major) = version.split('.').next().and_then(|part| part.parse().ok()) {
                         return major;
                     }
                 }
             }
-            0
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            17
-        }
+        0
     })
+}
+
+fn plist_string<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("<key>{key}</key>");
+    let rest = plist.get(plist.find(&needle)? + needle.len()..)?;
+    let start = rest.find("<string>")? + "<string>".len();
+    let rest = rest.get(start..)?;
+    let end = rest.find("</string>")?;
+    Some(rest[..end].trim())
 }
 
 fn heap_mtl_storage(storage: HeapStorage) -> MTLStorageMode {

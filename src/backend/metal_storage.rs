@@ -151,7 +151,9 @@ impl MetalDeviceFacts {
 
     /// `None` when the device meets the floor. The string is a clean error, not a panic.
     pub fn floor_rejection(self) -> Option<&'static str> {
-        if self.os_major < 13 {
+        // `os_major == 0` means the host version could not be read. Do not
+        // reject Apple silicon CI on that alone.
+        if self.os_major > 0 && self.os_major < 13 {
             return Some("Goldy Metal requires macOS 13 or newer (C-layout argument buffers)");
         }
         if !self.metal3 {
@@ -160,7 +162,9 @@ impl MetalDeviceFacts {
         if !self.argument_buffers_tier2 {
             return Some("Goldy Metal requires Argument Buffers Tier 2");
         }
-        if !self.read_write_texture_tier2 {
+        // GitHub's Apple paravirtual GPU runs storage images but can under-report
+        // the read-write tier. Non-Apple GPUs still have to advertise tier 2.
+        if !self.apple_family && !self.read_write_texture_tier2 {
             return Some("Goldy Metal requires read-write texture tier 2");
         }
         None
