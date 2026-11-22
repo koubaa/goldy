@@ -228,12 +228,10 @@ When compiling shaders, Goldy passes backend-specific preprocessor defines:
 
 ### Metal Requirements
 
-Goldy requires **Argument Buffers Tier 2**, supported on:
-- Apple Silicon (all models)
-- Intel Macs 2017+
-- AMD GPUs 2015+
-
-Older Intel hardware (pre-2017) is not supported.
+Goldy's supported Metal path is **Apple silicon** on macOS 13+ (Metal 3, Argument
+Buffers Tier 2, read-write texture tier 2). Intel and AMD Macs are unsupported
+and untested. A best-effort placement exists for Metal 3 GPUs outside the Apple
+family; Polaris and anything older than macOS 13 are outside that floor.
 
 <details>
 

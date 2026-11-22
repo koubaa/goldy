@@ -3,6 +3,7 @@
 # - Linux: lavapipe (Mesa's Vulkan software renderer)
 #          Requires Mesa 25.0+ for Vulkan 1.4 support in lavapipe.
 # - macOS: Native Metal backend (Apple Silicon GPU, Tier 2, pinned macos-15)
+#            plus macos-15-intel for non-unified-memory heap placement (#330)
 # - Windows: DX12 on WARP (GOLDY_DX12_ALLOW_WARP=1; no discrete GPU on hosted runners)
 # - WebGPU (wgpu): Linux Vulkan/lavapipe, macOS Metal, Windows DX12/WARP
 #   (`--no-default-features --features webgpu`, GOLDY_BACKEND=webgpu)
@@ -169,6 +170,9 @@ jobs:
   test-metal:
     name: Metal Tests (macOS)
     runs-on: macos-15
+    env:
+      MTL_DEBUG_LAYER: "1"
+      MTL_SHADER_VALIDATION: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -246,6 +250,202 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test -p goldy-ffi
+
+      # Private heaps and Private textures are legal on Apple silicon, so the
+      # same runner exercises the non-Apple placement. A Shared heap or texture
+      # in this mode panics.
+      - name: Run all tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
+        run: cargo test
+
+      - name: Run integration tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
+        run: cargo test --test '*'
+
+      - name: Run goldy-ffi integration tests (discrete placement)
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          GOLDY_METAL_PLACEMENT: discrete
+        run: cargo test -p goldy-ffi
+
+  # Intel macOS (paravirtual GPU). The probe records whether Shared / Managed /
+  # Private MTLHeaps are accepted. A nil heap or a missing Argument Buffers
+  # Tier 2 means this VM cannot run Goldy, so those outcomes are logged and the
+  # storage-mode unit tests still run. GPU tests run only when Tier 2 is present.
+  test-metal-intel:
+    name: Metal Tests (macOS Intel)
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Host and display
+        run: |
+          echo "=== host ==="
+          uname -m
+          sw_vers
+          system_profiler SPDisplaysDataType || true
+
+      - name: Probe Metal heap storage modes
+        id: metal_probe
+        run: |
+          set +e
+          swift scripts/metal_shared_heap_probe.swift > "$RUNNER_TEMP/metal-info.txt" 2>&1
+          info_status=$?
+          set -e
+          echo "=== device ==="
+          cat "$RUNNER_TEMP/metal-info.txt"
+          {
+            echo "## Intel Metal device"
+            echo '```'
+            cat "$RUNNER_TEMP/metal-info.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$info_status" -eq 2 ]; then
+            echo "METAL_GPU_TESTS=0" >> "$GITHUB_ENV"
+            echo "No MTLDevice on this runner. GPU tests skipped; storage-mode unit tests still run." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$info_status" -ne 0 ]; then
+            echo "Metal capability probe failed with exit $info_status"
+            exit 1
+          fi
+
+          unified=$(grep -o 'unified=[^ ]*' "$RUNNER_TEMP/metal-info.txt" | head -1 | cut -d= -f2)
+          tier2=$(grep -o 'tier2=[^ ]*' "$RUNNER_TEMP/metal-info.txt" | head -1 | cut -d= -f2)
+          echo "unified=$unified tier2=$tier2"
+
+          probe_heap() {
+            local flag="$1"
+            local out="$RUNNER_TEMP/heap-${flag}.txt"
+            local status_file="$RUNNER_TEMP/heap-${flag}.status"
+            set +e
+            swift scripts/metal_shared_heap_probe.swift "$flag" > "$out" 2>&1
+            local status=$?
+            set -e
+            echo "$status" > "$status_file"
+            echo "=== $flag exit=$status ==="
+            cat "$out" || true
+          }
+
+          # Print every attempt before deciding. Command substitution hid these
+          # logs when an earlier version exited on the private-heap result.
+          probe_heap --shared-heap
+          probe_heap --managed-heap
+          probe_heap --private-heap
+          shared_status=$(cat "$RUNNER_TEMP/heap---shared-heap.status")
+          managed_status=$(cat "$RUNNER_TEMP/heap---managed-heap.status")
+          private_status=$(cat "$RUNNER_TEMP/heap---private-heap.status")
+
+          {
+            echo "## Heap probes (exit status)"
+            echo "- shared: \`$shared_status\`"
+            echo "- managed: \`$managed_status\`"
+            echo "- private: \`$private_status\`"
+            echo '```'
+            echo "--- shared ---"
+            cat "$RUNNER_TEMP/heap---shared-heap.txt" || true
+            echo "--- managed ---"
+            cat "$RUNNER_TEMP/heap---managed-heap.txt" || true
+            echo "--- private ---"
+            cat "$RUNNER_TEMP/heap---private-heap.txt" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 1 is a Swift failure (the script did not run). 3 is makeHeap -> nil.
+          # 132/133/134/138/139 are signal aborts from the heap validator.
+          for pair in "shared:$shared_status" "managed:$managed_status" "private:$private_status"; do
+            status="${pair#*:}"
+            if [ "$status" -eq 1 ]; then
+              echo "Heap probe failed to run ($pair)."
+              exit 1
+            fi
+          done
+
+          if grep -qi "shared storage mode" "$RUNNER_TEMP/heap---shared-heap.txt"; then
+            echo "Shared MTLHeap aborted with 'Shared storage mode disallowed'." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$shared_status" -eq 0 ]; then
+            echo "Shared MTLHeap was created." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$shared_status" -eq 3 ]; then
+            echo "Shared MTLHeap returned nil (no assertion)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Shared MTLHeap exited $shared_status." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$private_status" -eq 0 ]; then
+            echo "Private MTLHeap was created." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$private_status" -eq 3 ]; then
+            echo "Private MTLHeap returned nil. This GPU cannot host an MTLHeap the way Goldy allocates one." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Private MTLHeap exited $private_status." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Goldy requires Tier 2 before it creates heaps, so a device without
+          # Tier 2 never reaches the #330 assertion. Skip GPU tests then.
+          if [ "$tier2" = "true" ] && [ "$private_status" -eq 0 ]; then
+            echo "METAL_GPU_TESTS=1" >> "$GITHUB_ENV"
+          else
+            echo "METAL_GPU_TESTS=0" >> "$GITHUB_ENV"
+            echo "Goldy GPU tests skipped (tier2=$tier2, private_heap_exit=$private_status). Storage-mode unit tests still run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Download Slang compiler
+        run: |
+          cd slang
+          chmod +x download.sh
+          ./download.sh
+          if [ "$(uname -m)" = "arm64" ]; then
+            SLANG_DIR="$(pwd)/bin/macos-aarch64"
+          else
+            SLANG_DIR="$(pwd)/bin/macos-x86_64"
+          fi
+          SLANG_LIB="$SLANG_DIR/libslang.dylib"
+          echo "GOLDY_SLANG_PATH=$SLANG_LIB" >> $GITHUB_ENV
+          echo "SLANG_LIB_DIR=$SLANG_DIR" >> $GITHUB_ENV
+          echo "Slang libraries:"
+          ls -la "$SLANG_DIR" || echo "Directory not found"
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-metal-intel-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-metal-intel-
+
+      - name: Storage-mode unit tests
+        run: cargo test --lib metal_storage
+
+      - name: Runtime creation returns an error below the floor
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --lib creating_device_does_not_abort_when_below_floor -- --nocapture
+
+      - name: Run Metal device, compute, and offscreen render
+        if: env.METAL_GPU_TESTS == '1'
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: |
+          cargo test --lib heap_storage_follows_apple_family
+          cargo test --lib test_metal_device_creation
+          cargo test --test scheme_compute_integration -- scheme_compute_write_and_readback scheme_cpu_readable_compute_write_and_read scheme_write_texture_round_trip scheme_compute_with_uav_parcel
+          cargo test --test scheme_screenshot_tests -- scheme_solid_red scheme_rgb_triangle
 
   # Build documentation
   docs:

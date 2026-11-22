@@ -36,6 +36,11 @@ pub(crate) mod cpu;
 #[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
 pub(crate) mod metal;
 
+// Heap / host-visible storage selection for Metal. Pure (no `metal` crate) so
+// the Intel vs Apple silicon decision is tested on every host. See issue #330.
+#[cfg(any(test, all(feature = "metal", any(target_os = "macos", target_os = "ios"))))]
+mod metal_storage;
+
 // Portable WebGPU backend (compute + raster via wgpu).
 #[cfg(feature = "webgpu")]
 pub(crate) mod webgpu;

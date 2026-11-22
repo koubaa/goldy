@@ -225,6 +225,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Intel Mac Metal heaps** — creating a device no longer aborts with
+  `Shared storage mode disallowed`. Shared heaps and Shared textures require
+  an Apple-family GPU. Other Metal 3 GPUs are best-effort and untested:
+  Private heaps, Private textures, device-local unflagged parcels, and
+  standalone Shared buffers for CPU-visible data. `GOLDY_METAL_PLACEMENT=discrete`
+  forces that path. The floor is Metal 3, macOS 13, Argument Buffers Tier 2,
+  and read-write texture tier 2; devices outside it return an error.
+  Apple silicon behavior is unchanged unless the override is set.
+
 - **Background compiles at exit** — dropping a `Scheme` joins its specialization and
   fusion compile threads. They were detached, so a compile still inside Slang when the
   process exited could crash in the library's static destructors.

@@ -5,7 +5,11 @@
 //! ## Bindless Architecture
 //!
 //! The Metal backend uses Argument Buffers Tier 2 for bindless resource access:
-//! - Resources are allocated from MTLHeap for efficient residency management
+//! - Resources are allocated from MTLHeap for efficient residency management.
+//!   Heaps are `Shared` on Apple-family GPUs and `Private` on Intel and
+//!   discrete Macs (Shared heaps abort there, including Intel iGPUs that
+//!   report unified memory). Host-visible buffers on those GPUs are
+//!   standalone Shared allocations; see `crate::backend::metal_storage`.
 //! - A global argument buffer stores GPU resource IDs (gpuResourceID)
 //! - At render time, useHeap() declares residency for all resources
 //! - Shaders access resources by index into the argument buffer
@@ -109,6 +113,12 @@ impl HeapAllocator {
     /// (see rationale there — we'd rather fail this one allocation than let
     /// a corrupt size request wedge the whole process).
     pub fn allocate(&mut self, size: u64, options: MTLResourceOptions) -> Option<MTLBuffer> {
+        // A Private heap cannot satisfy a Shared allocation (and the debug
+        // validator can fault the mismatch). Callers place host-visible
+        // buffers with `device.newBuffer` on discrete GPUs.
+        if resource_storage_mode(options) != self.primary.storage_mode() {
+            return None;
+        }
         if size > MAX_HEAP_SIZE {
             tracing::error!(
                 "Refusing buffer allocation of {}MB (cap={}MB); this usually indicates \
@@ -338,14 +348,13 @@ impl HeapAllocator {
         self.high_water_mark = self.high_water_mark.max(total);
     }
 
+    /// Storage mode of the live primary heap (`Shared` or `Private`).
+    pub fn heap_storage_mode(&self) -> mtl::MTLStorageMode {
+        self.primary.storage_mode()
+    }
+
     fn create_heap(&self, size: u64) -> Heap {
-        let desc = mtl::HeapDescriptor::new();
-        desc.set_size(size);
-        desc.set_storage_mode(mtl::MTLStorageMode::Shared);
-        desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
-        desc.set_heap_type(mtl::MTLHeapType::Automatic);
-        desc.set_hazard_tracking_mode(mtl::MTLHazardTrackingMode::Tracked);
-        self.device.new_heap(&desc)
+        new_tracked_heap(&self.device, size, self.primary.storage_mode())
     }
 }
 
@@ -381,6 +390,9 @@ impl TextureHeapAllocator {
     /// Tries primary, then all overflow heaps (newest first), then creates a
     /// new overflow. Overflow heap creation is capped to prevent runaway growth.
     pub fn allocate(&mut self, descriptor: &mtl::TextureDescriptorRef) -> Option<MTLTexture> {
+        if descriptor.storage_mode() != self.primary.storage_mode() {
+            return None;
+        }
         if let Some(tex) = self.primary.new_texture(descriptor) {
             self.texture_count += 1;
             return Some(tex);
@@ -466,15 +478,39 @@ impl TextureHeapAllocator {
         }
     }
 
-    fn create_heap(&self, size: u64) -> Heap {
-        let desc = mtl::HeapDescriptor::new();
-        desc.set_size(size);
-        desc.set_storage_mode(mtl::MTLStorageMode::Shared);
-        desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
-        desc.set_heap_type(mtl::MTLHeapType::Automatic);
-        desc.set_hazard_tracking_mode(mtl::MTLHazardTrackingMode::Tracked);
-        self.device.new_heap(&desc)
+    /// Storage mode of the live primary texture heap.
+    pub fn heap_storage_mode(&self) -> mtl::MTLStorageMode {
+        self.primary.storage_mode()
     }
+
+    fn create_heap(&self, size: u64) -> Heap {
+        new_tracked_heap(&self.device, size, self.primary.storage_mode())
+    }
+}
+
+fn resource_storage_mode(options: MTLResourceOptions) -> mtl::MTLStorageMode {
+    let bits = (options.bits() & mtl::MTLResourceStorageModeMask) >> mtl::MTLResourceStorageModeShift;
+    if bits == mtl::MTLStorageMode::Managed as u64 {
+        mtl::MTLStorageMode::Managed
+    } else if bits == mtl::MTLStorageMode::Private as u64 {
+        mtl::MTLStorageMode::Private
+    } else if bits == mtl::MTLStorageMode::Memoryless as u64 {
+        mtl::MTLStorageMode::Memoryless
+    } else {
+        mtl::MTLStorageMode::Shared
+    }
+}
+
+/// Tracked automatic heap. `storage` is Shared on Apple-family GPUs and
+/// Private otherwise. Managed is not a heap mode.
+pub(super) fn new_tracked_heap(device: &MTLDevice, size: u64, storage: mtl::MTLStorageMode) -> Heap {
+    let desc = mtl::HeapDescriptor::new();
+    desc.set_size(size);
+    desc.set_storage_mode(storage);
+    desc.set_cpu_cache_mode(mtl::MTLCPUCacheMode::DefaultCache);
+    desc.set_heap_type(mtl::MTLHeapType::Automatic);
+    desc.set_hazard_tracking_mode(mtl::MTLHazardTrackingMode::Tracked);
+    device.new_heap(&desc)
 }
 
 /// GPU resource retained until [`TimelineValue`] completion on a context [`SharedEvent`].
@@ -701,13 +737,19 @@ pub(crate) struct LogicalDevice {
     /// per-context requirement map already covers that case.
     pub command_queue: CommandQueue,
 
+    /// Heap and host-visible placement for this GPU. Apple silicon keeps Shared
+    /// heaps; Intel and discrete Macs use Private heaps.
+    pub memory: crate::backend::metal_storage::MetalStoragePlan,
+
     // Bindless infrastructure (always present — Tier 2 required)
     /// Multi-heap allocator for buffer allocations (grows on demand)
     pub heap_allocator: Mutex<HeapAllocator>,
     /// Multi-heap allocator for texture allocations (grows on demand)
     pub texture_heap: Mutex<TextureHeapAllocator>,
-    /// Global argument buffer containing resource IDs
+    /// CPU-visible argument buffer. On Apple silicon this is also what the GPU reads.
     pub argument_buffer: MTLBuffer,
+    /// Private copy the GPU reads when placement is discrete. `None` on Apple silicon.
+    pub argument_device: Option<MTLBuffer>,
     /// Encoder for writing buffers to the argument buffer
     pub argument_encoder: ArgumentEncoder,
     /// Encoder for writing sampled textures (ReadOnly) to the argument buffer
@@ -747,6 +789,11 @@ pub(crate) struct LogicalDevice {
 }
 
 impl LogicalDevice {
+    /// Buffer bound as `[[buffer(0)]]`. The Private copy when discrete placement stages uploads.
+    pub(crate) fn gpu_argument_buffer(&self) -> &MTLBuffer {
+        self.argument_device.as_ref().unwrap_or(&self.argument_buffer)
+    }
+
     /// Drop deferred resources whose barrier is `<= completed`.
     ///
     /// When `completed_by_context` is provided, also reclaim bindless slots whose
@@ -1422,6 +1469,8 @@ pub(crate) struct BufferState {
     pub allocation_size: u64,
     /// `true` when created via [`MTLDevice::new_buffer`] (jumbo) rather than a heap.
     pub is_device_allocated: bool,
+    /// Resolved once at allocation. `host_mapped()` is the CPU `contents()` check.
+    pub placement: crate::backend::metal_storage::MetalBufferPlacement,
     /// Index in the global argument buffer (always present — heap required).
     pub arg_buffer_index: u32,
     pub flags: crate::types::BufferFlags,

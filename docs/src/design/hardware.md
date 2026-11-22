@@ -47,7 +47,7 @@ Enhanced Barriers are mandatory — Goldy does not fall back to legacy resource 
 
 For software rendering and CI, Goldy supports the **WARP** software rasterizer via `GOLDY_DX12_FORCE_WARP=1`.
 
-### Metal Tier 2+
+### Metal
 
 Goldy's Metal backend is native (no MoltenVK) and requires **Argument Buffers Tier 2** for bindless resource access:
 
@@ -58,11 +58,19 @@ Goldy's Metal backend is native (no MoltenVK) and requires **Argument Buffers Ti
 
 **Supported hardware:**
 
-- Apple Silicon: All models (M1/M2/M3/M4, A14+)
-- Intel Macs: 2017+ (different iGPUs; some very early Intel UHD may not qualify)
-- AMD discrete GPUs in Macs: 2015+
+- Apple Silicon: All models (M1/M2/M3/M4, A14+). This is the supported Metal path.
 
-Older Intel integrated GPUs (pre-2017 Macs) are **not supported** — they lack Argument Buffers Tier 2.
+**Intel and AMD Macs are unsupported.** The backend can attempt a best-effort
+non-Apple placement (Private heaps, Private textures, device-local unflagged
+parcels, standalone Shared buffers for CPU-visible exchange media), but that
+path is **untested on hardware**. Do not treat a green `macos-15-intel` job as
+coverage: that runner's paravirtual GPU is Metal 2 and cannot create a runtime.
+
+The floor, when the best-effort path is tried, is Metal 3, macOS 13, Argument
+Buffers Tier 2, and read-write texture tier 2. Polaris (Radeon Pro 4xx/5xx,
+555X/560X, 580X) is Tier 2 but not Metal 3, so it is outside the floor.
+`hasUnifiedMemory` is not the heap predicate: Intel iGPUs report it and still
+reject Shared heaps.
 
 ## What "Modern GPU" Means for Goldy
 

@@ -562,7 +562,7 @@ impl GpuBackend for MetalBackend {
 
     fn host_read_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
         let buf = self.state.buffers.get(&buffer)?;
-        if buf.flags.contains(crate::types::BufferFlags::GPU_ONLY) {
+        if !buf.placement.host_mapped() {
             return None;
         }
         let ptr = buf.buffer.contents() as *const u8;
@@ -1335,6 +1335,132 @@ mod tests {
         assert!(!backend.is_device_valid(device));
     }
 
+    /// Issue #330: heap storage follows `supportsFamily(Apple1)`, and host-visible
+    /// buffers stay `contents()`-mapped on both paths.
+    #[test]
+    fn heap_storage_follows_apple_family() {
+        use crate::backend::metal_storage::{HeapStorage, TextureStorage};
+        use crate::types::{BufferFlags, TextureFlags, TextureFormat, TextureKind};
+
+        let mut backend = MetalBackend::new().unwrap();
+        let handle = backend.create_device(0).expect("create Metal device");
+        let (unified, apple, mac2, plan, buffer_heap, texture_heap) = {
+            let ld = backend.state.devices.get(&handle).expect("logical device");
+            (
+                ld.device.has_unified_memory(),
+                ld.device.supports_family(::metal::MTLGPUFamily::Apple1),
+                ld.device.supports_family(::metal::MTLGPUFamily::Mac2),
+                ld.memory,
+                ld.heap_allocator.lock().unwrap().heap_storage_mode(),
+                ld.texture_heap.lock().unwrap().heap_storage_mode(),
+            )
+        };
+        let features = crate::backend::metal_storage::MetalMemoryFeatures {
+            has_unified_memory: unified,
+            apple_family: apple,
+            mac2_family: mac2,
+        };
+        println!(
+            "metal storage: device family={} plan={plan:?} buffer_heap={buffer_heap:?} texture_heap={texture_heap:?}",
+            features.family_summary()
+        );
+        assert_eq!(plan, features.plan());
+        // `plan.discrete` includes GOLDY_METAL_PLACEMENT=discrete on Apple silicon.
+        let shared_heaps = !plan.discrete;
+        let heap_mode = if shared_heaps {
+            ::metal::MTLStorageMode::Shared
+        } else {
+            ::metal::MTLStorageMode::Private
+        };
+        assert_eq!(buffer_heap, heap_mode);
+        assert_eq!(texture_heap, heap_mode);
+        assert_eq!(
+            plan.heap,
+            if shared_heaps {
+                HeapStorage::Shared
+            } else {
+                HeapStorage::Private
+            }
+        );
+
+        let host = super::buffer::create(
+            &mut backend.state,
+            handle,
+            256,
+            crate::backend::BufferKind::Scattered,
+            None,
+            BufferFlags::empty(),
+        )
+        .expect("host-visible buffer");
+        let gpu = super::buffer::create(
+            &mut backend.state,
+            handle,
+            256,
+            crate::backend::BufferKind::Scattered,
+            None,
+            BufferFlags::GPU_ONLY,
+        )
+        .expect("gpu-only buffer");
+        let tex = super::texture::create(
+            &mut backend.state,
+            handle,
+            4,
+            4,
+            TextureFormat::Rgba8Unorm,
+            TextureKind::Interpolated,
+            TextureFlags::empty(),
+        )
+        .expect("texture");
+
+        let host_state = backend.state.buffers.get(&host).unwrap();
+        if shared_heaps {
+            assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Shared);
+            assert!(!host_state.buffer.contents().is_null(), "host-visible buffer is mapped");
+            assert!(!host_state.is_device_allocated);
+            assert!(host_state.placement.host_mapped());
+        } else {
+            // Unflagged parcels are Private heap allocations under discrete placement.
+            assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
+            assert!(!host_state.is_device_allocated);
+            assert!(!host_state.placement.host_mapped());
+        }
+
+        let gpu_state = backend.state.buffers.get(&gpu).unwrap();
+        assert_eq!(gpu_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
+        // Apple silicon: GPU_ONLY stays a device allocation. Discrete: Private heap.
+        assert_eq!(gpu_state.is_device_allocated, shared_heaps);
+        assert!(!gpu_state.placement.host_mapped());
+
+        let tex_state = backend.state.textures.get(&tex).unwrap();
+        assert_eq!(tex_state.texture.storage_mode(), heap_mode);
+        assert!(tex_state.is_heap_allocated);
+        assert_eq!(
+            plan.texture,
+            if shared_heaps {
+                TextureStorage::Shared
+            } else {
+                TextureStorage::Private
+            }
+        );
+
+        backend.destroy_device(handle);
+    }
+
+    /// Paravirtual Intel CI has no Metal 3 / Tier 2 device. Creating a runtime
+    /// must return an error instead of aborting inside `newHeap:`.
+    #[test]
+    fn creating_device_does_not_abort_when_below_floor() {
+        let mut backend = MetalBackend::new().unwrap();
+        if !backend.enumerate_adapters().is_empty() {
+            return;
+        }
+        let err = backend.create_device(0);
+        assert!(
+            err.is_err(),
+            "a GPU below the Metal floor must return Err, not abort: {err:?}"
+        );
+    }
+
     /// Regression test for issue #162 (secondary concern): the sampler argument
     /// encoder's stride must match the 8-byte-per-slot assumption baked into
     /// `ARGUMENT_BUFFER_SIZE` and the sampler category layout.
@@ -1365,7 +1491,8 @@ mod tests {
         use ::metal::Device as MTLDevice;
 
         let device = MTLDevice::system_default().expect("No Metal device available");
-        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) = create_argument_encoders(&device);
+        let (buf_enc, tex_enc, si_enc, smp_enc, accel_enc) =
+            create_argument_encoders(&device).expect("argument encoder strides");
 
         // All four encoders must report the same 8-byte stride.
         assert_eq!(
