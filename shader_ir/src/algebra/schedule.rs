@@ -94,6 +94,9 @@ pub enum ContractionPrecision {
 pub const WORKGROUP_THREADS: u32 = 256;
 /// Threads per workgroup of a [`Schedule::Lanes`] that [`lower`] chooses.
 pub const LANE_WORKGROUP_THREADS: u32 = 128;
+/// Longest vector a lane-ordered product may materialize for the product that
+/// consumes it. Longer chains stay separate dispatches.
+const CHAIN_VECTOR_MAX: u32 = 256;
 
 /// Where the runtime value of an index parameter comes from: one integer element of
 /// a parcel, read once per thread.
@@ -662,6 +665,8 @@ impl Prepared {
             loads: None,
             depth: 0,
             output: String::new(),
+            lane_guard: true,
+            chains: Vec::new(),
         };
         self.enter(&mut emit, 0);
         emit
@@ -676,6 +681,7 @@ impl Prepared {
         }
         emit.cache.clear();
         emit.hoisted.clear();
+        emit.chains.clear();
         emit.output = self.name(self.bodies[part.outputs[0]].0).to_string();
     }
 
@@ -718,6 +724,12 @@ impl Prepared {
     pub(super) fn estimate(&self, k: usize, lanes: Option<u32>, hoisted: &[Term], computed: &[&Term]) -> Estimate {
         let part = &self.parts[k];
         let mut known: Vec<&Term> = computed.to_vec();
+        let mut chained = Vec::new();
+        for &n in &part.outputs {
+            collect_chains(&self.bodies[n].1, None, &mut chained);
+        }
+        // The chained product is computed once per workgroup, not inside every row.
+        known.extend(chained.iter().map(|slot| &slot.term));
         let (mut serial, mut loads, mut per_thread) = (0, 0, 0);
         for term in hoisted {
             serial += cost::serial(term, &known);
@@ -746,14 +758,36 @@ impl Prepared {
             }
             known.extend(pending);
         }
+        let per_group = match lanes {
+            Some(lanes) => (LANE_WORKGROUP_THREADS / lanes).max(1),
+            None => WORKGROUP_THREADS,
+        };
+        if let Some(lanes) = lanes {
+            for slot in &chained {
+                let per_thread = cost::serial(&slot.term, &[]).div_ceil(u64::from(lanes));
+                serial += u64::from(slot.extent) * per_thread;
+                loads += u64::from(slot.extent) * cost::loads(&slot.term, &[]).div_ceil(u64::from(lanes));
+            }
+        }
+        let prologue_serial = serial;
+        let prologue_loads = loads;
         let threads = part.elements() * u64::from(lanes.unwrap_or(1));
         let mut work = threads * per_thread;
+        for slot in &chained {
+            // The vector is computed once, then every output row reads it.
+            work += u64::from(slot.extent) * cost::ops(&slot.term, &[]);
+        }
         for &n in &part.outputs {
             let body = &self.bodies[n].1;
             serial += cost::serial(body, &known) + 1;
             loads += cost::loads(body, &known);
             work += part.elements() * (cost::ops(body, &known) + 1);
             known.extend(top_reductions(body));
+        }
+        if !chained.is_empty() {
+            let chunks = part.elements().div_ceil(u64::from(per_group)).max(1);
+            serial = prologue_serial + (serial - prologue_serial) * chunks;
+            loads = prologue_loads + (loads - prologue_loads) * chunks;
         }
         Estimate {
             serial,
@@ -824,7 +858,13 @@ impl Prepared {
             };
             let elements = part.elements();
             let per_group = lanes.map_or(threads, |(_, elements, _)| elements);
-            let part_groups = elements.div_ceil(u64::from(per_group.max(1)));
+            // A chained product is computed once, then this workgroup walks every row.
+            let chain_part = lanes.is_some() && !self.chain_slots(k).is_empty();
+            let part_groups = if chain_part {
+                1
+            } else {
+                elements.div_ceil(u64::from(per_group.max(1)))
+            };
             if elements > i32::MAX as u64 {
                 return Err(LowerError::Grid { elements });
             }
@@ -845,22 +885,39 @@ impl Prepared {
                         var("local"),
                     ),
                 )),
-                Some((lanes, elements, _)) => {
+                Some((lanes, row_elems, _)) => {
                     if local.is_none() {
                         work.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
                     }
                     work.push(let_int("lane", bin(BinOp::Rem, var("local"), int(lanes as i64)?)));
-                    work.push(let_int(
-                        "t",
-                        bin(
-                            BinOp::Add,
-                            bin(BinOp::Mul, group, int(elements as i64)?),
-                            bin(BinOp::Div, var("local"), int(lanes as i64)?),
-                        ),
-                    ));
+                    if !chain_part {
+                        work.push(let_int(
+                            "t",
+                            bin(
+                                BinOp::Add,
+                                bin(BinOp::Mul, group, int(row_elems as i64)?),
+                                bin(BinOp::Div, var("local"), int(lanes as i64)?),
+                            ),
+                        ));
+                    }
                 }
             }
-            work.push(Stmt::Let {
+            self.index_params(sources, &mut work);
+            let base_name = chain_part.then(|| emit.fresh("b"));
+            let mut element = Vec::new();
+            let emit_rows = if chain_part { &mut element } else { &mut work };
+            if let Some(base_name) = &base_name {
+                let (lane_n, _, _) = lanes.expect("a chained part is lane-scheduled");
+                emit_rows.push(let_int(
+                    "t",
+                    bin(
+                        BinOp::Add,
+                        var(base_name),
+                        bin(BinOp::Div, var("local"), int(lane_n as i64)?),
+                    ),
+                ));
+            }
+            emit_rows.push(Stmt::Let {
                 name: "valid".into(),
                 mutable: false,
                 ty: Some("bool".into()),
@@ -870,19 +927,27 @@ impl Prepared {
             for (a, (&c, &e)) in part.coords.iter().zip(&part.extents).enumerate().rev() {
                 let name = coord_name(c);
                 if a == 0 {
-                    work.push(let_int(&name, rest.clone()));
+                    emit_rows.push(let_int(&name, rest.clone()));
                 } else {
-                    work.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
-                    work.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
+                    emit_rows.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
+                    emit_rows.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
                     rest = var(&format!("rest{a}"));
                 }
             }
-            self.index_params(sources, &mut work);
-            let hoisted = self.hoist(k, &mut emit, &mut work)?;
+            let hoisted = self.hoist(k, &mut emit, emit_rows)?;
 
-            if let Some((lanes, elements, exchange)) = lanes {
-                // The partition keeps an output spanning part of the domain to lane
-                // reductions an output spanning all of it computes.
+            if let Some((lanes, row_elems, exchange)) = lanes {
+                if chain_part {
+                    let mut chains = self.chain_slots(k);
+                    for slot in &mut chains {
+                        slot.slot = emit.fresh("y");
+                    }
+                    let mut chain_decls = Vec::new();
+                    workgroup_bytes +=
+                        emit.precompute_chains(&chains, lanes, row_elems, &mut chain_decls, &mut work)?;
+                    decls.extend(chain_decls);
+                    emit.chains = chains;
+                }
                 let pending = self.top_reductions(k, true, is_lane_ordered);
                 let mut reduced = Vec::new();
                 let mut reductions = Vec::new();
@@ -892,23 +957,37 @@ impl Prepared {
                 }
                 let mut part_decls = Vec::new();
                 workgroup_bytes +=
-                    emit.exchange(&reduced, lanes, elements, exchange, &mut part_decls, &mut reductions)?;
-                match single {
-                    true => work.extend(part_decls),
-                    false => decls.extend(part_decls),
-                }
-                work.extend(reductions);
+                    emit.exchange(&reduced, lanes, row_elems, exchange, &mut part_decls, &mut reductions)?;
+                let decl_dest = if chain_part || !single { &mut decls } else { &mut work };
+                decl_dest.extend(part_decls);
+                let row_dest = if chain_part { &mut element } else { &mut work };
+                row_dest.extend(reductions);
             }
             let values = self.outputs(k, &mut emit)?;
             let cond = match lanes {
                 Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
                 None => var("valid"),
             };
-            work.push(Stmt::If {
+            let row_dest = if chain_part { &mut element } else { &mut work };
+            row_dest.push(Stmt::If {
                 cond,
                 then_body: values,
                 else_body: None,
             });
+            if let Some(base_name) = &base_name {
+                let (_, row_elems, _) = lanes.expect("a chained part is lane-scheduled");
+                let rows = std::mem::take(&mut element);
+                work.push(let_int(base_name, int(0)?));
+                let mut body = rows;
+                body.push(assign(
+                    base_name,
+                    bin(BinOp::Add, var(base_name), int(i64::from(row_elems))?),
+                ));
+                work.push(Stmt::While {
+                    cond: bin(BinOp::Lt, var(base_name), int(elements as i64)?),
+                    body,
+                });
+            }
 
             let part = self.estimate(k, lanes.map(|(lanes, ..)| lanes), &hoisted, &[]);
             estimate.serial = estimate.serial.max(part.serial);
@@ -957,6 +1036,15 @@ impl Prepared {
             parts: self.parts.len(),
             estimate,
         })
+    }
+
+    /// Lane products nested in this part's outputs whose vector fits in one workgroup.
+    fn chain_slots(&self, k: usize) -> Vec<ChainSlot> {
+        let mut found = Vec::new();
+        for &n in &self.parts[k].outputs {
+            collect_chains(&self.bodies[n].1, None, &mut found);
+        }
+        found
     }
 
     /// The distinct reductions `keep` selects outside any select and any other
@@ -1050,6 +1138,41 @@ pub(super) struct Resources {
     pub(super) scalars: Vec<ScalarParam>,
 }
 
+/// Nested lane-ordered products whose only free index is the enclosing reduction's,
+/// and whose vector is short enough to keep in one workgroup. Inner products come
+/// first.
+fn collect_chains(term: &Term, enclosing: Option<(IndexVar, u32)>, out: &mut Vec<ChainSlot>) {
+    match term {
+        Term::Reduce {
+            index,
+            extent,
+            order,
+            body,
+            ..
+        } => {
+            collect_chains(body, Some((*index, *extent)), out);
+            if let (Some((enc_index, enc_extent)), ReduceOrder::Lanes { .. }) = (enclosing, *order) {
+                let free = term.free_indices();
+                let fits = enc_extent > 0 && enc_extent <= CHAIN_VECTOR_MAX;
+                if fits
+                    && free.len() == 1
+                    && free.contains(&enc_index)
+                    && !out.iter().any(|slot| slot.term.alpha_eq(term))
+                {
+                    out.push(ChainSlot {
+                        term: term.clone(),
+                        slot: String::new(),
+                        index: enc_index,
+                        extent: enc_extent,
+                    });
+                }
+            }
+        }
+        Term::Select { .. } => {}
+        other => other.for_each_child(&mut |child| collect_chains(child, enclosing, out)),
+    }
+}
+
 /// `reductions` grouped by extent and accumulator count, in first-appearance order.
 fn siblings(reductions: Vec<&Term>) -> Vec<Vec<&Term>> {
     let shape = |t: &Term| match t {
@@ -1098,6 +1221,19 @@ pub(super) struct Emit<'a> {
     pub(super) depth: u32,
     /// The output being lowered, for errors.
     output: String,
+    /// When false, a lane reduction runs on every thread. The consumer's `valid`
+    /// flag does not apply to a vector computed once per workgroup.
+    lane_guard: bool,
+    /// Nested lane reductions materialized in workgroup memory for this part.
+    chains: Vec<ChainSlot>,
+}
+
+/// A lane-ordered product computed once per workgroup into `slot`, then read at `index`.
+struct ChainSlot {
+    term: Term,
+    slot: String,
+    index: IndexVar,
+    extent: u32,
 }
 
 impl Emit<'_> {
@@ -1129,6 +1265,114 @@ impl Emit<'_> {
             .iter()
             .find(|(t, _)| t.alpha_eq(term))
             .map(|(_, n)| n.clone())
+    }
+
+    fn forget(&mut self, term: &Term) {
+        self.cache.retain(|(t, _)| !t.alpha_eq(term));
+    }
+
+    fn chain_slot(&self, term: &Term) -> Option<(String, IndexVar)> {
+        self.chains
+            .iter()
+            .find(|slot| slot.term.alpha_eq(term))
+            .map(|slot| (slot.slot.clone(), slot.index))
+    }
+
+    /// Computes each nested lane product in `slots` into workgroup memory, once per
+    /// workgroup, in the same 32-lane association the product names. Every thread
+    /// participates. Returns the bytes of workgroup memory.
+    fn precompute_chains(
+        &mut self,
+        slots: &[ChainSlot],
+        lanes: u32,
+        elements: u32,
+        decls: &mut Vec<Stmt>,
+        out: &mut Vec<Stmt>,
+    ) -> Result<u32, LowerError> {
+        if slots.is_empty() {
+            return Ok(0);
+        }
+        let scratch = self.fresh("r");
+        decls.push(Stmt::WorkgroupArray {
+            name: scratch.clone(),
+            elem: "float".into(),
+            len: lanes * elements,
+        });
+        let mut bytes = lanes * elements * 4;
+        let slot_at = |name: &str, at: Expr| Expr::Index {
+            base: Box::new(var(name)),
+            index: Box::new(at),
+        };
+        for slot in slots {
+            let Term::Reduce { op, .. } = &slot.term else {
+                continue;
+            };
+            let op = *op;
+            decls.push(Stmt::WorkgroupArray {
+                name: slot.slot.clone(),
+                elem: "float".into(),
+                len: slot.extent,
+            });
+            bytes += slot.extent * 4;
+            let i = self.fresh("i");
+            out.push(let_int(&i, int(0)?));
+            let old = self.bind(slot.index, i.clone(), slot.extent);
+            self.lane_guard = false;
+            let mut body = Vec::new();
+            let group = [&slot.term];
+            let partials = self.lanes(&group, lanes, &mut body)?;
+            self.lane_guard = true;
+            let partial = partials.into_iter().next().expect("one reduction");
+            body.push(Stmt::Assign {
+                target: slot_at(&scratch, var("local")),
+                value: partial,
+            });
+            body.push(barrier());
+            let s = self.fresh("s");
+            body.push(let_int(&s, int(i64::from(lanes / 2))?));
+            let combined = Stmt::Assign {
+                target: slot_at(&scratch, var("local")),
+                value: combine(
+                    op,
+                    slot_at(&scratch, var("local")),
+                    slot_at(&scratch, bin(BinOp::Add, var("local"), var(&s))),
+                ),
+            };
+            body.push(Stmt::While {
+                cond: bin(BinOp::Gt, var(&s), int(0)?),
+                body: vec![
+                    Stmt::If {
+                        cond: bin(BinOp::Lt, var("lane"), var(&s)),
+                        then_body: vec![combined],
+                        else_body: None,
+                    },
+                    barrier(),
+                    assign(&s, bin(BinOp::Div, var(&s), int(2)?)),
+                ],
+            });
+            let result = self.fresh("v");
+            body.push(let_float(
+                &result,
+                slot_at(&scratch, bin(BinOp::Sub, var("local"), var("lane"))),
+            ));
+            body.push(Stmt::If {
+                cond: bin(BinOp::Eq, var("local"), int(0)?),
+                then_body: vec![Stmt::Assign {
+                    target: slot_at(&slot.slot, cast(var(&i), "uint")),
+                    value: var(&result),
+                }],
+                else_body: None,
+            });
+            body.push(barrier());
+            body.push(assign(&i, bin(BinOp::Add, var(&i), int(1)?)));
+            self.unbind(slot.index, old);
+            self.forget(&slot.term);
+            out.push(Stmt::While {
+                cond: bin(BinOp::Lt, var(&i), int(i64::from(slot.extent))?),
+                body,
+            });
+        }
+        Ok(bytes)
     }
 
     /// `a` as an `int` expression, checked to stay in the 32-bit range.
@@ -1297,6 +1541,15 @@ impl Emit<'_> {
                 order,
                 body,
             } => {
+                if let Some((slot, axis)) = self.chain_slot(t) {
+                    let name = self.names.get(&axis).cloned().ok_or_else(|| LowerError::Order {
+                        output: self.output.clone(),
+                    })?;
+                    return Ok(Expr::Index {
+                        base: Box::new(var(&slot)),
+                        index: Box::new(cast(var(&name), "uint")),
+                    });
+                }
                 if let Some(name) = self.cached(t).filter(|_| self.depth == 0) {
                     return Ok(var(&name));
                 }
@@ -1388,11 +1641,15 @@ impl Emit<'_> {
                 else_body: None,
             });
         }
-        out.push(Stmt::If {
-            cond: var("valid"),
-            then_body: strided,
-            else_body: None,
-        });
+        if self.lane_guard {
+            out.push(Stmt::If {
+                cond: var("valid"),
+                then_body: strided,
+                else_body: None,
+            });
+        } else {
+            out.extend(strided);
+        }
         Ok(folded
             .iter()
             .zip(&accs)

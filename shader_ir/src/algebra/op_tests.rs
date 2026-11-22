@@ -667,3 +667,35 @@ fn tanh_and_sigmoid_lower_to_stable_helpers() {
     assert!(got[1] > 0.4 && got[1] < 0.5, "{}", got[1]);
     assert_eq!(got[3], 1.0, "tanh(30) saturates");
 }
+
+#[test]
+fn a_short_gemv_feeds_the_next_with_both_lane_orders() {
+    let (m, r, k) = (8u32, 4u32, 40u32);
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "y"], [0, 1, 2], r, k)).unwrap();
+    graph.push(gemv(["B", "y", "z"], [3, 2, 4], m, r)).unwrap();
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert!(matches!(lowered.schedule, Schedule::Lanes { lanes: 32, .. }));
+    let slang = source(&lowered);
+    assert!(slang.contains("groupshared"), "{slang}");
+    assert!(slang.matches("GroupMemoryBarrierWithGroupSync").count() >= 2, "{slang}");
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, data(1, r * k)),
+            (1, data(2, k)),
+            (2, vec![0.0; r as usize]),
+            (3, data(3, m * r)),
+            (4, vec![0.0; m as usize]),
+        ]),
+    );
+}
+
+#[test]
+fn a_long_vector_between_gemvs_is_not_one_kernel() {
+    let (m, r, k) = (4u32, 257u32, 4u32);
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "y"], [0, 1, 2], r, k)).unwrap();
+    graph.push(gemv(["B", "y", "z"], [3, 2, 4], m, r)).unwrap();
+    assert!(lower(graph.region(), &[]).is_err());
+}
