@@ -8,7 +8,7 @@ use super::types::{LogicalDevice, ARGUMENT_BUFFER_SIZE};
 use crate::backend::GpuCommand;
 use crate::frame_table::{
     FrameTableStaging, FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_TABLE_BYTES, FRAME_TABLE_TABLE_U32S,
-    FRAME_TABLE_USER_SLOT_BASE,
+    FRAME_TABLE_TRANSIENT_ROWS, FRAME_TABLE_USER_SLOT_BASE,
 };
 use crate::timeline::TimelineValue;
 use ::metal as mtl;
@@ -112,7 +112,7 @@ impl MetalFrameTable {
             selector,
             table,
             staging,
-            ring: FrameTableRing::new(FRAME_TABLE_MAX_ROWS),
+            ring: FrameTableRing::new(FRAME_TABLE_TRANSIENT_ROWS),
         }
     }
 
@@ -238,6 +238,7 @@ pub(super) fn prepare_render_commands(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    staging.check()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
 }

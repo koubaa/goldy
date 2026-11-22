@@ -213,6 +213,7 @@ impl TemporaryStorage {
         ir: &mut GraphIR,
         uses: &[TemporaryUse],
         decls: &[TemporaryDecl],
+        hold_until: Option<crate::timeline::TimelineValue>,
     ) -> Result<Lowered, GoldyError> {
         for u in uses {
             ir.nodes[u.node as usize].bindings[u.binding as usize].resource =
@@ -251,6 +252,9 @@ impl TemporaryStorage {
             self.backings.push(Backing { buffer, decl, members });
         }
         for backing in old {
+            if let Some(tv) = hold_until {
+                backing.buffer.whole().mark_referenced(ctx.backend_handle(), tv);
+            }
             lowered.released.push(backing.buffer.whole().resource_id());
             ctx.return_transient_buffer(backing.buffer);
         }

@@ -1046,6 +1046,7 @@ pub(super) fn submit_with_scope(
                             on_graphics_queue: false,
                         },
                         data,
+                        false,
                     )?;
                     row_guard.set(row);
                 }
@@ -2130,6 +2131,7 @@ pub(super) fn submit_graph_with_scope(
                             on_graphics_queue: route_device,
                         },
                         data,
+                        retain_key.is_some(),
                     )?;
                     frame_table_row = Some(row);
                     row_guard.set(row);
@@ -2798,7 +2800,7 @@ pub(super) fn submit_graph_with_scope(
                     if frame_table_prologue_in_cb {
                         let graph_staging = super::frame_table::extract_staging_from_graph(commands)
                             .map(|data| data.to_vec())
-                            .unwrap_or_else(|| vec![0u32; crate::frame_table::FRAME_TABLE_TABLE_U32S]);
+                            .unwrap_or_default();
                         let sync_data =
                             super::frame_table::merge_staging_for_render_sync(&graph_staging, &staging_data);
                         super::frame_table::sync_table_row_to_device(
@@ -2807,6 +2809,7 @@ pub(super) fn submit_graph_with_scope(
                             logical_device,
                             cmd,
                             &sync_data,
+                            frame_table_row.expect("frame-table prologue row"),
                             route_device,
                         )?;
                     } else {
@@ -2821,6 +2824,7 @@ pub(super) fn submit_graph_with_scope(
                                 on_graphics_queue: route_device,
                             },
                             &staging_data,
+                            retain_key.is_some(),
                         )?;
                         frame_table_row = Some(row);
                         row_guard.set(row);

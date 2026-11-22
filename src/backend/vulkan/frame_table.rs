@@ -9,7 +9,7 @@ use super::BufferHandle;
 use crate::backend::GpuCommand;
 use crate::frame_table::{
     FRAME_TABLE_MAX_ROWS, FRAME_TABLE_ROW_STRIDE, FRAME_TABLE_STAGING_BYTES, FRAME_TABLE_TABLE_U32S,
-    FRAME_TABLE_USER_SLOT_BASE,
+    FRAME_TABLE_TRANSIENT_ROWS, FRAME_TABLE_USER_SLOT_BASE,
 };
 use anyhow::{Context, Result};
 use ash::vk;
@@ -33,8 +33,11 @@ pub(crate) struct ContextFrameTable {
     pub staging_memory: vk::DeviceMemory,
     pub staging_mapped: usize,
     pub submission_counter: AtomicU32,
-    /// Bitmask of rows pinned by retained command buffers (must not be overwritten).
-    pub pinned_rows: AtomicU32,
+    /// Per-row pin count. Nonzero means a retained command buffer's prologue
+    /// still reads this row, so a later submit must not overwrite it.
+    pub pin_count: [AtomicU32; FRAME_TABLE_MAX_ROWS as usize],
+    /// Times a retained command buffer was dropped to reuse a frame-table row.
+    pub retained_evictions: AtomicU64,
     /// Last GPU timeline value that used each upload row (`0` = free/unused,
     /// [`ROW_IN_USE`] = reserved by a submitter that has not yet recorded).
     ///
@@ -55,7 +58,8 @@ pub(crate) fn device_owner_frame_table_stub() -> SharedContextFrameTable {
         staging_memory: vk::DeviceMemory::null(),
         staging_mapped: 0,
         submission_counter: AtomicU32::new(0),
-        pinned_rows: AtomicU32::new(0),
+        pin_count: std::array::from_fn(|_| AtomicU32::new(0)),
+        retained_evictions: AtomicU64::new(0),
         last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
     })
 }
@@ -118,7 +122,8 @@ pub(crate) fn init_context(
         staging_memory,
         staging_mapped,
         submission_counter: AtomicU32::new(0),
-        pinned_rows: AtomicU32::new(0),
+        pin_count: std::array::from_fn(|_| AtomicU32::new(0)),
+        retained_evictions: AtomicU64::new(0),
         last_token_for_row: std::array::from_fn(|_| AtomicU64::new(0)),
     });
 
@@ -458,19 +463,22 @@ fn record_table_copies(
 }
 
 /// Pin a staging row so retained CB prologue copies keep valid source bytes.
+///
+/// A persistent row claimed by [`write_staging_persistent`] is already pinned;
+/// pinning it again is a no-op so the retain path can record that fact.
 pub(crate) fn pin_row(ft: &ContextFrameTable, row: u32) -> Result<()> {
-    let bit = 1u32 << row;
-    let prev = ft.pinned_rows.fetch_or(bit, Ordering::AcqRel);
-    if prev & bit != 0 {
-        anyhow::bail!("frame table row {row} is already pinned");
+    let slot = &ft.pin_count[row as usize];
+    match slot.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Ok(()),
+        Err(1) if row >= FRAME_TABLE_TRANSIENT_ROWS => Ok(()),
+        Err(_) => anyhow::bail!("frame table row {row} is already pinned"),
     }
-    Ok(())
 }
 
 /// Release a row pinned by [`pin_row`].
 pub(crate) fn unpin_row(ft: &ContextFrameTable, row: u32) {
-    let bit = 1u32 << row;
-    ft.pinned_rows.fetch_and(!bit, Ordering::AcqRel);
+    let prev = ft.pin_count[row as usize].fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(prev >= 1, "frame table row {row} was not pinned");
 }
 
 /// Record the GPU timeline value that owns `row` after Signal (or `0` to abort a reservation).
@@ -517,13 +525,21 @@ impl Drop for RowReservation<'_> {
 }
 
 fn assert_not_pinned(ft: &ContextFrameTable, row: u32) -> Result<()> {
-    if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
+    if ft.pin_count[row as usize].load(Ordering::Acquire) != 0 {
         anyhow::bail!(
             "frame table row {row} is still pinned after evicting retained graphs; \
              retained command buffer lifecycle bug"
         );
     }
     Ok(())
+}
+
+fn try_claim_persistent_row(ft: &ContextFrameTable) -> Option<u32> {
+    (FRAME_TABLE_TRANSIENT_ROWS..FRAME_TABLE_MAX_ROWS).find(|&row| {
+        ft.pin_count[row as usize]
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    })
 }
 
 fn wait_for_timeline(device: &ash::Device, semaphore: vk::Semaphore, token: u64) -> Result<()> {
@@ -618,10 +634,7 @@ fn write_staging_for_submission(
     data: &[u32],
 ) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
-    let row = sub % FRAME_TABLE_MAX_ROWS;
-    if ft.pinned_rows.load(Ordering::Acquire) & (1 << row) != 0 {
-        super::compute::evict_retained_pinning_row_for_context(contexts, ft, ld, ctx, row);
-    }
+    let row = sub % FRAME_TABLE_TRANSIENT_ROWS;
     assert_not_pinned(ft, row)?;
     let (device, semaphore) = {
         let contexts_read = contexts.read().unwrap();
@@ -636,10 +649,45 @@ fn write_staging_for_submission(
     Ok(row)
 }
 
+/// Staging row for a retained command buffer. The row stays pinned until the
+/// buffer is evicted, so replay reads the same bindings.
+fn write_staging_persistent(
+    contexts: &SharedContextMap,
+    ld: &super::types::LogicalDevice,
+    ctx: super::ContextHandle,
+    ft: &ContextFrameTable,
+    data: &[u32],
+) -> Result<u32> {
+    let row = if let Some(row) = try_claim_persistent_row(ft) {
+        row
+    } else {
+        ft.retained_evictions.fetch_add(1, Ordering::Relaxed);
+        let victim = crate::frame_table::least_recent_persistent_row(&ft.last_token_for_row, ROW_IN_USE);
+        super::compute::evict_retained_pinning_row_for_context(contexts, ft, ld, ctx, victim);
+        assert_not_pinned(ft, victim)?;
+        pin_row(ft, victim)?;
+        victim
+    };
+    let (device, semaphore) = {
+        let contexts_read = contexts.read().unwrap();
+        let sc_arc = contexts_read
+            .get(&ctx)
+            .with_context(|| format!("frame table staging: invalid context {ctx}"))?;
+        let sc = sc_arc.lock().unwrap();
+        (ld.device.clone(), sc.timeline_semaphore)
+    };
+    if let Err(err) = reserve_row_with_backpressure(ft, row, &device, semaphore) {
+        unpin_row(ft, row);
+        return Err(err);
+    }
+    write_row_payload(ft, data, row);
+    Ok(row)
+}
+
 /// CPU staging write for legacy standalone render (no context eviction).
 fn write_staging_standalone(ft: &ContextFrameTable, ld: &LogicalDevice, data: &[u32]) -> Result<u32> {
     let sub = ft.submission_counter.fetch_add(1, Ordering::Relaxed);
-    let row = sub % FRAME_TABLE_MAX_ROWS;
+    let row = sub % FRAME_TABLE_TRANSIENT_ROWS;
     assert_not_pinned(ft, row)?;
     reserve_row_legacy(ft, row, ld)?;
     write_row_payload(ft, data, row);
@@ -693,6 +741,7 @@ pub(crate) fn record_prologue(
     ctx: super::ContextHandle,
     rec: PrologueRecording<'_>,
     data: &[u32],
+    persistent: bool,
 ) -> Result<u32> {
     let PrologueRecording {
         frame_table,
@@ -701,7 +750,11 @@ pub(crate) fn record_prologue(
         cmd,
         on_graphics_queue,
     } = rec;
-    let row = write_staging_for_submission(contexts, ld, ctx, frame_table, data)?;
+    let row = if persistent {
+        write_staging_persistent(contexts, ld, ctx, frame_table, data)?
+    } else {
+        write_staging_for_submission(contexts, ld, ctx, frame_table, data)?
+    };
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     record_table_copies(
@@ -726,12 +779,12 @@ pub(crate) fn sync_table_row_to_device(
     ld: &LogicalDevice,
     cmd: vk::CommandBuffer,
     data: &[u32],
+    row: u32,
     on_graphics_queue: bool,
 ) -> Result<()> {
     let row_u32s = FRAME_TABLE_ROW_STRIDE as usize;
     let copy_u32s = data.len().min(row_u32s).min(FRAME_TABLE_TABLE_U32S);
     let staging_ptr = frame_table.staging_mapped as *mut u32;
-    let row = frame_table.submission_counter.load(Ordering::Relaxed).saturating_sub(1) % FRAME_TABLE_MAX_ROWS;
     unsafe {
         let payload_dst =
             staging_ptr.add(crate::frame_table::FRAME_TABLE_STAGING_SELECTOR_U32S + row as usize * row_u32s);
@@ -809,6 +862,7 @@ pub(crate) fn prepare_render_commands(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    staging.check()?;
     let has_bindings = staging.has_bindings();
     Ok((staging.data, lowered, has_bindings))
 }
@@ -833,10 +887,8 @@ mod tests {
 
     #[test]
     fn merge_staging_overlays_render_indices_without_dropping_compute() {
-        let mut graph = vec![0u32; FRAME_TABLE_TABLE_U32S];
-        graph[0] = 7;
-        let mut render = vec![0u32; FRAME_TABLE_TABLE_U32S];
-        render[1] = 42;
+        let graph = vec![7u32];
+        let render = vec![0u32, 42];
         let merged = merge_staging_for_render_sync(&graph, &render);
         assert_eq!(merged[0], 7);
         assert_eq!(merged[1], 42);

@@ -121,6 +121,23 @@ impl Context {
         &self.inner.device
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn retained_evictions(&self) -> u64 {
+        self.inner
+            .submit_session
+            .as_ref()
+            .map(|session| session.retained_evictions(self.inner.handle))
+            .unwrap_or(0)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn waits_for_retained_storage(&self) -> bool {
+        self.inner
+            .submit_session
+            .as_ref()
+            .is_none_or(|session| session.requires_retained_storage_retirement())
+    }
+
     pub(crate) fn backend_handle(&self) -> ContextHandle {
         self.inner.handle
     }

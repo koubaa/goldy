@@ -307,6 +307,55 @@ fn clean_scheme_resubmits_without_rerecord() {
     );
 }
 
+/// More retained command buffers than the 8-row transient ring.
+///
+/// Each scheme records once and then replays. A ring that evicts pinned rows
+/// would re-record every scheme and bump `retained_evictions`.
+#[test]
+fn many_retained_schemes_replay_past_the_transient_ring() {
+    let (device, _cb) = make_device();
+    let ctx = submission_context(&device);
+    let shader = ShaderModule::from_slang(&device, COPY_SHADER).expect("compile copy shader");
+    let pipeline = ComputePipeline::new(&device, &shader).expect("create pipeline");
+    let count = 12;
+    let mut schemes = Vec::with_capacity(count);
+    for i in 0..count {
+        let input = device
+            .acquire_buffer_with_data(&[i as u32; 8], BufferKind::Scattered)
+            .expect("input");
+        let output = device
+            .acquire_buffer_with_data(&[0u32; 8], BufferKind::Scattered)
+            .expect("output");
+        let mut scheme = Scheme::new(&ctx);
+        scheme
+            .node("copy", &pipeline)
+            .with_parcel(&input, NodeAccess::Read)
+            .with_parcel(&output, NodeAccess::Write)
+            .dispatch(1, 1, 1);
+        schemes.push((scheme, input, output));
+    }
+    for (scheme, _, _) in &mut schemes {
+        scheme.submit().expect("record");
+    }
+    for (scheme, _, output) in &mut schemes {
+        let frame = scheme.submit().expect("replay");
+        frame.wait_until_settled().expect("wait");
+        assert!(output.is_settled());
+    }
+    for (scheme, _, _) in &schemes {
+        assert_eq!(scheme.replay_stats().records, 1, "each scheme records once");
+        #[cfg(not(feature = "metal"))]
+        {
+            assert_eq!(scheme.replay_stats().resubmit_hits, 1, "steady state replays");
+            assert_eq!(
+                scheme.replay_stats().retained_evictions,
+                0,
+                "retained rows are not taken from the transient ring"
+            );
+        }
+    }
+}
+
 const WRITE_DISPATCH_SHAPE_SHADER: &str = r#"
 import goldy_exp;
 

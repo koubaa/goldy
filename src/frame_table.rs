@@ -32,13 +32,24 @@ pub const FRAME_TABLE_DEVICE_SLOT: u32 = 1;
 )]
 pub const FRAME_TABLE_USER_SLOT_BASE: u32 = 2;
 
-/// Maximum bindless indices routed through the table per submission row.
-/// A coarse/fine pipeline can exceed 256 indices in a single submission
-/// (longpathdash peaks at ~269), and an unfused 12-layer transformer decode step
-/// needs ~700; keep shader and Rust constants in sync.
-pub const FRAME_TABLE_ROW_STRIDE: u32 = 4096;
-/// Pipeline depth — number of row-groups in the staging/table buffers.
-pub const FRAME_TABLE_MAX_ROWS: u32 = 8;
+/// Address stride of one device-table row.
+///
+/// Staging and uploads copy only the indices a submission wrote. This stride is
+/// the reservation those indices are placed in, kept in sync with
+/// `GOLDY_FRAME_TABLE_ROW_STRIDE` in `access.slang`. A submission that needs
+/// more indices than this is a record-time error.
+pub const FRAME_TABLE_ROW_STRIDE: u32 = 32768;
+/// In-flight rows for submissions that are not retained. The ring wraps; a
+/// later submit waits until the GPU has finished with the row it is about to
+/// overwrite.
+pub const FRAME_TABLE_TRANSIENT_ROWS: u32 = 8;
+/// Rows owned by retained command buffers. A retained buffer's bindings do not
+/// change, so its prologue keeps reading the same row and must not share the
+/// transient ring (that ring is only 8 deep, and pinning a ring row evicted the
+/// buffer on the next wrap).
+pub const FRAME_TABLE_PERSISTENT_ROWS: u32 = 512;
+/// Transient ring followed by the persistent retained-buffer rows.
+pub const FRAME_TABLE_MAX_ROWS: u32 = FRAME_TABLE_TRANSIENT_ROWS + FRAME_TABLE_PERSISTENT_ROWS;
 
 /// Total `u32` elements in staging and device-local table buffers.
 pub const FRAME_TABLE_TABLE_U32S: usize = FRAME_TABLE_ROW_STRIDE as usize * FRAME_TABLE_MAX_ROWS as usize;
@@ -88,46 +99,90 @@ pub fn staging_row_payload_byte_offset(row: u32) -> u64 {
     (FRAME_TABLE_STAGING_SELECTOR_U32S as u64 + row as u64 * FRAME_TABLE_ROW_STRIDE as u64) * 4
 }
 
+/// Persistent row whose last GPU token is the oldest.
+///
+/// `in_use` is the sentinel a submitter stores while it still owns the row on
+/// the CPU. Those rows lose to any row the GPU has already been given.
+#[cfg_attr(
+    not(any(feature = "vulkan", all(feature = "dx12", target_os = "windows"))),
+    allow(dead_code)
+)]
+pub fn least_recent_persistent_row(tokens: &[std::sync::atomic::AtomicU64], in_use: u64) -> u32 {
+    let mut victim = FRAME_TABLE_TRANSIENT_ROWS;
+    let mut oldest = u64::MAX;
+    for row in FRAME_TABLE_TRANSIENT_ROWS..FRAME_TABLE_MAX_ROWS {
+        let tok = tokens[row as usize].load(std::sync::atomic::Ordering::Acquire);
+        let age = if tok == in_use { u64::MAX - 1 } else { tok };
+        if age < oldest {
+            oldest = age;
+            victim = row;
+        }
+    }
+    victim
+}
+
 /// PushLayout `_reserved[0]` carries the dispatch's base offset within its row.
 #[inline]
 pub fn dispatch_table_base_word_index() -> usize {
     0
 }
 
-/// Accumulates staging writes while lowering a graph to GPU commands.
+/// Accumulates the bindless indices one submission actually uses.
+///
+/// The device row is [`FRAME_TABLE_ROW_STRIDE`] words apart. This buffer is only
+/// the prefix that was written, so a small scheme does not allocate or copy a
+/// whole row.
 #[derive(Debug, Default, Clone)]
 pub struct FrameTableStaging {
-    /// Flat table: `row * ROW_STRIDE + offset`.
+    /// Indices at `dispatch_base + k`. Length is [`Self::used_words`].
     pub data: Vec<u32>,
     next_dispatch_base: u32,
+    overflowed: bool,
 }
 
 impl FrameTableStaging {
     pub fn new() -> Self {
         Self {
-            data: vec![0u32; FRAME_TABLE_TABLE_U32S],
+            data: Vec::new(),
             next_dispatch_base: 0,
+            overflowed: false,
         }
+    }
+
+    /// Words a prologue must copy. Zero when nothing was allocated.
+    pub fn used_words(&self) -> u32 {
+        self.next_dispatch_base
     }
 
     /// Reserve a contiguous run of table slots for one dispatch; returns the base offset.
     ///
-    /// Past [`FRAME_TABLE_ROW_STRIDE`] the dispatch's indices are dropped and it binds
-    /// whatever the row already holds, so overflow is reported rather than silent.
+    /// Past [`FRAME_TABLE_ROW_STRIDE`] the reservation is refused. Call
+    /// [`Self::check`] before submitting; the indices are not clamped into a
+    /// neighbour's row.
     pub fn alloc_dispatch(&mut self, slot_count: u32) -> u32 {
         let base = self.next_dispatch_base;
-        let end = base.saturating_add(slot_count);
+        let Some(end) = base.checked_add(slot_count) else {
+            self.overflowed = true;
+            return base;
+        };
         if end > FRAME_TABLE_ROW_STRIDE {
-            static WARNED: std::sync::Once = std::sync::Once::new();
-            WARNED.call_once(|| {
-                tracing::error!(
-                    "frame table overflow: submission needs more than {FRAME_TABLE_ROW_STRIDE} bindless \
-                     indices; later dispatches will bind wrong resources"
-                );
-            });
+            self.overflowed = true;
+            return base;
         }
-        self.next_dispatch_base = end.min(FRAME_TABLE_ROW_STRIDE);
+        self.data.resize(end as usize, 0);
+        self.next_dispatch_base = end;
         base
+    }
+
+    /// `Err` when a dispatch did not fit in the row.
+    pub fn check(&self) -> Result<(), crate::error::GoldyError> {
+        if self.overflowed {
+            Err(crate::error::GoldyError::Validation(format!(
+                "frame table overflow: a submission needs more than {FRAME_TABLE_ROW_STRIDE} bindless indices"
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Returns `true` if any dispatch has written to this staging (i.e. a prologue is needed).
@@ -135,23 +190,25 @@ impl FrameTableStaging {
         self.next_dispatch_base > 0
     }
 
-    /// Write bindless indices for one dispatch into row 0 (N=1 degenerate path used by spike).
-    /// Writes are clamped to row 0's boundary; indices that would overflow into row 1+ are silently dropped.
+    /// Write bindless indices for one dispatch at `dispatch_base`.
+    ///
+    /// Indices past the reservation set the overflow flag and are not stored.
     pub fn write_dispatch_indices(&mut self, dispatch_base: u32, indices: &[u32]) {
-        let row = 0usize;
-        let row_start = row * FRAME_TABLE_ROW_STRIDE as usize;
-        let row_end = row_start + FRAME_TABLE_ROW_STRIDE as usize;
-        let base = row_start + dispatch_base as usize;
+        let base = dispatch_base as usize;
         for (i, &idx) in indices.iter().enumerate() {
             let pos = base + i;
-            if pos < row_end.min(self.data.len()) {
+            if pos < self.data.len() {
                 self.data[pos] = idx;
+            } else {
+                self.overflowed = true;
             }
         }
     }
 
+    /// The indices this submission wrote, and nothing after them.
     pub fn as_arc(&self) -> std::sync::Arc<[u32]> {
-        self.data.as_slice().into()
+        let used = (self.used_words() as usize).min(self.data.len());
+        std::sync::Arc::from(&self.data[..used])
     }
 }
 
@@ -254,49 +311,41 @@ mod tests {
         assert!(s.has_bindings(), "after alloc_dispatch staging must report bindings");
     }
 
-    /// `alloc_dispatch` must never return a base that, combined with slot_count,
-    /// exceeds ROW_STRIDE.  Previously this overflowed when a pipeline
-    /// allocated ~269 slots with a 256-stride, causing garbage index reads.
+    /// A dispatch past the row is an error. It does not clamp into the next row
+    /// and it does not grow the staging buffer to the whole table.
     #[test]
-    fn alloc_dispatch_does_not_overflow_row_stride() {
+    fn alloc_dispatch_reports_overflow_instead_of_clamping() {
         let mut s = FrameTableStaging::new();
-        // Fill up the row completely.
-        let full = FRAME_TABLE_ROW_STRIDE;
-        let base = s.alloc_dispatch(full);
+        let base = s.alloc_dispatch(FRAME_TABLE_ROW_STRIDE);
         assert_eq!(base, 0);
-        assert_eq!(s.next_dispatch_base, FRAME_TABLE_ROW_STRIDE);
+        assert!(s.check().is_ok());
+        assert_eq!(s.used_words(), FRAME_TABLE_ROW_STRIDE);
+        assert_eq!(s.as_arc().len(), FRAME_TABLE_ROW_STRIDE as usize);
 
-        // Any further alloc must return the clamped end, not a value beyond the row.
         let overflow_base = s.alloc_dispatch(10);
-        assert!(
-            overflow_base <= FRAME_TABLE_ROW_STRIDE,
-            "alloc_dispatch overflowed: base={overflow_base} > ROW_STRIDE={FRAME_TABLE_ROW_STRIDE}"
+        assert_eq!(overflow_base, FRAME_TABLE_ROW_STRIDE);
+        assert!(s.check().is_err());
+        assert_eq!(
+            s.data.len(),
+            FRAME_TABLE_ROW_STRIDE as usize,
+            "overflow must not allocate another row"
         );
-        // write_dispatch_indices must not write past the backing vec.
         s.write_dispatch_indices(overflow_base, &[42u32; 10]);
+        assert!(s.check().is_err());
+        assert_eq!(s.as_arc().len(), FRAME_TABLE_ROW_STRIDE as usize);
     }
 
-    /// `write_dispatch_indices` must not write past the bounds of row 0.
-    /// This is the exact class of bug that caused the longpathdash_butt snapshot
-    /// failure (stride 256 → indices spilling into row 1's region).
+    /// Indices live in the used prefix. A small submission's arc is that prefix,
+    /// not a row of zeros.
     #[test]
-    fn write_dispatch_indices_stays_in_row_zero() {
+    fn as_arc_is_only_the_words_written() {
         let mut s = FrameTableStaging::new();
-        // Write to the last few slots of the row.
-        let last_base = FRAME_TABLE_ROW_STRIDE - 4;
-        s.write_dispatch_indices(last_base, &[1, 2, 3, 4, 5, 6]); // 6 > 4 remaining
-                                                                  // Slots within row 0 must be written.
-        for k in 0..4usize {
-            assert_eq!(s.data[last_base as usize + k], k as u32 + 1);
-        }
-        // Row 1 (starting at offset ROW_STRIDE) must be untouched.
-        for k in 0..4usize {
-            assert_eq!(
-                s.data[FRAME_TABLE_ROW_STRIDE as usize + k],
-                0,
-                "write_dispatch_indices spilled into row 1 at k={k}"
-            );
-        }
+        assert!(s.as_arc().is_empty());
+        let base = s.alloc_dispatch(4);
+        s.write_dispatch_indices(base, &[1, 2, 3, 4]);
+        assert_eq!(s.as_arc().as_ref(), &[1, 2, 3, 4]);
+        s.write_dispatch_indices(base, &[1, 2, 3, 4, 5]);
+        assert!(s.check().is_err(), "a write past the reservation is overflow");
     }
 
     /// Rust and Slang must agree on `GOLDY_FRAME_TABLE_ROW_STRIDE` in access.slang.

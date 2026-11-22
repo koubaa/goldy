@@ -1051,6 +1051,7 @@ fn record_gpu_command(
                 &scope.buffers().read().unwrap().entries,
                 cl7,
                 data,
+                ctx.retained,
             )?;
             ctx.frame_table_row = Some(row);
         }
@@ -2913,6 +2914,8 @@ pub(super) fn submit_graph_with_scope(
                         render_cmds,
                         &command_list7,
                         frame_table_prologue_in_cb,
+                        retain_key.is_some(),
+                        cmd_ctx.frame_table_row,
                     )?;
                     if let Some(row) = prologue_row {
                         cmd_ctx.frame_table_row = Some(row);

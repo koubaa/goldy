@@ -269,4 +269,11 @@ impl crate::backend::ContextSubmitSession for VulkanSubmitSession {
         let scope = self.dispatch_scope(ctx);
         compute::evict_retained_with_scope(&scope, scope.ctx, key);
     }
+
+    fn retained_evictions(&self, ctx: ContextHandle) -> u64 {
+        let _ = ctx;
+        self.frame_table
+            .retained_evictions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }

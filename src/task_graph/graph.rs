@@ -1038,9 +1038,11 @@ fn partition_graph_commands_for_retain(
     // concrete drawable handle — the cached form was emitted without a resolver.
     if resolver.is_some() {
         if has_render {
-            return analysis::emit_graph_commands_for_waves(ir, waves, resolver);
+            return analysis::emit_graph_commands_for_waves(ir, waves, resolver)
+                .unwrap_or_else(|err| panic!("frame table overflow while retaining a partition: {err}"));
         }
         return analysis::emit_waves_to_commands(ir, waves, resolver)
+            .unwrap_or_else(|err| panic!("frame table overflow while retaining a partition: {err}"))
             .into_iter()
             .map(GraphCommand::Compute)
             .collect();
@@ -1052,7 +1054,8 @@ fn partition_graph_commands_for_retain(
             return cmds.clone();
         }
         // Cache not yet warm — emit fresh (will be cached next call).
-        return analysis::emit_graph_commands_for_waves(ir, waves, None);
+        return analysis::emit_graph_commands_for_waves(ir, waves, None)
+            .unwrap_or_else(|err| panic!("frame table overflow while retaining a partition: {err}"));
     }
 
     if let Some(parts) = cache.partitioned_commands.as_ref() {
@@ -1060,6 +1063,7 @@ fn partition_graph_commands_for_retain(
     }
     // Cache not yet warm.
     analysis::emit_waves_to_commands(ir, waves, None)
+        .unwrap_or_else(|err| panic!("frame table overflow while retaining a partition: {err}"))
         .into_iter()
         .map(GraphCommand::Compute)
         .collect()
@@ -1082,12 +1086,12 @@ fn partition_standalone_commands(
         );
     }
     if has_present {
-        return Ok(analysis::emit_waves_to_commands(ir, waves, resolver));
+        return analysis::emit_waves_to_commands(ir, waves, resolver).map_err(Into::into);
     }
     if let Some(parts) = cache.partitioned_commands.as_ref() {
         return Ok(parts[part_idx].clone());
     }
-    Ok(analysis::emit_waves_to_commands(ir, waves, None))
+    analysis::emit_waves_to_commands(ir, waves, None).map_err(Into::into)
 }
 
 fn cross_sync_for_stamps<'a>(
@@ -1736,7 +1740,7 @@ fn submit_resolved_ir_partitions_fresh(
                         ir,
                         waves,
                         if needs_resolver { Some(&resolver) } else { None },
-                    )
+                    )?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
                 last_tv = backend_submit_graph(session, ctx, &graph_cmds, merged.as_ref())?;
@@ -1750,7 +1754,7 @@ fn submit_resolved_ir_partitions_fresh(
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.fresh_emit");
                     let waves = &cache.as_ref().unwrap().schedule.waves[wave_range.clone()];
-                    analysis::emit_waves_to_commands(ir, waves, if needs_resolver { Some(&resolver) } else { None })
+                    analysis::emit_waves_to_commands(ir, waves, if needs_resolver { Some(&resolver) } else { None })?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.fresh");
                 last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
@@ -1852,7 +1856,7 @@ fn submit_resolved_ir_partitions_replay(
         }
     };
 
-    replay.ensure_partition_vecs(wave_ranges.len());
+    replay.ensure_partition_vecs(context, wave_ranges.len());
 
     {
         let _tz = crate::tracy_zone!("goldy.submit_resolved.build_partitions");
@@ -1958,7 +1962,7 @@ fn submit_resolved_ir_partitions_replay(
                 let merged = sidecar.merge_sync(sync.as_ref());
                 let cmds = {
                     let _tz = crate::tracy_zone!("goldy.partition_loop.upload_compute_emit");
-                    analysis::emit_waves_to_commands(ir, &merged_waves, Some(&resolver))
+                    analysis::emit_waves_to_commands(ir, &merged_waves, Some(&resolver))?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.upload_compute_fused");
                 last_tv = backend_submit_standalone(session, ctx, &cmds, merged.as_ref())?;
@@ -2007,13 +2011,12 @@ fn submit_resolved_ir_partitions_replay(
                         ir,
                         &merged_waves,
                         if needs_resolver { Some(&resolver) } else { None },
-                    )
+                    )?
                 };
                 let _tz = crate::tracy_zone!("goldy.submit_partition.merged_record");
                 ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
                 last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, merged_fp, merged.as_ref())?;
-                replay.partition_keys[part_idx] = Some(merged_fp);
-                replay.partition_keys[part_idx + 1] = Some(merged_fp);
+                replay.install_keys(context, &[part_idx, part_idx + 1], merged_fp);
                 replay.record_merged_last_tvs(part_idx, last_tv);
                 result.records += 1;
                 apply_partition_epoch_stamps(resource_stamps, stamp_targets, ctx, ir, &merged_waves, last_tv);
@@ -2197,7 +2200,7 @@ fn submit_resolved_ir_partitions_replay(
                 replay.partition_slot_keys[part_idx]
                     .get_or_insert_with(std::collections::HashSet::new)
                     .insert(slot_key);
-                replay.partition_keys[part_idx] = Some(part_fp);
+                replay.install_keys(context, &[part_idx], part_fp);
                 replay.record_last_tv(part_idx, last_tv);
                 result.records += 1;
                 boundary.record(separate, has_render, last_tv);
@@ -2251,7 +2254,7 @@ fn submit_resolved_ir_partitions_replay(
             let _tz = crate::tracy_zone!("goldy.submit_partition.record");
             ensure_partition_retired_before_rerecord(session, context, replay.partition_last_tv[part_idx])?;
             last_tv = backend_submit_graph_and_retain(session, ctx, &graph_cmds, part_fp, merged.as_ref())?;
-            replay.partition_keys[part_idx] = Some(part_fp);
+            replay.install_keys(context, &[part_idx], part_fp);
             replay.record_last_tv(part_idx, last_tv);
             result.records += 1;
             boundary.record(separate, has_render, last_tv);
@@ -2338,10 +2341,18 @@ impl IrSubmitState {
     }
 
     /// Drop cached retention keys so the next submit re-records retained partitions.
-    pub fn invalidate_retention(&mut self) {
+    pub fn invalidate_retention(&mut self, ctx: &crate::Context) {
         if let Some(replay) = &mut self.replay {
-            replay.invalidate();
+            replay.invalidate(ctx);
         }
+    }
+
+    /// Evictions this ledger has recorded since the last take.
+    pub fn take_retained_evictions(&mut self) -> u64 {
+        self.replay
+            .as_mut()
+            .map(|replay| std::mem::take(&mut replay.evictions))
+            .unwrap_or(0)
     }
 
     /// Ensure replay ledger matches the global disable flag; release backend CBs when turning off.
@@ -2704,9 +2715,15 @@ fn get_or_build_partitioned_commands(
             graph_partitions.push(None);
         } else if has_render {
             compute_partitions.push(Vec::new());
-            graph_partitions.push(Some(analysis::emit_graph_commands_for_waves(ir, waves, None)));
+            graph_partitions.push(Some(
+                analysis::emit_graph_commands_for_waves(ir, waves, None)
+                    .unwrap_or_else(|err| panic!("frame table overflow while caching a partition: {err}")),
+            ));
         } else {
-            compute_partitions.push(analysis::emit_waves_to_commands(ir, waves, None));
+            compute_partitions.push(
+                analysis::emit_waves_to_commands(ir, waves, None)
+                    .unwrap_or_else(|err| panic!("frame table overflow while caching a partition: {err}")),
+            );
             graph_partitions.push(None);
         }
     }
