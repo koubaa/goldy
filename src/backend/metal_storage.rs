@@ -156,7 +156,10 @@ impl MetalDeviceFacts {
         if self.os_major > 0 && self.os_major < 13 {
             return Some("Goldy Metal requires macOS 13 or newer (C-layout argument buffers)");
         }
-        if !self.metal3 {
+        // GitHub's Apple paravirtual GPU is Apple-family and Tier 2 but does not
+        // report `MTLGPUFamilyMetal3`. Non-Apple GPUs still need Metal 3, which
+        // is what excludes Polaris.
+        if !self.apple_family && !self.metal3 {
             return Some("Goldy Metal requires a Metal 3 GPU (Polaris and older are outside the floor)");
         }
         if !self.argument_buffers_tier2 {
@@ -396,8 +399,9 @@ mod tests {
 
         let para_arm = MetalDeviceFacts {
             apple_family: true,
-            apple7: true,
+            apple7: false,
             has_unified_memory: true,
+            metal3: false,
             paravirtual: true,
             ..base_ok()
         };
