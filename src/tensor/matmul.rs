@@ -7,6 +7,15 @@ use super::view::{Tensor, TensorView};
 use crate::error::GoldyError;
 use crate::ops::{MatMulDesc, MatMulView};
 
+/// Packed NVFP4 expert stack. The tensors stay in device memory.
+pub struct Nvfp4Experts<'a> {
+    pub codes: TensorView<'a>,
+    pub scales: TensorView<'a>,
+    pub factors: TensorView<'a>,
+    pub ids: TensorView<'a>,
+    pub slot: u32,
+}
+
 impl<'a> TensorRecorder<'a> {
     /// `out = a @ b` with broadcasting on batch dims. Rank-1/2 packed cases use
     /// [`Scheme::matmul`](crate::Scheme::matmul); remaining layouts use a portable kernel.
@@ -117,6 +126,124 @@ impl<'a> TensorRecorder<'a> {
             .over_1d(tile.view().numel_u32().max(1));
         self.matmul_into(&format!("{label}_gemm"), tile.view(), x, out)?;
         Ok(tile)
+    }
+
+    /// `out = weight @ x` with a packed bfloat16 weight and an f32 vector.
+    ///
+    /// `weight` is `[rows, k]` BF16 and stays packed. Each dot promotes an
+    /// element to f32. `x` is `[k]` and `out` is `[rows]`. The f32 matmul
+    /// lowering is unchanged; a later backend can replace this kernel when it
+    /// has a native BF16 matvec.
+    pub fn matmul_bf16_into(
+        &mut self,
+        label: &str,
+        weight: TensorView<'_>,
+        x: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        if weight.dtype() != TensorDType::BF16 || weight.shape().rank() != 2 {
+            return Err(GoldyError::Validation(
+                "matmul_bf16: weight must be a rank-2 BF16 tensor".into(),
+            ));
+        }
+        x.dtype().require_f32("matmul_bf16")?;
+        out.dtype().require_f32("matmul_bf16")?;
+        let rows = weight.shape().dim(0)?;
+        let k = weight.shape().dim(1)?;
+        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
+            return Err(GoldyError::Validation("matmul_bf16: x is [k] and out is [rows]".into()));
+        }
+        let bits = weight.packed_u32_words()?;
+        self.kernels
+            .ops
+            .matvec_bf16
+            .record(self.scheme, label, bits, x, out, k)?
+            .over_1d(rows.max(1));
+        Ok(())
+    }
+
+    /// `out = dequant(weight[ids[slot]]) @ x`.
+    ///
+    /// NVFP4 layout of Inkling-2-Mini experts: `codes` is U8 `[experts, rows, k/2]`
+    /// with the even column in the low nibble, `scales` is F8E4M3
+    /// `[experts, rows, k/16]`, and `factors` is f32 `[experts]` equal to
+    /// `amax / outer_scale_denominator`. The packed tensors stay in device
+    /// memory; the dot dequantizes each element. An id past `experts` writes zeros.
+    pub fn matmul_nvfp4_indexed_into(
+        &mut self,
+        label: &str,
+        weight: Nvfp4Experts<'_>,
+        x: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let Nvfp4Experts {
+            codes,
+            scales,
+            factors,
+            ids,
+            slot,
+        } = weight;
+        if codes.dtype() != TensorDType::U8 || codes.shape().rank() != 3 {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: codes must be a rank-3 U8 tensor".into(),
+            ));
+        }
+        if scales.dtype() != TensorDType::F8E4M3 || scales.shape().rank() != 3 {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: scales must be a rank-3 F8E4M3 tensor".into(),
+            ));
+        }
+        factors.dtype().require_f32("matmul_nvfp4")?;
+        x.dtype().require_f32("matmul_nvfp4")?;
+        out.dtype().require_f32("matmul_nvfp4")?;
+        if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: ids must be a rank-1 U32 tensor".into(),
+            ));
+        }
+        if slot >= ids.shape().dim(0)? {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: slot is past the id buffer".into(),
+            ));
+        }
+        let experts = codes.shape().dim(0)?;
+        let rows = codes.shape().dim(1)?;
+        let packed = codes.shape().dim(2)?;
+        let k = packed.saturating_mul(2);
+        if scales.shape().dims() != [experts, rows, k / 16]
+            || factors.shape().dims() != [experts]
+            || x.shape().dims() != [k]
+            || out.shape().dims() != [rows]
+        {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: scales are [experts, rows, k/16], x is [k], out is [rows]".into(),
+            ));
+        }
+        if k % 16 != 0 {
+            return Err(GoldyError::Validation(
+                "matmul_nvfp4: unpacked columns must be a multiple of 16".into(),
+            ));
+        }
+        let code_bits = codes.packed_u32_words()?;
+        let scale_bits = scales.packed_u32_words()?;
+        self.kernels
+            .ops
+            .matvec_nvfp4
+            .record(
+                self.scheme,
+                label,
+                code_bits,
+                scale_bits,
+                factors,
+                ids,
+                x,
+                out,
+                rows,
+                k,
+                slot,
+            )?
+            .over_1d(rows.max(1));
+        Ok(())
     }
 
     fn matmul_semantic(

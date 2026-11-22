@@ -27,12 +27,16 @@ impl Tensor {
     pub fn zeros(runtime: &Runtime, shape: TensorShape, dtype: TensorDType) -> Result<Self, GoldyError> {
         let layout = TensorLayout::packed(dtype, shape, 0)?;
         let n = layout.numel()?;
-        let bytes = n
-            .checked_mul(dtype.size_bytes() as u64)
+        let elem = dtype.size_bytes() as u64;
+        let mut bytes = n
+            .checked_mul(elem)
             .ok_or_else(|| GoldyError::Validation("tensor zeros: byte size overflow".into()))?;
+        if elem < 4 {
+            bytes = bytes.next_multiple_of(4);
+        }
         let buffer = runtime
             .acquire_buffer(
-                bytes.max(dtype.size_bytes() as u64),
+                bytes.max(elem),
                 BufferKind::Scattered,
                 Some(dtype.size_bytes() as u32),
                 crate::types::BufferFlags::empty(),
@@ -44,6 +48,42 @@ impl Tensor {
 
     pub fn from_f32(runtime: &Runtime, shape: TensorShape, data: &[f32]) -> Result<Self, GoldyError> {
         from_slice(runtime, shape, TensorDType::F32, data)
+    }
+
+    /// Packed upload of a sub-word or word dtype. The byte length must equal
+    /// `numel * dtype.size_bytes()`. The allocation is padded to 4 bytes so a
+    /// matmul can read the tail through a `u32` window.
+    pub fn from_bytes(
+        runtime: &Runtime,
+        shape: TensorShape,
+        dtype: TensorDType,
+        data: &[u8],
+    ) -> Result<Self, GoldyError> {
+        let layout = TensorLayout::packed(dtype, shape, 0)?;
+        let n = layout.numel()?;
+        let need = n
+            .checked_mul(dtype.size_bytes() as u64)
+            .ok_or_else(|| GoldyError::Validation("tensor from_bytes: size overflow".into()))?;
+        if data.len() as u64 != need {
+            return Err(GoldyError::Validation(format!(
+                "tensor from_bytes: {} bytes != {need}",
+                data.len()
+            )));
+        }
+        let mut padded = data.to_vec();
+        while !padded.len().is_multiple_of(4) {
+            padded.push(0);
+        }
+        let words: Vec<u32> = padded
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect();
+        let buffer = runtime
+            .acquire_buffer_with_data(words.as_slice(), BufferKind::Scattered)
+            .map_err(GoldyError::from)?;
+        Tensor::from_buffer(buffer, layout)
     }
 
     pub fn from_u32(runtime: &Runtime, shape: TensorShape, data: &[u32]) -> Result<Self, GoldyError> {
@@ -151,6 +191,31 @@ impl<'a> TensorView<'a> {
     }
 
     /// Packed window of `shape` starting at element `storage_offset` in `buffer`.
+    /// The same bytes viewed as a packed `u32` vector. Used by matmuls that
+    /// unpack BF16 or NVFP4 inside the dot. The byte length must be a multiple of 4.
+    pub fn packed_u32_words(self) -> Result<Self, GoldyError> {
+        let (byte_off, byte_len) = self.layout.byte_envelope()?;
+        if !byte_off.is_multiple_of(4) {
+            return Err(GoldyError::Validation(
+                "tensor packed_u32_words: byte offset is not a multiple of 4".into(),
+            ));
+        }
+        let mut byte_len = byte_len;
+        if !byte_len.is_multiple_of(4) {
+            let rounded = byte_len.next_multiple_of(4);
+            if byte_off + rounded > self.buffer.byte_size() {
+                return Err(GoldyError::Validation(
+                    "tensor packed_u32_words: buffer is shorter than a trailing u32".into(),
+                ));
+            }
+            byte_len = rounded;
+        }
+        let words = u32::try_from(byte_len / 4)
+            .map_err(|_| GoldyError::Validation("tensor packed_u32_words: range does not fit u32".into()))?;
+        let shape = TensorShape::vector(words.max(1));
+        Self::packed_at(self.buffer, TensorDType::U32, byte_off / 4, shape)
+    }
+
     pub fn packed_at(
         buffer: &'a Buffer,
         dtype: TensorDType,

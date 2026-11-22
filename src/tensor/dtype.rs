@@ -11,12 +11,22 @@ pub enum TensorDType {
     U32,
     /// Signed 32-bit integer.
     I32,
+    /// bfloat16. Stored packed; matmul promotes each element to f32 in the dot.
+    BF16,
+    /// Unsigned 8-bit. Used for NVFP4 code bytes (two E2M1 nibbles).
+    U8,
+    /// OCP float8 E4M3. Used for NVFP4 block scales.
+    F8E4M3,
 }
 
 impl TensorDType {
     /// Size of one element in bytes.
     pub const fn size_bytes(self) -> usize {
-        4
+        match self {
+            Self::F32 | Self::U32 | Self::I32 => 4,
+            Self::BF16 => 2,
+            Self::U8 | Self::F8E4M3 => 1,
+        }
     }
 
     pub const fn name(self) -> &'static str {
@@ -24,6 +34,9 @@ impl TensorDType {
             Self::F32 => "f32",
             Self::U32 => "u32",
             Self::I32 => "i32",
+            Self::BF16 => "bf16",
+            Self::U8 => "u8",
+            Self::F8E4M3 => "f8_e4m3",
         }
     }
 

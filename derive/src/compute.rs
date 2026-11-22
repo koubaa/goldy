@@ -1366,6 +1366,7 @@ fn lower_call(
             ["log"] | ["gpu", "log"] | ["goldy", "gpu", "log"] => BuiltinFn::Log,
             ["pow"] | ["gpu", "pow"] | ["goldy", "gpu", "pow"] => BuiltinFn::Pow,
             ["tanh"] | ["gpu", "tanh"] | ["goldy", "gpu", "tanh"] => BuiltinFn::Tanh,
+            ["as_f32"] | ["gpu", "as_f32"] | ["goldy", "gpu", "as_f32"] => BuiltinFn::AsFloat,
             ["sigmoid"] | ["gpu", "sigmoid"] | ["goldy", "gpu", "sigmoid"] => BuiltinFn::Sigmoid,
             ["workgroup_barrier"] | ["gpu", "workgroup_barrier"] | ["goldy", "gpu", "workgroup_barrier"] => {
                 BuiltinFn::WorkgroupBarrier
@@ -1550,6 +1551,7 @@ fn infer_slang_ty(expr: &Expr, env: &std::collections::HashMap<String, String>) 
                 | BuiltinFn::Pow
                 | BuiltinFn::Tanh
                 | BuiltinFn::Sigmoid
+                | BuiltinFn::AsFloat
                 | BuiltinFn::Length
                 | BuiltinFn::Abs
                 | BuiltinFn::Min

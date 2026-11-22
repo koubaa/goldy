@@ -74,6 +74,8 @@ pub enum BuiltinFn {
     /// `(a, b)`: the f32 quotient `a / b`, rounded on its own, so the device does not
     /// rewrite it (a constant divisor into a multiply by its reciprocal, say).
     ExactDiv,
+    /// Bitcast a `u32` to `f32` (`asfloat`).
+    AsFloat,
 }
 
 /// Rows, columns and summed extent of every [`Stmt::Matrix`] tile.

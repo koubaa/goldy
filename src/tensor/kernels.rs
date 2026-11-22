@@ -341,6 +341,140 @@ pub use tensor_cast_u32_f32::Kernel as CastU32F32Kernel;
 pub use tensor_copy_u32::Kernel as CopyU32Kernel;
 pub use tensor_gather_f32::Kernel as GatherF32Kernel;
 pub use tensor_gather_slab_f32::Kernel as GatherSlabF32Kernel;
+pub use tensor_matvec_bf16::Kernel as MatVecBf16Kernel;
+pub use tensor_matvec_nvfp4::Kernel as MatVecNvfp4Kernel;
 pub use tensor_reduce_f32::Kernel as ReduceF32Kernel;
 pub use tensor_scatter_f32::Kernel as ScatterF32Kernel;
 pub use tensor_unary_f32::Kernel as UnaryF32Kernel;
+
+/// `out[row] = sum_k bf16_to_f32(weight[row, k]) * x[k]`.
+///
+/// `bits` is the weight's bytes viewed as `u32` words, little-endian. Element
+/// `e` is the low or high 16 bits of word `e / 2`.
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn tensor_matvec_bf16(
+    bits: goldy::gpu::Tensor<u32>,
+    x: goldy::gpu::Tensor<f32>,
+    out: goldy::gpu::TensorWrite<f32>,
+    k: u32,
+) {
+    let row = goldy::gpu::global_id().x;
+    if row >= out.len() {
+        return;
+    }
+    let mut acc = 0.0;
+    let mut col = 0u32;
+    while col < k {
+        let elem = row * k + col;
+        let word = bits[elem >> 1];
+        let mut half = word & 65535u32;
+        if (elem & 1u32) != 0u32 {
+            half = word >> 16;
+        }
+        let w = goldy::gpu::as_f32(half << 16);
+        acc = acc + w * x[col];
+        col = col + 1;
+    }
+    out[row] = acc;
+}
+
+/// NVFP4 matvec. `codes` holds two E2M1 nibbles per byte, even column in the
+/// low nibble. `scales` is one E4M3 byte per 16 columns. `factors[id]` is
+/// `amax / outer_scale_denominator` for that expert. An id past `experts`
+/// writes zeros.
+///
+/// Layout matches transformers `Inkling2LoopDequantizeExperts`: codes
+/// `[experts, rows, k/2]`, scales `[experts, rows, k/16]`.
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn tensor_matvec_nvfp4(
+    codes: goldy::gpu::Tensor<u32>,
+    scales: goldy::gpu::Tensor<u32>,
+    factors: goldy::gpu::Tensor<f32>,
+    ids: goldy::gpu::Tensor<u32>,
+    x: goldy::gpu::Tensor<f32>,
+    out: goldy::gpu::TensorWrite<f32>,
+    rows: u32,
+    k: u32,
+    slot: u32,
+) {
+    let row = goldy::gpu::global_id().x;
+    if row >= rows {
+        return;
+    }
+    let id = ids[slot];
+    let experts = factors.len();
+    if id >= experts {
+        out[row] = 0.0;
+        return;
+    }
+    let factor = factors[id];
+    let code_bytes = k >> 1;
+    let scale_bytes = k >> 4;
+    let mut acc = 0.0;
+    let mut col = 0u32;
+    while col < k {
+        let byte_index = (id * rows + row) * code_bytes + (col >> 1);
+        let word = codes[byte_index >> 2];
+        let shift = (byte_index & 3u32) * 8u32;
+        let byte = (word >> shift) & 255u32;
+        let mut nib = byte & 15u32;
+        if (col & 1u32) != 0u32 {
+            nib = byte >> 4;
+        }
+        let mut mag = 0.0;
+        if nib == 1u32 || nib == 9u32 {
+            mag = 0.5;
+        } else if nib == 2u32 || nib == 10u32 {
+            mag = 1.0;
+        } else if nib == 3u32 || nib == 11u32 {
+            mag = 1.5;
+        } else if nib == 4u32 || nib == 12u32 {
+            mag = 2.0;
+        } else if nib == 5u32 || nib == 13u32 {
+            mag = 3.0;
+        } else if nib == 6u32 || nib == 14u32 {
+            mag = 4.0;
+        } else if nib == 7u32 || nib == 15u32 {
+            mag = 6.0;
+        }
+        if nib >= 8u32 {
+            mag = -mag;
+        }
+        let scale_index = (id * rows + row) * scale_bytes + (col >> 4);
+        let sword = scales[scale_index >> 2];
+        let sshift = (scale_index & 3u32) * 8u32;
+        let sb = (sword >> sshift) & 255u32;
+        let sign = sb >> 7;
+        let exp = (sb >> 3) & 15u32;
+        let mant = sb & 7u32;
+        let mut bits = 0u32;
+        if exp == 0u32 {
+            if mant == 1u32 {
+                bits = 989855744u32;
+            } else if mant == 2u32 {
+                bits = 998244352u32;
+            } else if mant == 3u32 {
+                bits = 1002438656u32;
+            } else if mant == 4u32 {
+                bits = 1006632960u32;
+            } else if mant == 5u32 {
+                bits = 1008730112u32;
+            } else if mant == 6u32 {
+                bits = 1010827264u32;
+            } else if mant == 7u32 {
+                bits = 1012924416u32;
+            }
+        } else if exp == 15u32 && mant == 7u32 {
+            bits = 2143289344u32;
+        } else {
+            bits = ((exp + 120u32) << 23) | (mant << 20);
+        }
+        let mut scale = goldy::gpu::as_f32(bits);
+        if sign != 0u32 {
+            scale = -scale;
+        }
+        acc = acc + mag * scale * factor * x[col];
+        col = col + 1;
+    }
+    out[row] = acc;
+}

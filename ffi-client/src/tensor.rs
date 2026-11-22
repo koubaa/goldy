@@ -12,6 +12,9 @@ pub enum TensorDType {
     F32,
     U32,
     I32,
+    BF16,
+    U8,
+    F8E4M3,
 }
 
 impl From<TensorDType> for GoldyTensorDType {
@@ -20,6 +23,9 @@ impl From<TensorDType> for GoldyTensorDType {
             TensorDType::F32 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_F32,
             TensorDType::U32 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_U32,
             TensorDType::I32 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_I32,
+            TensorDType::BF16 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_BF16,
+            TensorDType::U8 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_U8,
+            TensorDType::F8E4M3 => GoldyTensorDType::GOLDY_TENSOR_D_TYPE_F8_E4M3,
         }
     }
 }
@@ -30,6 +36,9 @@ impl From<GoldyTensorDType> for TensorDType {
             GoldyTensorDType::GOLDY_TENSOR_D_TYPE_F32 => TensorDType::F32,
             GoldyTensorDType::GOLDY_TENSOR_D_TYPE_U32 => TensorDType::U32,
             GoldyTensorDType::GOLDY_TENSOR_D_TYPE_I32 => TensorDType::I32,
+            GoldyTensorDType::GOLDY_TENSOR_D_TYPE_BF16 => TensorDType::BF16,
+            GoldyTensorDType::GOLDY_TENSOR_D_TYPE_U8 => TensorDType::U8,
+            GoldyTensorDType::GOLDY_TENSOR_D_TYPE_F8_E4M3 => TensorDType::F8E4M3,
         }
     }
 }

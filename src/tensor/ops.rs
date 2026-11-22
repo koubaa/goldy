@@ -3,10 +3,11 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, GatherF32Kernel, GatherSlabF32Kernel, ReduceF32Kernel, ScatterF32Kernel, UnaryF32Kernel, OP_ABS,
-    OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN,
-    OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX,
-    OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM, OP_TANH,
+    CopyU32Kernel, GatherF32Kernel, GatherSlabF32Kernel, MatVecBf16Kernel, MatVecNvfp4Kernel, ReduceF32Kernel,
+    ScatterF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL,
+    OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX,
+    OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB,
+    OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::semantic;
 use super::shape::TensorShape;
@@ -69,6 +70,8 @@ pub(crate) struct PreparedOps {
     pub gather: GatherF32Kernel,
     pub scatter: ScatterF32Kernel,
     pub gather_slab: GatherSlabF32Kernel,
+    pub matvec_bf16: MatVecBf16Kernel,
+    pub matvec_nvfp4: MatVecNvfp4Kernel,
     pub batched: BatchedMatMulKernel,
     pub cast_f32_i32: CastF32I32Kernel,
     pub cast_f32_u32: CastF32U32Kernel,
@@ -86,6 +89,8 @@ impl PreparedOps {
             gather: GatherF32Kernel::prepare(runtime)?,
             scatter: ScatterF32Kernel::prepare(runtime)?,
             gather_slab: GatherSlabF32Kernel::prepare(runtime)?,
+            matvec_bf16: MatVecBf16Kernel::prepare(runtime)?,
+            matvec_nvfp4: MatVecNvfp4Kernel::prepare(runtime)?,
             batched: BatchedMatMulKernel::prepare(runtime)?,
             cast_f32_i32: CastF32I32Kernel::prepare(runtime)?,
             cast_f32_u32: CastF32U32Kernel::prepare(runtime)?,

@@ -372,6 +372,7 @@ fn builtin_fn(func: BuiltinFn) -> TokenStream {
         BuiltinFn::SubgroupRead => quote! { SubgroupRead },
         BuiltinFn::ExactMul => quote! { ExactMul },
         BuiltinFn::ExactDiv => quote! { ExactDiv },
+        BuiltinFn::AsFloat => quote! { AsFloat },
     };
     quote! { ::goldy::kernel::ir::BuiltinFn::#variant }
 }

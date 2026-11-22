@@ -322,6 +322,11 @@ pub mod gpu {
         unimplemented!("gpu::abs is only valid inside #[goldy::compute] bodies")
     }
 
+    /// Bitcast the `u32` bit pattern to `f32`.
+    pub fn as_f32(_bits: u32) -> f32 {
+        unimplemented!("gpu::as_f32 is only valid inside #[goldy::compute] bodies")
+    }
+
     pub fn min(_a: f32, _b: f32) -> f32 {
         unimplemented!("gpu::min is only valid inside #[goldy::compute] bodies")
     }

@@ -720,6 +720,134 @@ fn tensor_shape_contract_wrong_rank() {
     assert!(err.to_string().contains("expected rank 1"), "{err}");
 }
 
+fn bf16_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 2);
+    for v in values {
+        let bits = ((*v).to_bits() >> 16) as u16;
+        out.extend_from_slice(&bits.to_le_bytes());
+    }
+    out
+}
+
+fn e2m1(nib: u8) -> f32 {
+    let mag = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0][(nib & 7) as usize];
+    if nib & 8 == 0 {
+        mag
+    } else {
+        -mag
+    }
+}
+
+fn f8_e4m3(b: u8) -> f32 {
+    let sign = (b >> 7) & 1;
+    let exp = (b >> 3) & 0xF;
+    let mant = b & 7;
+    let val = if exp == 0 {
+        mant as f32 * 2f32.powi(-9)
+    } else if exp == 15 && mant == 7 {
+        f32::NAN
+    } else {
+        (1.0 + mant as f32 / 8.0) * 2f32.powi(exp as i32 - 7)
+    };
+    if sign == 0 {
+        val
+    } else {
+        -val
+    }
+}
+
+#[test]
+fn bf16_matvec_promotes_inside_the_dot() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // [[1, 0], [0, 2]] @ [3, 4] = [3, 8]
+    let weight = Tensor::from_bytes(
+        &device,
+        TensorShape::matrix(2, 2),
+        TensorDType::BF16,
+        &bf16_bytes(&[1.0, 0.0, 0.0, 2.0]),
+    )
+    .unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(2), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_bf16_into("bf16", weight.view(), x.view(), out.view())
+        .unwrap();
+    let got = read_f32(&mut scheme, out.buffer());
+    assert_eq!(got, vec![3.0, 8.0], "{got:?}");
+}
+
+#[test]
+fn nvfp4_indexed_matvec_matches_the_reference_dequant() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // One row, k = 16. Expert 0: first byte is nibbles (1.0, 2.0), rest zero, scale 1.
+    // Expert 1: all nibbles 1.0, scale 1, factor 2 → every weight is 2.
+    let mut codes = vec![0u8; 2 * 1 * 8];
+    codes[0] = 2 | (4 << 4);
+    for b in 8..16 {
+        codes[b] = 2 | (2 << 4);
+    }
+    let mut scales = vec![0u8; 2];
+    scales[0] = 0x38;
+    scales[1] = 0x38;
+    let codes_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[2, 1, 8]).unwrap(),
+        TensorDType::U8,
+        &codes,
+    )
+    .unwrap();
+    let scales_t = Tensor::from_bytes(
+        &device,
+        TensorShape::from_dims(&[2, 1, 1]).unwrap(),
+        TensorDType::F8E4M3,
+        &scales,
+    )
+    .unwrap();
+    let factors = Tensor::from_f32(&device, TensorShape::vector(2), &[1.0, 2.0]).unwrap();
+    let x_vals = [
+        1.0f32, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    ];
+    let x = Tensor::from_f32(&device, TensorShape::vector(16), &x_vals).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(1), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_nvfp4_indexed_into(
+            "nv",
+            goldy::Nvfp4Experts {
+                codes: codes_t.view(),
+                scales: scales_t.view(),
+                factors: factors.view(),
+                ids: ids.view(),
+                slot: 0,
+            },
+            x.view(),
+            out.view(),
+        )
+        .unwrap();
+    let got = read_f32(&mut scheme, out.buffer());
+    let expect = e2m1(2) * f8_e4m3(0x38) + e2m1(4) * f8_e4m3(0x38);
+    assert!((got[0] - expect).abs() < 1e-5, "expert 0 {got:?} want {expect}");
+
+    ids.buffer().write(0, bytemuck::cast_slice(&[1u32])).unwrap();
+    let got = read_f32(&mut scheme, out.buffer());
+    // 16 values of 1 * scale 1 * factor 2, x is 1 only on the first two columns.
+    let expect = 2.0 * f8_e4m3(0x38) * 2.0;
+    assert!((got[0] - expect).abs() < 1e-5, "expert 1 {got:?} want {expect}");
+
+    ids.buffer().write(0, bytemuck::cast_slice(&[9u32])).unwrap();
+    assert_eq!(read_f32(&mut scheme, out.buffer()), vec![0.0]);
+}
+
 #[allow(dead_code)]
 fn _compile_view_helpers(v: TensorView<'_>) {
     let _ = v.dtype();

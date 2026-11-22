@@ -162,8 +162,8 @@ pub use slang::{
 pub use task_graph::NodeAccess;
 #[cfg(feature = "tensor")]
 pub use tensor::{
-    GoldyTensorLayout, ScatterMode, Tensor, TensorDType, TensorKernels, TensorLayout, TensorRecorder, TensorScalar,
-    TensorShape, TensorView, MAX_TENSOR_RANK,
+    GoldyTensorLayout, Nvfp4Experts, ScatterMode, Tensor, TensorDType, TensorKernels, TensorLayout, TensorRecorder,
+    TensorScalar, TensorShape, TensorView, MAX_TENSOR_RANK,
 };
 pub use texture::TextureCopyFootprint;
 pub use validation_env::Validation;

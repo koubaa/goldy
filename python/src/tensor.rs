@@ -20,6 +20,9 @@ pub enum PyTensorDType {
     F32 = 0,
     U32 = 1,
     I32 = 2,
+    BF16 = 3,
+    U8 = 4,
+    F8E4M3 = 5,
 }
 
 impl From<PyTensorDType> for TensorDType {
@@ -28,6 +31,9 @@ impl From<PyTensorDType> for TensorDType {
             PyTensorDType::F32 => TensorDType::F32,
             PyTensorDType::U32 => TensorDType::U32,
             PyTensorDType::I32 => TensorDType::I32,
+            PyTensorDType::BF16 => TensorDType::BF16,
+            PyTensorDType::U8 => TensorDType::U8,
+            PyTensorDType::F8E4M3 => TensorDType::F8E4M3,
         }
     }
 }
@@ -38,6 +44,9 @@ impl From<TensorDType> for PyTensorDType {
             TensorDType::F32 => PyTensorDType::F32,
             TensorDType::U32 => PyTensorDType::U32,
             TensorDType::I32 => PyTensorDType::I32,
+            TensorDType::BF16 => PyTensorDType::BF16,
+            TensorDType::U8 => PyTensorDType::U8,
+            TensorDType::F8E4M3 => PyTensorDType::F8E4M3,
         }
     }
 }
@@ -179,6 +188,9 @@ pub(crate) fn acquire_tensor(
                 .into_py_result()
                 .map(tensor_from_owned)
         }
+        TensorDType::BF16 | TensorDType::U8 | TensorDType::F8E4M3 => Tensor::from_bytes(runtime, shape, dt, &bytes)
+            .into_py_result()
+            .map(tensor_from_owned),
     }
 }
 
