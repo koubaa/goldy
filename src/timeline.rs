@@ -105,8 +105,8 @@ impl<T: Copy + Default> SmallContextMap<T> {
     }
 
     fn find(&self, key: ContextHandle) -> Option<SlotLoc> {
-        for i in 0..self.inline_len as usize {
-            if self.inline[i].0 == key {
+        for (i, slot) in self.inline.iter().enumerate().take(self.inline_len as usize) {
+            if slot.0 == key {
                 return Some(SlotLoc::Inline(i));
             }
         }

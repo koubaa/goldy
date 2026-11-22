@@ -53,6 +53,10 @@ pub enum BuiltinFn {
     Exp,
     Log,
     Pow,
+    /// Stable hyperbolic tangent (`goldy_tanh` in `goldy_exp`).
+    Tanh,
+    /// Stable logistic sigmoid (`goldy_sigmoid` in `goldy_exp`).
+    Sigmoid,
     Length,
     Float2,
     Float3,

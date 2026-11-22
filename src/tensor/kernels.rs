@@ -43,6 +43,8 @@ pub const OP_CAST_I32_F32: u32 = 32;
 pub const OP_CAST_U32_F32: u32 = 33;
 pub const OP_CAST_I32_U32: u32 = 34;
 pub const OP_CAST_U32_I32: u32 = 35;
+pub const OP_TANH: u32 = 36;
+pub const OP_SIGMOID: u32 = 37;
 
 /// `dst = op(src)`, or `scalar` for [`OP_FILL`]. `src` has `dst`'s shape.
 ///
@@ -66,6 +68,10 @@ fn tensor_unary_f32(src: goldy::gpu::Tensor<f32>, dst: goldy::gpu::TensorWrite<f
                 v = goldy::gpu::sqrt(v);
             } else if op == 8 {
                 v = 1.0 / v;
+            } else if op == 36 {
+                v = goldy::gpu::tanh(v);
+            } else if op == 37 {
+                v = goldy::gpu::sigmoid(v);
             }
         }
         dst[i] = v;

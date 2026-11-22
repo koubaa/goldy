@@ -634,6 +634,8 @@ fn write_term(region: &Region, term: &Term, min: u8, f: &mut fmt::Formatter<'_>)
                 UnaryOp::Recip => "recip",
                 UnaryOp::Sin => "sin",
                 UnaryOp::Cos => "cos",
+                UnaryOp::Tanh => "tanh",
+                UnaryOp::Sigmoid => "sigmoid",
             };
             write!(f, "{name}(")?;
             write_term(region, arg, 0, f)?;

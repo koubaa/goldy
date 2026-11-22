@@ -630,3 +630,40 @@ fn a_reduction_prologue_stays_inside_a_factor() {
     assert_eq!(slang.matches("while (").count(), 5, "{slang}");
     assert_eq!(slang.matches("sqrt(").count(), 2, "{slang}");
 }
+
+#[test]
+fn tanh_and_sigmoid_lower_to_stable_helpers() {
+    let n = 4;
+    let mut graph = Graph::new();
+    graph
+        .push(map(&[("x", 0)], ("y", 1), n, Term::unary(UnaryOp::Tanh, Term::arg(0))))
+        .unwrap();
+    graph
+        .push(map(
+            &[("y", 1)],
+            ("z", 2),
+            n,
+            Term::unary(UnaryOp::Sigmoid, Term::arg(0)),
+        ))
+        .unwrap();
+    let inputs = vec![0.0, 0.5, -4.0, 30.0];
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, inputs.clone()),
+            (1, vec![0.0; n as usize]),
+            (2, vec![0.0; n as usize]),
+        ]),
+    );
+    let slang = source(&lower(graph.region(), &[]).unwrap());
+    assert!(slang.contains("goldy_tanh("), "{slang}");
+    assert!(slang.contains("goldy_sigmoid("), "{slang}");
+    let y = run(
+        &graph.ops()[0].expand().unwrap().region,
+        &env(&[(0, inputs.clone()), (1, vec![0.0; n as usize])]),
+    );
+    let got = y.parcels.get(&ParcelId(1)).unwrap();
+    assert_eq!(got[0], 0.0);
+    assert!(got[1] > 0.4 && got[1] < 0.5, "{}", got[1]);
+    assert_eq!(got[3], 1.0, "tanh(30) saturates");
+}

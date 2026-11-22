@@ -6,7 +6,7 @@ use super::kernels::{
     CopyU32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR,
     OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR,
     OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN,
-    OP_SCATTER_SET, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
+    OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::semantic;
 use super::shape::TensorShape;
@@ -263,6 +263,14 @@ impl<'a> TensorRecorder<'a> {
     pub fn reciprocal(&mut self, label: &str, src: TensorView<'_>) -> Result<Tensor, GoldyError> {
         self.unary(label, src, OP_RECIP)
     }
+    /// Numerically stable hyperbolic tangent. `|x| >= 10` saturates to ±1.
+    pub fn tanh(&mut self, label: &str, src: TensorView<'_>) -> Result<Tensor, GoldyError> {
+        self.unary(label, src, OP_TANH)
+    }
+    /// Numerically stable logistic sigmoid. Large `|x|` saturates to 0 or 1.
+    pub fn sigmoid(&mut self, label: &str, src: TensorView<'_>) -> Result<Tensor, GoldyError> {
+        self.unary(label, src, OP_SIGMOID)
+    }
 
     pub fn add(&mut self, label: &str, a: TensorView<'_>, b: TensorView<'_>) -> Result<Tensor, GoldyError> {
         self.binary(label, a, b, OP_ADD)
@@ -312,6 +320,12 @@ impl<'a> TensorRecorder<'a> {
     }
     pub fn reciprocal_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
         self.unary_into(label, src, out, OP_RECIP)
+    }
+    pub fn tanh_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_TANH)
+    }
+    pub fn sigmoid_into(&mut self, label: &str, src: TensorView<'_>, out: TensorView<'_>) -> Result<(), GoldyError> {
+        self.unary_into(label, src, out, OP_SIGMOID)
     }
     pub fn sub_into(
         &mut self,

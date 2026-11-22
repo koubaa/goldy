@@ -937,6 +937,8 @@ pub(crate) struct LogicalDevice {
 
     /// Host-visible oversize pools use dense allocations; device-local oversize may use sparse binding.
     pub supports_sparse_buffer: bool,
+    /// `VK_KHR_swapchain` was enabled. Presentation is refused when this is false.
+    pub has_swapchain: bool,
     /// Sparse **buffer** binding alignment from [`vk::MemoryRequirements::alignment`] (typically 64 KiB).
     pub sparse_buffer_block_size: u64,
     #[allow(dead_code)] // captured at device init for diagnostics / future use
@@ -2095,4 +2097,6 @@ pub(super) struct VulkanState {
     pub debug_utils: Option<ash::ext::debug_utils::Instance>,
     pub debug_messenger: vk::DebugUtilsMessengerEXT,
     pub validation_sink: Option<std::sync::Arc<super::debug_utils::ValidationSink>>,
+    /// `VK_KHR_surface` and the platform surface extension were enabled.
+    pub surface_extensions: bool,
 }

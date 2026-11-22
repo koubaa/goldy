@@ -2,7 +2,10 @@
 //!
 //! Targets Vulkan 1.4+ with dynamic rendering.
 //! Supports surface presentation on Windows (`VK_KHR_win32_surface`), Linux
-//! (`VK_KHR_wayland_surface`), and Android (`VK_KHR_android_surface`).
+//! (`VK_KHR_wayland_surface`), and Android (`VK_KHR_android_surface`) when the
+//! loader advertises them. A headless loader still creates an instance.
+//! `create_surface` returns an error when the surface extension or
+//! `VK_KHR_swapchain` was not enabled.
 //!
 //! ## Module Structure
 //!
@@ -41,7 +44,7 @@ use types::*;
 use super::*;
 use anyhow::{Context, Result};
 use ash::{khr, vk};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, CStr};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -172,6 +175,52 @@ impl Drop for VulkanBackend {
     }
 }
 
+fn instance_extension_names(entry: &ash::Entry) -> Result<HashSet<String>> {
+    let props = unsafe { entry.enumerate_instance_extension_properties(None) }
+        .context("Failed to enumerate Vulkan instance extensions")?;
+    Ok(props
+        .iter()
+        .map(|ext| {
+            unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect())
+}
+
+/// Enable `VK_KHR_surface` and the platform surface extension when the loader
+/// advertises both. Otherwise leave the instance headless.
+fn push_advertised_surface_extensions(extensions: &mut Vec<*const c_char>, available: &HashSet<String>) -> bool {
+    let surface = khr::surface::NAME;
+    #[cfg(target_os = "windows")]
+    let platform = khr::win32_surface::NAME;
+    #[cfg(target_os = "linux")]
+    let platform = khr::wayland_surface::NAME;
+    #[cfg(target_os = "android")]
+    let platform = khr::android_surface::NAME;
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "android")))]
+    {
+        let _ = (extensions, available, surface);
+        return false;
+    }
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
+    {
+        let surface_name = surface.to_string_lossy();
+        let platform_name = platform.to_string_lossy();
+        if available.contains(surface_name.as_ref()) && available.contains(platform_name.as_ref()) {
+            extensions.push(surface.as_ptr());
+            extensions.push(platform.as_ptr());
+            true
+        } else {
+            tracing::info!(
+                "instance extensions {surface_name} and {platform_name} are not both available; \
+                 creating a headless Vulkan instance (presentation needs both)"
+            );
+            false
+        }
+    }
+}
+
 impl VulkanBackend {
     /// Create a new Vulkan backend that runs the checks in `validation`.
     pub fn with_validation(validation: crate::Validation) -> Result<Self> {
@@ -209,17 +258,11 @@ impl VulkanBackend {
             .engine_version(vk::make_api_version(0, 0, 1, 0))
             .api_version(instance_api_version(&entry, enable_validation));
 
-        // Surface extensions for windowed presentation
-        let mut extensions: Vec<*const c_char> = vec![khr::surface::NAME.as_ptr()];
-
-        #[cfg(target_os = "windows")]
-        extensions.push(khr::win32_surface::NAME.as_ptr());
-
-        #[cfg(target_os = "linux")]
-        extensions.push(khr::wayland_surface::NAME.as_ptr());
-
-        #[cfg(target_os = "android")]
-        extensions.push(khr::android_surface::NAME.as_ptr());
+        // Surface extensions for windowed presentation. A compute-only or headless
+        // loader that does not advertise them still creates an instance.
+        let advertised = instance_extension_names(&entry)?;
+        let mut extensions: Vec<*const c_char> = Vec::new();
+        let surface_extensions = push_advertised_surface_extensions(&mut extensions, &advertised);
 
         // Enable Khronos validation + VK_EXT_debug_utils when requested (see DEBUGGING.md).
         let mut enabled_layers: Vec<*const c_char> = Vec::new();
@@ -369,6 +412,7 @@ impl VulkanBackend {
             debug_utils: debug_utils_loader,
             debug_messenger,
             validation_sink,
+            surface_extensions,
         };
 
         Ok(Self { state })
@@ -1054,6 +1098,17 @@ impl GpuBackend for VulkanBackend {
         display: &dyn raw_window_handle::HasDisplayHandle,
         depth_format: Option<crate::types::DepthFormat>,
     ) -> Result<SurfaceHandle> {
+        if !self.state.surface_extensions {
+            anyhow::bail!("this Vulkan instance has no surface extension; presentation is unavailable");
+        }
+        let device = self
+            .state
+            .devices
+            .get(&device_handle)
+            .context("Invalid device handle")?;
+        if !device.has_swapchain {
+            anyhow::bail!("this Vulkan device has no VK_KHR_swapchain; presentation is unavailable");
+        }
         surface::create(
             &self.state.entry,
             &self.state.instance,
@@ -1807,5 +1862,38 @@ mod validation_fatal_tests {
         let msg = format!("{err:#}");
         println!("{msg}");
         assert!(msg.contains("GOLDY_VALIDATION_FATAL") || msg.contains("VUID"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod surface_extension_tests {
+    use super::push_advertised_surface_extensions;
+    use std::collections::HashSet;
+
+    #[test]
+    fn headless_loader_skips_surface_extensions() {
+        let mut extensions = Vec::new();
+        push_advertised_surface_extensions(&mut extensions, &HashSet::new());
+        assert!(extensions.is_empty());
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
+    #[test]
+    fn advertised_surface_pair_is_enabled() {
+        #[cfg(target_os = "linux")]
+        let platform = "VK_KHR_wayland_surface";
+        #[cfg(target_os = "windows")]
+        let platform = "VK_KHR_win32_surface";
+        #[cfg(target_os = "android")]
+        let platform = "VK_KHR_android_surface";
+        let available = HashSet::from(["VK_KHR_surface".to_string(), platform.to_string()]);
+        let mut extensions = Vec::new();
+        push_advertised_surface_extensions(&mut extensions, &available);
+        assert_eq!(extensions.len(), 2);
+
+        let only_surface = HashSet::from(["VK_KHR_surface".to_string()]);
+        let mut extensions = Vec::new();
+        push_advertised_surface_extensions(&mut extensions, &only_surface);
+        assert!(extensions.is_empty());
     }
 }

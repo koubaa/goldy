@@ -473,6 +473,8 @@ impl<'a> Lift<'a> {
                         BuiltinFn::Log => UnaryOp::Log,
                         BuiltinFn::Sin => UnaryOp::Sin,
                         BuiltinFn::Cos => UnaryOp::Cos,
+                        BuiltinFn::Tanh => UnaryOp::Tanh,
+                        BuiltinFn::Sigmoid => UnaryOp::Sigmoid,
                         _ => return None,
                     };
                     Term::unary(op, self.expr(a)?)

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tanh` and `sigmoid`** — unary tensor ops (`TensorRecorder::tanh` / `sigmoid` and
+  the `_into` forms) and shader-dialect intrinsics `goldy::gpu::tanh` /
+  `goldy::gpu::sigmoid`. For `|x| < 0.5` both use the odd Taylor series through
+  `x^11`, which is what keeps small inputs accurate. `tanh` is ±1 in f32 for
+  `|x| >= 10` (the softcaps at 25 and 30 included), so that range does not call
+  `exp`. `sigmoid` evaluates `exp` only on a non-positive argument. They participate in semantic
+  fusion the same way as `exp`. `goldy_shader_ir::algebra::UnaryOp` and
+  `goldy::kernel::ir::BuiltinFn` gain `Tanh` and `Sigmoid`; exhaustive matches
+  need a new arm. Generated Slang calls `goldy_tanh` / `goldy_sigmoid` in
+  `goldy_exp`.
+
 - **`goldy::Validation`** — the validation checks an instance runs (`layout`, `gpu_api`,
   `timeline`, `scheme`, `host_access`, `fatal`). `Instance::with_validation(v)` chooses them
   per instance and `Runtime::validation()` reports them. `Instance::new()` uses
@@ -115,6 +126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Runtime::acquire_texture(..., init)`.
 
 ### Changed
+
+- **Vulkan device creation** requests surface extensions, `VK_KHR_swapchain`,
+  `fragmentStoresAndAtomics`, `shaderDrawParameters`, `shaderFloat16`,
+  `shaderInt8`, `shaderInt16`, and `shaderInt64` only when the loader or device
+  advertises them. Devices that have them still enable them. A graphics queue
+  family is still required.
 
 - Compute partitions split — `RuntimeDescriptor::compute_partition_split`
   selects the policy for that runtime. Unset keeps the backend default: `None` on Metal, CUDA,

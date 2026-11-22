@@ -467,23 +467,32 @@ fn download_slang_to_vendored(
     let _ = fs::remove_dir_all(&extract_dir);
     fs::create_dir_all(&extract_dir)?;
 
-    // Extract using platform tools
+    // Extract using platform tools.
+    //
+    // `Expand-Archive` on current windows-latest returns success and leaves the
+    // destination empty for the Slang zip, whose DLLs are present. `tar` reads
+    // that zip.
     #[cfg(target_os = "windows")]
     {
-        let status = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                    zip_path.display(),
-                    extract_dir.display()
-                ),
-            ])
+        // bsdtar in System32 reads zip. A GNU tar earlier on PATH does not.
+        let system_tar = std::env::var_os("SystemRoot").map(|root| {
+            let mut path = PathBuf::from(root);
+            path.push("System32");
+            path.push("tar.exe");
+            path
+        });
+        let tar = system_tar
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("tar.exe"));
+        let status = std::process::Command::new(&tar)
+            .args(["-xf"])
+            .arg(&zip_path)
+            .arg("-C")
+            .arg(&extract_dir)
             .status()?;
 
         if !status.success() {
-            return Err(io::Error::other("PowerShell extract failed"));
+            return Err(io::Error::other("tar extract failed"));
         }
     }
 
@@ -514,6 +523,7 @@ fn download_slang_to_vendored(
     }
 
     if copied == 0 {
+        warn_extract_listing(&extract_dir);
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "No Slang libraries found in downloaded archive",
@@ -532,6 +542,30 @@ fn download_slang_to_vendored(
     let _ = fs::remove_dir_all(&extract_dir);
 
     Ok(())
+}
+
+fn warn_extract_listing(dir: &Path) {
+    let mut shown = 0;
+    fn walk(dir: &Path, shown: &mut i32) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            if *shown >= 12 {
+                return;
+            }
+            let path = entry.path();
+            println!("cargo:warning=extracted {}", path.display());
+            *shown += 1;
+            if path.is_dir() {
+                walk(&path, shown);
+            }
+        }
+    }
+    walk(dir, &mut shown);
+    if shown == 0 {
+        println!("cargo:warning=Slang extract directory is empty: {}", dir.display());
+    }
 }
 
 fn find_file_recursive(dir: &Path, name: &str) -> Option<PathBuf> {

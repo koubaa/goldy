@@ -53,6 +53,50 @@ public float goldy_exact_mul(float a, float b) {
     }
 }
 
+/// Logistic sigmoid.
+///
+/// `|x| < 0.5` uses the odd Taylor series through `x^11`. Larger `|x|` uses the
+/// split `exp` form, which never evaluates `exp` of a large positive argument,
+/// so large inputs saturate to 0 or 1.
+public float goldy_sigmoid(float x) {
+    float a = abs(x);
+    if (a < 0.5) {
+        float x2 = x * x;
+        return 0.5 + x * (1.0 / 4.0 + x2 * (-1.0 / 48.0 + x2 * (1.0 / 480.0 + x2 * (-17.0 / 80640.0 + x2 * (31.0 / 1451520.0 + x2 * (-691.0 / 319334400.0))))));
+    }
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float e = exp(x);
+    return e / (1.0 + e);
+}
+
+/// Hyperbolic tangent.
+///
+/// `|x| < 0.5` uses the odd Taylor series through `x^11`. The identity
+/// `(1 - exp(-2|x|)) / (1 + exp(-2|x|))` cancels in f32 near zero. `|x| >= 10`
+/// is already ±1 in f32, including the softcaps at 25 and 30, so those inputs
+/// skip `exp`.
+public float goldy_tanh(float x) {
+    float a = abs(x);
+    if (a < 0.5) {
+        float x2 = x * x;
+        return x * (1.0 + x2 * (-1.0 / 3.0 + x2 * (2.0 / 15.0 + x2 * (-17.0 / 315.0 + x2 * (62.0 / 2835.0 + x2 * (-1382.0 / 155925.0))))));
+    }
+    if (a >= 10.0) {
+        if (x < 0.0) {
+            return -1.0;
+        }
+        return 1.0;
+    }
+    float e = exp(-2.0 * a);
+    float t = (1.0 - e) / (1.0 + e);
+    if (x < 0.0) {
+        return -t;
+    }
+    return t;
+}
+
 /// `a / b` rounded to float on its own: the device must not rewrite it, as into a
 /// multiply by the reciprocal of a constant divisor.
 public float goldy_exact_div(float a, float b) {

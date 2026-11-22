@@ -1236,6 +1236,8 @@ impl Emit<'_> {
                     UnaryOp::Sqrt => call(BuiltinFn::Sqrt, vec![x]),
                     UnaryOp::Sin => call(BuiltinFn::Sin, vec![x]),
                     UnaryOp::Cos => call(BuiltinFn::Cos, vec![x]),
+                    UnaryOp::Tanh => call(BuiltinFn::Tanh, vec![x]),
+                    UnaryOp::Sigmoid => call(BuiltinFn::Sigmoid, vec![x]),
                 }
             }
             Term::Binary { op, lhs, rhs } => {

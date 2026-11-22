@@ -729,6 +729,8 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slot
         BuiltinFn::Exp => format!("exp({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::Log => format!("log({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::Pow => format!("pow({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Tanh => format!("goldy_tanh({})", join_args(args, builtins, tensor_slots)),
+        BuiltinFn::Sigmoid => format!("goldy_sigmoid({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::Length => format!("length({})", join_args(args, builtins, tensor_slots)),
         BuiltinFn::WorkgroupBarrier => {
             assert!(args.is_empty());
