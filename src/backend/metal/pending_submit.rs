@@ -65,6 +65,9 @@ fn apply_host_sidecar_before_gpu(sidecar: &MetalHostSidecar) -> Result<()> {
         }
         let offset_usize = usize::try_from(w.offset)
             .map_err(|_| anyhow::anyhow!("deferred host write: offset {} does not fit usize", w.offset))?;
+        if w.buffer.storage_mode() == mtl::MTLStorageMode::Private {
+            anyhow::bail!("deferred host write: buffer is Private and has no CPU mapping");
+        }
         let ptr = w.buffer.contents();
         if ptr.is_null() {
             anyhow::bail!("deferred host write: MTLBuffer contents() returned null");

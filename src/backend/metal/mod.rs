@@ -1421,7 +1421,6 @@ mod tests {
         } else {
             // Unflagged parcels are Private heap allocations under discrete placement.
             assert_eq!(host_state.buffer.storage_mode(), ::metal::MTLStorageMode::Private);
-            assert!(host_state.buffer.contents().is_null());
             assert!(!host_state.is_device_allocated);
             assert!(!host_state.placement.host_mapped());
         }

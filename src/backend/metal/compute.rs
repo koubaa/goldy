@@ -1496,7 +1496,12 @@ fn stage_uploads<C: Borrow<GpuCommand>>(
                 let (host_mapped, contents_null) = state
                     .buffers
                     .get(buf_handle)
-                    .map(|b| (b.placement.host_mapped(), b.buffer.contents().is_null()))
+                    .map(|b| {
+                        let mapped = b.placement.host_mapped();
+                        // `contents()` on a Private buffer aborts under Metal validation.
+                        let null = !mapped || b.buffer.contents().is_null();
+                        (mapped, null)
+                    })
                     .unwrap_or((false, true));
 
                 let fast_path = gpu_idle
