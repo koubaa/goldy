@@ -106,7 +106,7 @@ impl<'a> TensorRecorder<'a> {
             .gather_slab
             .record(
                 self.scheme,
-                &format!("{label}_slab"),
+                format!("{label}_slab"),
                 weight,
                 ids,
                 tile.view(),
