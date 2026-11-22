@@ -9,9 +9,9 @@
 //! # Push constant layout
 //!
 //! ```text
-//! Words  0– 7: _bw0.._bw7  (16 × u16 bindless indices packed 2-per-word, bytes 0–31)
-//! Words  8–15: _uw0.._uw7  (8 × u32 user scalar params full-precision, bytes 32–63)
-//! Bytes 64–127: reserved
+//! Words  0–11: _bw0.._bw11 (24 × u16 bindless indices packed 2-per-word, bytes 0–47)
+//! Words 12–19: _uw0.._uw7  (8 × u32 user scalar params full-precision, bytes 48–79)
+//! Bytes 80–127: reserved / launch words
 //! ```
 //!
 //! # Before / After (compute example)
@@ -3089,11 +3089,11 @@ fn emit_wrapper(entry: &EntryDef, remap: Option<&HashMap<String, u32>>) -> Strin
     wb.slot_remap = remap.cloned();
     wb.entry_name = entry.fn_name.clone();
 
-    // Always emit all 8 bindless words (_bw0.._bw7), 8 user words (_uw0.._uw7),
+    // Always emit every bindless word, 8 user words (_uw0.._uw7),
     // frame-table dispatch base (_rs0 = PushLayout._reserved[0]), and the
     // per-context frame-table slots (_rs1/_rs2 = _reserved[1]/_reserved[2]) so
     // that push constant offsets are fixed regardless of how many params are used.
-    for i in 0..8u32 {
+    for i in 0..(crate::backend::shared::MAX_BINDLESS_SLOTS as u32 / 2) {
         wb.push_sig(&format!("uniform uint _bw{}", i));
     }
     for i in 0..8u32 {

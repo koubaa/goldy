@@ -31,7 +31,11 @@ use super::ShaderHandle;
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Maximum number of bindless resource indices in region A of [`PushLayout`].
-pub const MAX_BINDLESS_SLOTS: usize = 16;
+///
+/// 24 leaves room for a fused gate (the 16-slot layout rejected a 17-resource
+/// region) without growing the 128-byte push block. The extra 16 bytes come
+/// from region C, so fewer tensor offsets ride in launch words.
+pub const MAX_BINDLESS_SLOTS: usize = 24;
 /// Maximum number of `u32` user parameters in region B of [`PushLayout`].
 pub const MAX_USER_SLOTS: usize = 8;
 /// Total size of [`PushLayout`] in bytes (must match the Slang `PushLayout` struct).
@@ -45,9 +49,9 @@ pub const DISPATCH_BATCH_STRIDE: usize = TOTAL_PUSH_BYTES + 3 * 4;
 /// all three GPU backends.
 ///
 /// ```text
-/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
-/// Bytes 32–63:  8  × u32  user parameters            (region B)
-/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// Bytes  0–47:  24 × u16  bindless resource indices  (region A)
+/// Bytes 48–79:  8  × u32  user parameters            (region B)
+/// Bytes 80–127: 48 × u8   reserved / launch words     (region C)
 /// ```
 ///
 /// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, …
@@ -59,8 +63,11 @@ pub const DISPATCH_BATCH_STRIDE: usize = TOTAL_PUSH_BYTES + 3 * 4;
 pub struct PushLayout {
     pub bindless: [u16; MAX_BINDLESS_SLOTS],
     pub user: [u32; MAX_USER_SLOTS],
-    pub _reserved: [u32; 16],
+    pub _reserved: [u32; PUSH_RESERVED_WORDS],
 }
+
+/// `u32` words left in [`PushLayout`] after the bindless and user regions.
+pub const PUSH_RESERVED_WORDS: usize = (TOTAL_PUSH_BYTES - MAX_BINDLESS_SLOTS * 2 - MAX_USER_SLOTS * 4) / 4;
 
 const _: () = assert!(std::mem::size_of::<PushLayout>() == TOTAL_PUSH_BYTES);
 
@@ -88,7 +95,7 @@ impl PushLayout {
 /// First `PushLayout._reserved` word carrying a launch word (`_rs3` in generated wrappers).
 pub const LAUNCH_WORD_BASE: usize = 3;
 /// Launch words a dispatch can carry in region C.
-pub const MAX_LAUNCH_WORDS: usize = 16 - LAUNCH_WORD_BASE;
+pub const MAX_LAUNCH_WORDS: usize = PUSH_RESERVED_WORDS - LAUNCH_WORD_BASE;
 
 const _: () = assert!(MAX_LAUNCH_WORDS == goldy_shader_ir::TENSOR_LAUNCH_WORDS);
 
