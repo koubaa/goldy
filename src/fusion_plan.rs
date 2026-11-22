@@ -417,6 +417,9 @@ pub(crate) struct FusionPlanner {
     rejected: Vec<Rejection>,
     compiles: Arc<Mutex<Compiles>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    /// Injected compile failures. They stay on this planner so a test fault
+    /// does not overwrite a program another scheme already compiled.
+    faulted: HashMap<KernelId, Compiled>,
     /// Failed compiles already counted in `events`.
     failures_seen: HashSet<KernelId>,
     plan: Option<Plan>,
@@ -441,6 +444,7 @@ impl FusionPlanner {
             rejected: Vec::new(),
             compiles,
             workers: Vec::new(),
+            faulted: HashMap::new(),
             failures_seen: HashSet::new(),
             plan: None,
             events: FusionEvents::default(),
@@ -490,6 +494,7 @@ impl FusionPlanner {
         self.phase = Phase::Settling;
         self.regions.clear();
         self.rejected.clear();
+        self.faulted.clear();
         let plan = self.plan.take();
         if plan.is_some() {
             self.events.fallbacks += 1;
@@ -562,7 +567,12 @@ impl FusionPlanner {
             let compiles = self.compiles.lock().unwrap();
             let mut outcomes = Vec::with_capacity(self.regions.len());
             for region in &self.regions {
-                outcomes.push(compiles.done.get(&region.id)?.clone());
+                let outcome = self
+                    .faulted
+                    .get(&region.id)
+                    .cloned()
+                    .or_else(|| compiles.done.get(&region.id).cloned());
+                outcomes.push(outcome?);
             }
             outcomes
         };
@@ -621,6 +631,7 @@ impl FusionPlanner {
     ) {
         self.regions.clear();
         self.rejected.clear();
+        self.faulted.clear();
         let taken = self.match_semantic(ir, sites, semantic, target);
         let view = |i: usize| -> Option<StageView<'_>> {
             if taken[i] {
@@ -807,6 +818,11 @@ impl FusionPlanner {
         let fault = crate::validation_env::fusion_compile_fault();
         let mut started = false;
         for region in &self.regions {
+            if fault {
+                self.faulted
+                    .insert(region.id, Err("injected fused compile failure".to_string()));
+                continue;
+            }
             {
                 let mut compiles = self.compiles.lock().unwrap();
                 if compiles.done.contains_key(&region.id) || !compiles.running.insert(region.id) {
