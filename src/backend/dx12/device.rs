@@ -450,9 +450,21 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
     let handle = state.next_device_handle;
     state.next_device_handle += 1;
 
+    let pso_identity = pso_cache::PsoCacheIdentity {
+        driver_version: unsafe { adapter.adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
+            .map(|version| u64::from_ne_bytes(version.to_ne_bytes()))
+            .unwrap_or(0),
+        vendor_id: adapter.desc.VendorId,
+        device_id: adapter.desc.DeviceId,
+    };
     let (graphics_pso_blobs, compute_pso_blobs) = dirs::cache_dir().map_or_else(
         || (HashMap::new(), HashMap::new()),
-        |cache_root| pso_cache::load_maps(&cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin"))),
+        |cache_root| {
+            pso_cache::load_maps(
+                &cache_root.join("goldy").join(format!("dx12_pso_{adapter_id}.bin")),
+                pso_identity,
+            )
+        },
     );
 
     let device_last_submitted_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -492,6 +504,9 @@ pub(super) fn create(state: &mut Dx12State, adapter_id: u32) -> Result<DeviceHan
             pso_cache: std::sync::Arc::new(std::sync::RwLock::new(super::types::PsoCache::new(
                 graphics_pso_blobs,
                 compute_pso_blobs,
+                pso_identity.driver_version,
+                pso_identity.vendor_id,
+                pso_identity.device_id,
             ))),
             queue_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             device_last_submitted_seq: std::sync::Arc::clone(&device_last_submitted_seq),

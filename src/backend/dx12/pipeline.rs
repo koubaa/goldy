@@ -162,15 +162,21 @@ pub(super) fn create(
         match unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) } {
             Ok(p) => break p,
             Err(e) if try_drop_stale_cached_blob => {
+                let mut cache = pso_cache_arc.write().unwrap();
+                cache.graphics_blobs.remove(&key);
+                let also_dropped = if pso_cache::is_driver_cache_mismatch(&e) {
+                    pso_cache::drop_matching_driver_stamp(&mut cache, disk_blob_bytes.as_deref().unwrap_or_default())
+                } else {
+                    0
+                };
+                cache.dirty = true;
+                drop(cache);
                 tracing::warn!(
                     device = device_handle,
                     error = ?e,
+                    also_dropped,
                     "discarding stale DX12 graphics PSO blob; rebuilding without cache entry"
                 );
-                let mut cache = pso_cache_arc.write().unwrap();
-                cache.graphics_blobs.remove(&key);
-                cache.dirty = true;
-                drop(cache);
                 pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
                 try_drop_stale_cached_blob = false;
             }
@@ -186,10 +192,11 @@ pub(super) fn create(
         match cache.graphics_blobs.get(&key) {
             Some(prev) if *prev == new_blob => {}
             _ => {
-                cache.graphics_blobs.insert(key, new_blob);
+                cache.graphics_blobs.insert(key, new_blob.clone());
                 cache.dirty = true;
             }
         }
+        pso_cache::retain_live_driver_stamp(&mut cache, &new_blob);
     }
 
     let handle = state.pipelines.write().unwrap().alloc_handle();
@@ -413,15 +420,21 @@ pub(super) fn create_with_depth(
         match unsafe { logical_device.device.CreateGraphicsPipelineState(&pso_desc) } {
             Ok(p) => break p,
             Err(e) if try_drop_stale_cached_blob => {
+                let mut cache = pso_cache_arc.write().unwrap();
+                cache.graphics_blobs.remove(&key);
+                let also_dropped = if pso_cache::is_driver_cache_mismatch(&e) {
+                    pso_cache::drop_matching_driver_stamp(&mut cache, disk_blob_bytes.as_deref().unwrap_or_default())
+                } else {
+                    0
+                };
+                cache.dirty = true;
+                drop(cache);
                 tracing::warn!(
                     device = device_handle,
                     error = ?e,
+                    also_dropped,
                     "discarding stale DX12 graphics depth-PSO blob; rebuilding without cache entry"
                 );
-                let mut cache = pso_cache_arc.write().unwrap();
-                cache.graphics_blobs.remove(&key);
-                cache.dirty = true;
-                drop(cache);
                 pso_desc.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
                 try_drop_stale_cached_blob = false;
             }
@@ -441,10 +454,11 @@ pub(super) fn create_with_depth(
         match cache.graphics_blobs.get(&key) {
             Some(prev) if *prev == new_blob => {}
             _ => {
-                cache.graphics_blobs.insert(key, new_blob);
+                cache.graphics_blobs.insert(key, new_blob.clone());
                 cache.dirty = true;
             }
         }
+        pso_cache::retain_live_driver_stamp(&mut cache, &new_blob);
     }
 
     let handle = state.pipelines.write().unwrap().alloc_handle();
