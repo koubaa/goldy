@@ -225,6 +225,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GOLDY_GPU_PROFILE` with batched dispatches** — Vulkan advanced the timestamp index
+  once per dispatch inside a `DispatchBatch` while the query pool holds one pair per batch,
+  so every later dispatch wrote past the pool (lavapipe segfaults on its queue thread).
+  DX12 wrote no timestamps for a batch and shifted every later label. A batch now takes
+  one query pair on both. The `chrome` export appends each event instead of rewriting the
+  whole file per event.
+
 - **Intel Mac Metal heaps** — creating a device no longer aborts with
   `Shared storage mode disallowed`. Shared heaps and Shared textures require
   an Apple-family GPU. Other Metal 3 GPUs are best-effort and untested:

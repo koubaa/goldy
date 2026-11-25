@@ -1268,6 +1268,10 @@ fn record_gpu_command(
                 patched
             };
             let arg_data = &arg_data;
+            if let Some(ref prof) = ctx.gpu_profile {
+                let base = 2u32 + ctx.dispatch_idx * 2;
+                unsafe { cl.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base) };
+            }
 
             // The argument buffer is a pending deletion, which a retained list outlives.
             let batch_sig = logical_device
@@ -1347,6 +1351,11 @@ fn record_gpu_command(
                     }
                 }
             }
+            if let Some(ref prof) = ctx.gpu_profile {
+                let base = 2u32 + ctx.dispatch_idx * 2;
+                unsafe { cl.EndQuery(&prof.heap, D3D12_QUERY_TYPE_TIMESTAMP, base + 1) };
+            }
+            ctx.dispatch_idx += 1;
         }
         GpuCommand::ResourceBarrier {
             buffers: buf_entries,
