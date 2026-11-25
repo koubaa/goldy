@@ -1194,6 +1194,17 @@ pub(super) fn submit_with_scope(
                         scope.frame_table.selector_slot,
                         scope.frame_table.table_slot,
                     );
+                    if let Some(ref prof) = vk_gpu_profile {
+                        let base = 2u32 + (vk_dispatch_idx as u32) * 2;
+                        unsafe {
+                            logical_device.device.cmd_write_timestamp2(
+                                cmd,
+                                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                prof.pool,
+                                base,
+                            );
+                        }
+                    }
                     for i in 0..*count as usize {
                         let base = i * stride;
                         let layout_bytes = &patched_args[base..base + push_size];
@@ -1213,8 +1224,19 @@ pub(super) fn submit_with_scope(
                             }
                             logical_device.device.cmd_dispatch(cmd, wg_x, wg_y, wg_z);
                         }
-                        vk_dispatch_idx += 1;
                     }
+                    if let Some(ref prof) = vk_gpu_profile {
+                        let base = 2u32 + (vk_dispatch_idx as u32) * 2;
+                        unsafe {
+                            logical_device.device.cmd_write_timestamp2(
+                                cmd,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                prof.pool,
+                                base + 1,
+                            );
+                        }
+                    }
+                    vk_dispatch_idx += 1;
                 }
                 GpuCommand::DispatchIndirect {
                     label: _label,
@@ -1723,6 +1745,11 @@ pub(super) fn submit_with_scope(
         record_legacy_release_barrier(&logical_device.device, cmd, false);
 
         if let Some(ref prof) = vk_gpu_profile {
+            debug_assert_eq!(
+                vk_dispatch_idx,
+                prof.dispatch_labels.len(),
+                "one timestamp pair per label"
+            );
             unsafe {
                 logical_device
                     .device
@@ -2264,6 +2291,17 @@ pub(super) fn submit_graph_with_scope(
                         scope.frame_table.selector_slot,
                         scope.frame_table.table_slot,
                     );
+                    if let Some(ref prof) = vk_gpu_profile {
+                        let base = 2u32 + (vk_dispatch_idx as u32) * 2;
+                        unsafe {
+                            logical_device.device.cmd_write_timestamp2(
+                                cmd,
+                                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                prof.pool,
+                                base,
+                            );
+                        }
+                    }
                     for i in 0..*count as usize {
                         let base = i * stride;
                         let layout_bytes = &patched_args[base..base + push_size];
@@ -2283,8 +2321,19 @@ pub(super) fn submit_graph_with_scope(
                             }
                             logical_device.device.cmd_dispatch(cmd, wg_x, wg_y, wg_z);
                         }
-                        vk_dispatch_idx += 1;
                     }
+                    if let Some(ref prof) = vk_gpu_profile {
+                        let base = 2u32 + (vk_dispatch_idx as u32) * 2;
+                        unsafe {
+                            logical_device.device.cmd_write_timestamp2(
+                                cmd,
+                                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                prof.pool,
+                                base + 1,
+                            );
+                        }
+                    }
+                    vk_dispatch_idx += 1;
                 }
                 GpuCommand::DispatchIndirect {
                     label: _label,
@@ -2882,6 +2931,11 @@ pub(super) fn submit_graph_with_scope(
     record_legacy_release_barrier(&logical_device.device, cmd, route_device);
 
     if let Some(ref prof) = vk_gpu_profile {
+        debug_assert_eq!(
+            vk_dispatch_idx,
+            prof.dispatch_labels.len(),
+            "one timestamp pair per label"
+        );
         unsafe {
             logical_device
                 .device
