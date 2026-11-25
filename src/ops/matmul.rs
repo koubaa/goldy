@@ -718,7 +718,10 @@ impl<'a> MatMulBuilder<'a> {
                 (&b.operand, b.parcel?),
                 (&c.operand, c.parcel?),
             ];
-            let ids = self.extras.first().and_then(|extra| extra.parcel);
+            let ids = match fallback {
+                MatMulFallback::GemvIndexed => self.extras.first().and_then(|extra| extra.parcel),
+                _ => None,
+            };
             match native {
                 true => crate::semantic_fusion::library_matmul(&self.desc, fallback, operands),
                 false => crate::semantic_fusion::matmul(&self.desc, fallback, operands, ids),
@@ -842,6 +845,7 @@ fn indexed_f32_user_slots(
         index.stride_elems,
         index.experts,
         index.slot,
+        fit_offset("A", a.offset_elements)?,
     ])
 }
 

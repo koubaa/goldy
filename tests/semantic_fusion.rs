@@ -43,6 +43,7 @@ fn data(seed: u32, n: u32) -> Vec<f32> {
 enum Init {
     F32(TensorShape, Vec<f32>),
     I32(TensorShape, Vec<i32>),
+    U32(TensorShape, Vec<u32>),
 }
 
 fn tensors(device: &Runtime, init: &[Init]) -> Vec<Tensor> {
@@ -50,6 +51,7 @@ fn tensors(device: &Runtime, init: &[Init]) -> Vec<Tensor> {
         .map(|i| match i {
             Init::F32(shape, v) => Tensor::from_f32(device, *shape, v),
             Init::I32(shape, v) => Tensor::from_i32(device, *shape, v),
+            Init::U32(shape, v) => Tensor::from_u32(device, *shape, v),
         })
         .collect::<Result<_, _>>()
         .expect("tensor")
@@ -57,7 +59,7 @@ fn tensors(device: &Runtime, init: &[Init]) -> Vec<Tensor> {
 
 /// Records over the initial tensors; returns the tensors it allocates and the nodes a
 /// trial may change.
-type Record = fn(&mut TensorRecorder<'_>, &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError>;
+type Recorded = Result<(Vec<Tensor>, Vec<NodeId>), GoldyError>;
 
 /// The same recording in a fusing scheme and an unfused one.
 struct Twin {
@@ -67,7 +69,7 @@ struct Twin {
 }
 
 impl Twin {
-    fn new(device: &Runtime, init: &[Init], record: Record) -> Self {
+    fn new(device: &Runtime, init: &[Init], record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded) -> Self {
         let specialization = goldy::test_support::SpecializationOverride::force_disabled();
         let ctx = submission::submission_context(device);
         let kernels = TensorKernels::new(device).expect("tensor kernels");
@@ -135,7 +137,12 @@ impl Twin {
 
 /// Run `record` for `frames` frames fused and unfused, comparing the initial and the
 /// allocated tensors; returns the fusing scheme.
-fn fused_matches_unfused(device: &Runtime, init: &[Init], record: Record, frames: usize) -> Scheme {
+fn fused_matches_unfused(
+    device: &Runtime,
+    init: &[Init],
+    record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded,
+    frames: usize,
+) -> Scheme {
     let mut twin = Twin::new(device, init, record);
     twin.frames(frames, "steady");
     twin.runs.swap_remove(0).0
@@ -161,6 +168,7 @@ fn structure(scheme: &Scheme) -> String {
 
 /// Whether matrix products run on the Goldy kernels that semantic fusion describes.
 /// Metal's library GEMM is a different kernel, so those tests stay on the other backends.
+/// Indexed GEMV always uses `gemv_f32_indexed`, including on Metal.
 fn stdlib_matmul(device: &Runtime) -> bool {
     device.backend_type() != BackendType::Metal
 }
@@ -950,58 +958,90 @@ fn fused_program_compiles_once_per_runtime() {
     assert_eq!(goldy::test_support::fusion_compiles_started(&device), 1);
 }
 
-/// An in-range indexed GEMV plus a scale is one kernel, matching the unfused dot.
+fn indexed_record(
+    slot: u32,
+) -> impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
+    move |rec, t| {
+        rec.matmul_indexed_into("expert", t[0].view(), t[1].view(), t[2].view(), slot, t[3].view())?;
+        rec.mul_scalar_into("scale", t[3].view(), 2.0, t[4].view())?;
+        Ok((Vec::new(), Vec::new()))
+    }
+}
+
+/// Indexed GEMV plus a scale matches the unfused kernel byte for byte, including
+/// an id past `experts` and a `k` that is not a multiple of 64.
 #[test]
-fn indexed_gemv_scale_fuses() {
+fn indexed_gemv_scale_matches_unfused() {
     let _gpu = gpu_lock();
     let device = runtime();
-    if !stdlib_matmul(&device) {
-        return;
+    let (experts, rows, k, slot) = (3u32, 5u32, 40u32, 1u32);
+    let mut ids = [0u32, 3, 2];
+    let init = [
+        Init::F32(
+            TensorShape::from_dims(&[experts, rows, k]).unwrap(),
+            data(1, experts * rows * k),
+        ),
+        Init::F32(TensorShape::vector(k), data(2, k)),
+        Init::U32(TensorShape::vector(3), ids.to_vec()),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+    ];
+    let scheme = fused_matches_unfused(&device, &init, indexed_record(slot), 4);
+    assert_one_semantic_region(&scheme, 2);
+
+    // A second id, including u32::MAX, rewritten on the device without re-recording.
+    ids = [u32::MAX, 1, 0];
+    let mut twin = Twin::new(&device, &init, indexed_record(slot));
+    twin.frames(2, "first ids");
+    for (scheme, tensors, _) in &mut twin.runs {
+        tensors[2]
+            .buffer()
+            .write(0, bytemuck::cast_slice(&ids))
+            .expect("rewrite ids");
+        let _ = scheme;
     }
-    let (experts, rows, k, slot) = (3u32, 8u32, 16u32, 1u32);
-    let weight = data(1, experts * rows * k);
-    let x = data(2, k);
-    let ids = [0u32, 1, 2];
-    let ctx = submission::submission_context(&device);
-    let kernels = TensorKernels::new(&device).expect("tensor kernels");
-    let mut scheme = Scheme::new(&ctx);
-    scheme.set_automatic_fusion(true);
-    let w = Tensor::from_f32(&device, TensorShape::from_dims(&[experts, rows, k]).unwrap(), &weight).unwrap();
-    let xv = Tensor::from_f32(&device, TensorShape::vector(k), &x).unwrap();
-    let idt = Tensor::from_u32(&device, TensorShape::vector(3), &ids).unwrap();
-    let out = Tensor::zeros(&device, TensorShape::vector(rows), goldy::TensorDType::F32).unwrap();
-    let scaled = Tensor::zeros(&device, TensorShape::vector(rows), goldy::TensorDType::F32).unwrap();
-    {
-        let mut rec = kernels.recorder(&mut scheme);
-        rec.matmul_indexed_into("expert", w.view(), xv.view(), idt.view(), slot, out.view())
-            .unwrap();
-        rec.mul_scalar_into("scale", out.view(), 2.0, scaled.view()).unwrap();
-    }
-    let mut promoted = false;
-    for _ in 0..24 {
-        drop(scheme.submit().expect("submit"));
-        goldy::test_support::wait_for_fusion_compiles(&mut scheme);
-        promoted = scheme
-            .fusion_report()
-            .regions
-            .iter()
-            .any(|region| region.status == FusionRegionStatus::Promoted);
-        if promoted {
-            break;
-        }
-    }
-    assert!(promoted, "{:?}", scheme.fusion_report());
-    assert_eq!(scheme.executed_node_count(), 1);
-    let mut sub = scheme.submit().expect("read");
-    let got = (&mut sub >> scaled.buffer()).take::<f32>().expect("take").to_vec();
-    drop(sub);
-    let expert = ids[slot as usize] as usize;
-    for i in 0..rows as usize {
-        let mut acc = 0.0f32;
-        for s in 0..k as usize {
-            acc += weight[(expert * rows as usize + i) * k as usize + s] * x[s];
-        }
-        let want = acc * 2.0;
-        assert!((got[i] - want).abs() < 1e-4, "row {i}: {} != {want}", got[i]);
-    }
+    twin.frames(2, "rewritten ids");
+    assert_one_semantic_region(twin.fused(), 2);
+}
+
+/// A nonzero weight offset is part of the address, and fused matches unfused.
+#[test]
+fn indexed_gemv_honors_a_weight_offset() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (experts, rows, k, slot, pad) = (2u32, 6u32, 20u32, 0u32, 7u32);
+    let slabs = data(4, experts * rows * k);
+    let mut weight = vec![0.0; pad as usize];
+    weight.extend_from_slice(&slabs);
+    let init = [
+        Init::F32(TensorShape::vector(pad + experts * rows * k), weight),
+        Init::F32(TensorShape::vector(k), data(5, k)),
+        Init::U32(TensorShape::vector(1), vec![1]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        move |rec, t| {
+            let mut desc = goldy::MatMulDesc::gemv(rows, k);
+            desc.index = Some(goldy::ops::MatMulIndex {
+                slot,
+                experts,
+                stride_elems: rows * k,
+                global_per_slab: false,
+            });
+            rec.scheme()
+                .matmul("expert", desc)
+                .a(t[0].buffer(), goldy::MatMulView::offset(u64::from(pad)))
+                .b(t[1].buffer(), goldy::MatMulView::packed())
+                .out(t[3].buffer(), goldy::MatMulView::packed())
+                .extra(t[2].buffer(), goldy::MatMulView::packed())
+                .record();
+            rec.mul_scalar_into("scale", t[3].view(), 2.0, t[4].view())?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 2);
 }

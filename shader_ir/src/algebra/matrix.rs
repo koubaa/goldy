@@ -144,7 +144,7 @@ fn emit(
             ),
         ),
     ];
-    prepared.index_params(sources, &mut body);
+    prepared.index_params(sources, &mut body)?;
     // The loop over this lane's elements of a tile.
     let elements_of = |e: &str, inner: Vec<Stmt>| -> Result<Vec<Stmt>, LowerError> {
         let mut inner = inner;
@@ -256,7 +256,7 @@ fn emit(
         ));
         emit.cache.push((tile.term.clone(), v));
     }
-    values.extend(prepared.outputs(0, &mut emit)?);
+    values.extend(prepared.outputs(0, &mut emit, sources)?);
     element.push(Stmt::If {
         cond: bin(
             BinOp::And,

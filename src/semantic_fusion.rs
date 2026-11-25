@@ -175,8 +175,8 @@ pub(crate) fn matmul(
                 order: GEMV_ORDER,
             }
         }
-        // y[i] = sum{s}(A[id * stride + i, s] * x[s]). `id` is one u32 in the id buffer.
-        // An id past `experts` is outside this site; the stdlib kernel writes zeros then.
+        // y[i] = sum{s}(A[id * stride + offset + i, s] * x[s]). `id` is one u32.
+        // An id past `experts` stores zeros, the same as `gemv_f32_indexed`.
         MatMulFallback::GemvIndexed if desc.dtype == MatMulDType::F32 && desc.n == 1 => {
             let index = desc.index?;
             if index.experts == 0 {
@@ -191,8 +191,15 @@ pub(crate) fn matmul(
                     parcel: id_parcel,
                     element: index.slot,
                     element_type: ElementType::U32,
+                    // The stdlib kernel writes zeros when `id >= experts`.
+                    zero_if_outside: true,
                 },
             );
+            if a.offset_elements > u64::from(u32::MAX) || b.offset_elements != 0 || c.offset_elements != 0 {
+                // The indexed kernel carries A's element offset and reads x and y
+                // from element 0. A nonzero x or y offset would not match it.
+                return None;
+            }
             let row = i64::from(a.leading_dim);
             let base = Affine::sym(Sym::Param(id)) * i64::from(index.stride_elems)
                 + Affine::constant(i64::try_from(a.offset_elements).ok()?);

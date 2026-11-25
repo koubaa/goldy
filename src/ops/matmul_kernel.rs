@@ -127,6 +127,7 @@ fn gemv_f32_indexed(
     stride: u32,
     experts: u32,
     slot: u32,
+    a_base: u32,
 ) {
     let mut partial = goldy::gpu::workgroup_array::<f32, 128>();
     let local = goldy::gpu::local_id().x;
@@ -137,7 +138,7 @@ fn gemv_f32_indexed(
     if id >= experts {
         ok = 0u32;
     }
-    let a_off = id * stride;
+    let a_off = id * stride + a_base;
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     if ok != 0u32 && row < m {
