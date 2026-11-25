@@ -96,6 +96,8 @@ pub const WORKGROUP_THREADS: u32 = 256;
 pub const LANE_WORKGROUP_THREADS: u32 = 128;
 /// Longest vector a lane-ordered product may materialize for the product that
 /// consumes it. Longer chains stay separate dispatches.
+/// Scratch bound for a chained vector. Profitability ends well below this; the
+/// cost model is what declines a chain.
 const CHAIN_VECTOR_MAX: u32 = 256;
 
 /// Where the runtime value of an index parameter comes from: one integer element of
@@ -762,20 +764,26 @@ impl Prepared {
             Some(lanes) => (LANE_WORKGROUP_THREADS / lanes).max(1),
             None => WORKGROUP_THREADS,
         };
+        let mut barriers = 0u64;
         if let Some(lanes) = lanes {
+            // `per_group` row-groups compute that many chain elements at once.
+            let wave = u64::from(per_group.max(1));
+            let tree = u64::from(lanes.max(2).ilog2());
             for slot in &chained {
+                let chunks = u64::from(slot.extent).div_ceil(wave).max(1);
                 let per_thread = cost::serial(&slot.term, &[]).div_ceil(u64::from(lanes));
-                serial += u64::from(slot.extent) * per_thread;
-                loads += u64::from(slot.extent) * cost::loads(&slot.term, &[]).div_ceil(u64::from(lanes));
+                serial += chunks * per_thread;
+                loads += chunks * cost::loads(&slot.term, &[]).div_ceil(u64::from(lanes));
+                // Scratch write, the lane tree, and the store, once per chunk.
+                barriers += chunks * (2 + tree);
             }
         }
-        let prologue_serial = serial;
-        let prologue_loads = loads;
         let threads = part.elements() * u64::from(lanes.unwrap_or(1));
         let mut work = threads * per_thread;
+        let groups = part.elements().div_ceil(u64::from(per_group.max(1))).max(1);
         for slot in &chained {
-            // The vector is computed once, then every output row reads it.
-            work += u64::from(slot.extent) * cost::ops(&slot.term, &[]);
+            // Every workgroup recomputes the vector.
+            work += groups * u64::from(slot.extent) * cost::ops(&slot.term, &[]);
         }
         for &n in &part.outputs {
             let body = &self.bodies[n].1;
@@ -784,15 +792,11 @@ impl Prepared {
             work += part.elements() * (cost::ops(body, &known) + 1);
             known.extend(top_reductions(body));
         }
-        if !chained.is_empty() {
-            let chunks = part.elements().div_ceil(u64::from(per_group)).max(1);
-            serial = prologue_serial + (serial - prologue_serial) * chunks;
-            loads = prologue_loads + (loads - prologue_loads) * chunks;
-        }
         Estimate {
             serial,
             loads,
             work,
+            barriers,
             ..Estimate::default()
         }
     }
@@ -858,13 +862,9 @@ impl Prepared {
             };
             let elements = part.elements();
             let per_group = lanes.map_or(threads, |(_, elements, _)| elements);
-            // A chained product is computed once, then this workgroup walks every row.
-            let chain_part = lanes.is_some() && !self.chain_slots(k).is_empty();
-            let part_groups = if chain_part {
-                1
-            } else {
-                elements.div_ceil(u64::from(per_group.max(1)))
-            };
+            // A chained product is recomputed in every workgroup, so the consumer
+            // keeps its normal grid.
+            let part_groups = elements.div_ceil(u64::from(per_group.max(1)));
             if elements > i32::MAX as u64 {
                 return Err(LowerError::Grid { elements });
             }
@@ -890,34 +890,18 @@ impl Prepared {
                         work.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
                     }
                     work.push(let_int("lane", bin(BinOp::Rem, var("local"), int(lanes as i64)?)));
-                    if !chain_part {
-                        work.push(let_int(
-                            "t",
-                            bin(
-                                BinOp::Add,
-                                bin(BinOp::Mul, group, int(row_elems as i64)?),
-                                bin(BinOp::Div, var("local"), int(lanes as i64)?),
-                            ),
-                        ));
-                    }
+                    work.push(let_int(
+                        "t",
+                        bin(
+                            BinOp::Add,
+                            bin(BinOp::Mul, group, int(row_elems as i64)?),
+                            bin(BinOp::Div, var("local"), int(lanes as i64)?),
+                        ),
+                    ));
                 }
             }
             self.index_params(sources, &mut work);
-            let base_name = chain_part.then(|| emit.fresh("b"));
-            let mut element = Vec::new();
-            let emit_rows = if chain_part { &mut element } else { &mut work };
-            if let Some(base_name) = &base_name {
-                let (lane_n, _, _) = lanes.expect("a chained part is lane-scheduled");
-                emit_rows.push(let_int(
-                    "t",
-                    bin(
-                        BinOp::Add,
-                        var(base_name),
-                        bin(BinOp::Div, var("local"), int(lane_n as i64)?),
-                    ),
-                ));
-            }
-            emit_rows.push(Stmt::Let {
+            work.push(Stmt::Let {
                 name: "valid".into(),
                 mutable: false,
                 ty: Some("bool".into()),
@@ -927,17 +911,17 @@ impl Prepared {
             for (a, (&c, &e)) in part.coords.iter().zip(&part.extents).enumerate().rev() {
                 let name = coord_name(c);
                 if a == 0 {
-                    emit_rows.push(let_int(&name, rest.clone()));
+                    work.push(let_int(&name, rest.clone()));
                 } else {
-                    emit_rows.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
-                    emit_rows.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
+                    work.push(let_int(&name, bin(BinOp::Rem, rest.clone(), int(i64::from(e))?)));
+                    work.push(let_int(&format!("rest{a}"), bin(BinOp::Div, rest, int(i64::from(e))?)));
                     rest = var(&format!("rest{a}"));
                 }
             }
-            let hoisted = self.hoist(k, &mut emit, emit_rows)?;
+            let hoisted = self.hoist(k, &mut emit, &mut work)?;
 
             if let Some((lanes, row_elems, exchange)) = lanes {
-                if chain_part {
+                if !self.chain_slots(k).is_empty() {
                     let mut chains = self.chain_slots(k);
                     for slot in &mut chains {
                         slot.slot = emit.fresh("y");
@@ -958,36 +942,20 @@ impl Prepared {
                 let mut part_decls = Vec::new();
                 workgroup_bytes +=
                     emit.exchange(&reduced, lanes, row_elems, exchange, &mut part_decls, &mut reductions)?;
-                let decl_dest = if chain_part || !single { &mut decls } else { &mut work };
+                let decl_dest = if !single { &mut decls } else { &mut work };
                 decl_dest.extend(part_decls);
-                let row_dest = if chain_part { &mut element } else { &mut work };
-                row_dest.extend(reductions);
+                work.extend(reductions);
             }
             let values = self.outputs(k, &mut emit)?;
             let cond = match lanes {
                 Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
                 None => var("valid"),
             };
-            let row_dest = if chain_part { &mut element } else { &mut work };
-            row_dest.push(Stmt::If {
+            work.push(Stmt::If {
                 cond,
                 then_body: values,
                 else_body: None,
             });
-            if let Some(base_name) = &base_name {
-                let (_, row_elems, _) = lanes.expect("a chained part is lane-scheduled");
-                let rows = std::mem::take(&mut element);
-                work.push(let_int(base_name, int(0)?));
-                let mut body = rows;
-                body.push(assign(
-                    base_name,
-                    bin(BinOp::Add, var(base_name), int(i64::from(row_elems))?),
-                ));
-                work.push(Stmt::While {
-                    cond: bin(BinOp::Lt, var(base_name), int(elements as i64)?),
-                    body,
-                });
-            }
 
             let part = self.estimate(k, lanes.map(|(lanes, ..)| lanes), &hoisted, &[]);
             estimate.serial = estimate.serial.max(part.serial);
@@ -1138,9 +1106,9 @@ pub(super) struct Resources {
     pub(super) scalars: Vec<ScalarParam>,
 }
 
-/// Nested lane-ordered products whose only free index is the enclosing reduction's,
-/// and whose vector is short enough to keep in one workgroup. Inner products come
-/// first.
+/// Nested lane-ordered products whose only free index is the enclosing reduction's.
+/// `CHAIN_VECTOR_MAX` only bounds scratch; the cost model decides whether the chain
+/// is worth fusing. Inner products come first.
 fn collect_chains(term: &Term, enclosing: Option<(IndexVar, u32)>, out: &mut Vec<ChainSlot>) {
     match term {
         Term::Reduce {
@@ -1314,11 +1282,41 @@ impl Emit<'_> {
                 len: slot.extent,
             });
             bytes += slot.extent * 4;
-            let i = self.fresh("i");
-            out.push(let_int(&i, int(0)?));
-            let old = self.bind(slot.index, i.clone(), slot.extent);
+            // Row group `g` computes element `base + g`, so the four groups in a
+            // 128-thread workgroup do not repeat the same product.
+            let base = self.fresh("i");
+            let elem = self.fresh("e");
+            out.push(let_int(&base, int(0)?));
+            out.push(let_int(
+                &elem,
+                bin(
+                    BinOp::Add,
+                    var(&base),
+                    bin(BinOp::Div, var("local"), int(i64::from(lanes))?),
+                ),
+            ));
+            let old = self.bind(slot.index, elem.clone(), slot.extent);
             self.lane_guard = false;
             let mut body = Vec::new();
+            body.push(assign(
+                &elem,
+                bin(
+                    BinOp::Add,
+                    var(&base),
+                    bin(BinOp::Div, var("local"), int(i64::from(lanes))?),
+                ),
+            ));
+            let active = bin(BinOp::Lt, var(&elem), int(i64::from(slot.extent))?);
+            // An inactive group still runs the reduction, on element 0, so the
+            // barriers stay uniform and the load stays in range.
+            body.push(Stmt::If {
+                cond: Expr::Unary {
+                    op: IrUnaryOp::Not,
+                    expr: Box::new(active.clone()),
+                },
+                then_body: vec![assign(&elem, int(0)?)],
+                else_body: None,
+            });
             let group = [&slot.term];
             let partials = self.lanes(&group, lanes, &mut body)?;
             self.lane_guard = true;
@@ -1356,19 +1354,19 @@ impl Emit<'_> {
                 slot_at(&scratch, bin(BinOp::Sub, var("local"), var("lane"))),
             ));
             body.push(Stmt::If {
-                cond: bin(BinOp::Eq, var("local"), int(0)?),
+                cond: bin(BinOp::And, active, bin(BinOp::Eq, var("lane"), int(0)?)),
                 then_body: vec![Stmt::Assign {
-                    target: slot_at(&slot.slot, cast(var(&i), "uint")),
+                    target: slot_at(&slot.slot, cast(var(&elem), "uint")),
                     value: var(&result),
                 }],
                 else_body: None,
             });
             body.push(barrier());
-            body.push(assign(&i, bin(BinOp::Add, var(&i), int(1)?)));
+            body.push(assign(&base, bin(BinOp::Add, var(&base), int(i64::from(elements))?)));
             self.unbind(slot.index, old);
             self.forget(&slot.term);
             out.push(Stmt::While {
-                cond: bin(BinOp::Lt, var(&i), int(i64::from(slot.extent))?),
+                cond: bin(BinOp::Lt, var(&base), int(i64::from(slot.extent))?),
                 body,
             });
         }

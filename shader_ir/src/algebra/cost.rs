@@ -23,6 +23,9 @@ pub struct Estimate {
     pub work: u64,
     /// Multiply-adds it runs on matrix units.
     pub matrix: u64,
+    /// Workgroup barriers the longest thread reaches. A barrier is not overlapped
+    /// with the thread's own arithmetic.
+    pub barriers: u64,
 }
 
 /// Operations one evaluation of `term` executes; subterms alpha-equal to one of
