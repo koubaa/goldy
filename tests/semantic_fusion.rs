@@ -1045,3 +1045,29 @@ fn indexed_gemv_honors_a_weight_offset() {
     );
     assert_one_semantic_region(&scheme, 2);
 }
+
+fn sum_inputs(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
+    let last = t.len() - 1;
+    rec.add_into("sum", t[0].view(), t[1].view(), t[last].view())?;
+    for i in 2..last {
+        rec.add_into("sum", t[last].view(), t[i].view(), t[last].view())?;
+    }
+    Ok((Vec::new(), Vec::new()))
+}
+
+/// Eighteen inputs plus the accumulator is inside the 24-resource dispatch cap
+/// and matches the unfused adds byte for byte.
+#[test]
+fn eighteen_inputs_fuse_into_one_kernel() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let n = 32u32;
+    let inputs = 18u32;
+    let mut init = Vec::new();
+    for i in 0..inputs {
+        init.push(Init::F32(TensorShape::vector(n), data(i + 1, n)));
+    }
+    init.push(Init::F32(TensorShape::vector(n), vec![0.0; n as usize]));
+    let scheme = fused_matches_unfused(&device, &init, sum_inputs, 3);
+    assert_eq!(scheme.executed_node_count(), 1, "{:?}", scheme.fusion_report());
+}

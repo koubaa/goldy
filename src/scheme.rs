@@ -984,6 +984,10 @@ fn parcel_has_accel_input(parcel: &Parcel) -> bool {
 
 impl Scheme {
     /// Create a scheme bound to `ctx`.
+    pub(crate) fn fusion_resource_limit(&self) -> usize {
+        self.fusion.resource_limit()
+    }
+
     pub fn new(ctx: &Context) -> Self {
         Self {
             desc: SchemeDesc::new(),
@@ -994,7 +998,10 @@ impl Scheme {
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             specialization: crate::specialization::SchemePredictor::new(),
-            fusion: crate::fusion_plan::FusionPlanner::new(Arc::clone(&ctx.runtime().inner.fusion_compiles)),
+            fusion: crate::fusion_plan::FusionPlanner::new(
+                Arc::clone(&ctx.runtime().inner.fusion_compiles),
+                ctx.runtime().fusion_resource_limit(),
+            ),
             automatic_fusion: None,
             submit_static: None,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),

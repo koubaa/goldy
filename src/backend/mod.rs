@@ -1940,6 +1940,12 @@ pub(crate) trait GpuBackend:
         u32::MAX
     }
 
+    /// Storage buffers one shader stage may bind. WebGPU reports the device limit;
+    /// other backends are not bound by a small spec default.
+    fn max_shader_storage_buffers(&self, _device: DeviceHandle) -> u32 {
+        u32::MAX
+    }
+
     /// Maximum concurrent submission contexts this device can create.
     ///
     /// Vulkan pre-allocates a fixed compute-queue pool at device create; DX12/Metal

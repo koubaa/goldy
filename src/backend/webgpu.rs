@@ -743,6 +743,8 @@ struct WebGpuDevice {
     bind_groups: HashMap<BindGroupCacheKey, wgpu::BindGroup>,
     /// Bumped when the device user-uniform buffer is replaced.
     user_uniform_gen: u64,
+    /// `maxStorageBuffersPerShaderStage` for this device.
+    max_storage_buffers: u32,
     #[cfg(feature = "graphics")]
     blit: HashMap<wgpu::TextureFormat, WebGpuBlitPipeline>,
 }
@@ -4283,6 +4285,7 @@ impl GpuBackend for WebGpuBackend {
                 pipeline_cache_path,
                 bind_groups: HashMap::new(),
                 user_uniform_gen: 0,
+                max_storage_buffers: limits.max_storage_buffers_per_shader_stage,
                 #[cfg(feature = "graphics")]
                 blit: HashMap::new(),
             },
@@ -5956,6 +5959,13 @@ impl GpuBackend for WebGpuBackend {
             self.slang_compiler = None;
             tracing::info!("Released WebGPU Slang compiler session (freed host-side compiler memory)");
         }
+    }
+
+    fn max_shader_storage_buffers(&self, device: DeviceHandle) -> u32 {
+        self.devices
+            .get(&device)
+            .map(|device| device.max_storage_buffers)
+            .unwrap_or(0)
     }
 
     fn max_bindless_slots_per_category(&self, device: DeviceHandle, _category: crate::types::ResourceCategory) -> u32 {

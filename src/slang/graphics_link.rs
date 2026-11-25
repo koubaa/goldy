@@ -16,7 +16,7 @@ use super::virtual_main::{
     find_all_entries, flatten_bindless_params, mesh_payload_type, mesh_vertices_type, stage_input_payload_type,
     EntryDef, Param, ParamKind, Stage,
 };
-use crate::backend::shared::MAX_BINDLESS_SLOTS;
+use crate::backend::shared::MAX_DISPATCH_RESOURCES;
 use crate::types::{ResourceAccess, ResourceCategory, VertexBufferLayout, VertexFormat};
 
 /// Interpolation mode on a stage I/O field.
@@ -377,13 +377,13 @@ fn merge_named_resources(
         let _ = stage;
     }
 
-    if order.len() > MAX_BINDLESS_SLOTS {
+    if order.len() > MAX_DISPATCH_RESOURCES {
         let contributors: Vec<String> = ordered_stages
             .iter()
             .map(|(_, label, res)| format!("{label} ({})", res.len()))
             .collect();
         bail!(
-            "graphics pipeline bindless contract has {} unique resources (limit is {MAX_BINDLESS_SLOTS}). \
+            "graphics pipeline bindless contract has {} unique resources (limit is {MAX_DISPATCH_RESOURCES}). \
              Contributing stages: {}. Split unused resources out of virtual-main, or share names across stages.",
             order.len(),
             contributors.join(", ")

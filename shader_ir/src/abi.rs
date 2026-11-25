@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Bump when the wire layout or parameter classification changes.
-pub const KERNEL_ABI_VERSION: u32 = 5;
+pub const KERNEL_ABI_VERSION: u32 = 4;
 
 /// Hidden structured-buffer parameter that packs every tensor layout for one dispatch.
 pub const TENSOR_META_PARAM: &str = "_goldy_tensor_meta";
@@ -24,7 +24,7 @@ pub const TENSOR_LAYOUT_STRIDE_BYTES: u32 = 48;
 /// Native backends carry these words in `PushLayout` region C after the three frame-table
 /// words, and CUDA as trailing kernel arguments. A slot at or past this count reads its
 /// offset from [`TENSOR_META_PARAM`] in every program.
-pub const TENSOR_LAUNCH_WORDS: usize = 9;
+pub const TENSOR_LAUNCH_WORDS: usize = 13;
 
 /// Layout fields a site can bake, in [`TENSOR_LAYOUT_SLANG`] word order after `off`.
 ///
