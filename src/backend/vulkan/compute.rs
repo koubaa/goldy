@@ -457,14 +457,21 @@ pub(super) struct VulkanGpuProfilePool {
     valid_bits: u32,
 }
 
+fn push_profile_slots(labels: &mut Vec<Option<crate::SchemeLabel>>, label: &Option<crate::SchemeLabel>, n: u32) {
+    for _ in 0..n {
+        labels.push(label.clone());
+    }
+}
+
 fn collect_dispatch_labels_compute(commands: &[GpuCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for c in commands {
         match c {
-            GpuCommand::Dispatch { label, .. }
-            | GpuCommand::DispatchIndirect { label, .. }
-            | GpuCommand::DispatchBatch { label, .. } => {
-                labels.push(label.clone());
+            GpuCommand::Dispatch { label, .. } | GpuCommand::DispatchIndirect { label, .. } => {
+                push_profile_slots(&mut labels, label, 1);
+            }
+            GpuCommand::DispatchBatch { label, count, .. } => {
+                push_profile_slots(&mut labels, label, *count);
             }
             _ => {}
         }
@@ -476,13 +483,16 @@ fn collect_dispatch_labels_compute(commands: &[GpuCommand]) -> (usize, Vec<Optio
 fn collect_dispatch_labels_graph(commands: &[GraphCommand]) -> (usize, Vec<Option<crate::SchemeLabel>>) {
     let mut labels = Vec::new();
     for gc in commands {
-        if let GraphCommand::Compute(
-            GpuCommand::Dispatch { label, .. }
-            | GpuCommand::DispatchIndirect { label, .. }
-            | GpuCommand::DispatchBatch { label, .. },
-        ) = gc
-        {
-            labels.push(label.clone());
+        if let GraphCommand::Compute(cmd) = gc {
+            match cmd {
+                GpuCommand::Dispatch { label, .. } | GpuCommand::DispatchIndirect { label, .. } => {
+                    push_profile_slots(&mut labels, label, 1);
+                }
+                GpuCommand::DispatchBatch { label, count, .. } => {
+                    push_profile_slots(&mut labels, label, *count);
+                }
+                _ => {}
+            }
         }
     }
     let n = labels.len();
@@ -1222,7 +1232,25 @@ pub(super) fn submit_with_scope(
                                     layout_bytes,
                                 );
                             }
+                            if let Some(ref prof) = vk_gpu_profile {
+                                let q = 2u32 + (vk_dispatch_idx as u32) * 2;
+                                logical_device.device.cmd_write_timestamp2(
+                                    cmd,
+                                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                    prof.pool,
+                                    q,
+                                );
+                            }
                             logical_device.device.cmd_dispatch(cmd, wg_x, wg_y, wg_z);
+                            if let Some(ref prof) = vk_gpu_profile {
+                                let q = 2u32 + (vk_dispatch_idx as u32) * 2;
+                                logical_device.device.cmd_write_timestamp2(
+                                    cmd,
+                                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                    prof.pool,
+                                    q + 1,
+                                );
+                            }
                         }
                     }
                     if let Some(ref prof) = vk_gpu_profile {
@@ -2319,7 +2347,25 @@ pub(super) fn submit_graph_with_scope(
                                     layout_bytes,
                                 );
                             }
+                            if let Some(ref prof) = vk_gpu_profile {
+                                let q = 2u32 + (vk_dispatch_idx as u32) * 2;
+                                logical_device.device.cmd_write_timestamp2(
+                                    cmd,
+                                    vk::PipelineStageFlags2::TOP_OF_PIPE,
+                                    prof.pool,
+                                    q,
+                                );
+                            }
                             logical_device.device.cmd_dispatch(cmd, wg_x, wg_y, wg_z);
+                            if let Some(ref prof) = vk_gpu_profile {
+                                let q = 2u32 + (vk_dispatch_idx as u32) * 2;
+                                logical_device.device.cmd_write_timestamp2(
+                                    cmd,
+                                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                                    prof.pool,
+                                    q + 1,
+                                );
+                            }
                         }
                     }
                     if let Some(ref prof) = vk_gpu_profile {
@@ -3353,4 +3399,25 @@ pub(super) fn reap_timeline_cmd_buffers_up_to(
     max_completed_value: u64,
 ) {
     reap_timeline_cmd_buffers_up_to_with_view(&state.submit_view(), ctx, max_completed_value);
+}
+
+#[cfg(test)]
+mod profile_query_tests {
+    use super::{collect_dispatch_labels_compute, collect_dispatch_labels_graph};
+    use crate::backend::{GpuCommand, GraphCommand};
+    use crate::SchemeLabel;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_dispatch_batch_reserves_one_query_pair_per_dispatch() {
+        let batch = GpuCommand::DispatchBatch {
+            label: Some(SchemeLabel::from("gemv")),
+            arg_data: Arc::from(&[][..]),
+            count: 3,
+        };
+        let (n, labels) = collect_dispatch_labels_compute(std::slice::from_ref(&batch));
+        assert_eq!((n, labels.len()), (3, 3));
+        let (n, labels) = collect_dispatch_labels_graph(&[GraphCommand::Compute(batch)]);
+        assert_eq!((n, labels.len()), (3, 3));
+    }
 }
