@@ -829,22 +829,6 @@ pub fn prepend_prologue(
     out
 }
 
-fn interaction_role_from_net(access: &NetAccess) -> InteractionRole {
-    if access.writes {
-        InteractionRole::Writes
-    } else {
-        InteractionRole::Reads
-    }
-}
-
-fn interaction_kind_bits_from_net(access: &NetAccess) -> u8 {
-    if access.writes {
-        access.write_kinds.bits()
-    } else {
-        access.read_kinds.bits()
-    }
-}
-
 fn edge_matches(edge: &InteractionEdge, role: InteractionRole, kind_bits: u8, ctx: ContextHandle) -> bool {
     edge.role == role && edge.kind_bits == kind_bits && edge.ctx == ctx
 }
@@ -866,17 +850,64 @@ fn dirty_foreign_schemes(edges: &mut [InteractionEdge], scheme_id: u64) {
 
 type SelfTopologyEdge = (InteractionRole, u8, ContextHandle);
 
+/// Identity of a parcel's shared interaction set. Tensor views bind their parcel's stamp
+/// under several resource keys (the whole buffer and byte ranges of it), and every key of
+/// that family shares one set.
+fn interaction_set_id(stamp: &ParcelStamp) -> usize {
+    Arc::as_ptr(&stamp.interaction_set) as usize
+}
+
+/// This scheme's interaction with each shared set, folded over every key that reaches it:
+/// it writes the set if any key writes, with the union of the writing keys' kinds;
+/// otherwise it reads with the union of read kinds. A set holds one edge per scheme, so
+/// per-key edges of one scheme would overwrite each other on every record and dirty peers.
+fn net_by_interaction_set(
+    net: &ResourceKeyMap<NetAccess>,
+    resource_stamps: &ResourceKeyMap<Arc<ParcelStamp>>,
+) -> Vec<(Arc<ParcelStamp>, InteractionRole, u8)> {
+    let mut index: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut out: Vec<(Arc<ParcelStamp>, bool, u8, u8)> = Vec::new();
+    for (key, access) in net {
+        let Some(stamp) = resource_stamps.get(key) else {
+            continue;
+        };
+        let slot = *index.entry(interaction_set_id(stamp)).or_insert_with(|| {
+            out.push((Arc::clone(stamp), false, 0, 0));
+            out.len() - 1
+        });
+        let entry = &mut out[slot];
+        if access.writes {
+            entry.1 = true;
+            entry.2 |= access.write_kinds.bits();
+        } else {
+            entry.3 |= access.read_kinds.bits();
+        }
+    }
+    out.into_iter()
+        .map(|(stamp, writes, write_bits, read_bits)| {
+            if writes {
+                (stamp, InteractionRole::Writes, write_bits)
+            } else {
+                (stamp, InteractionRole::Reads, read_bits)
+            }
+        })
+        .collect()
+}
+
 /// Remove this scheme's edges from every parcel in `prev_parcels` without notifying peers.
+/// Returns the removed edge per interaction set.
 pub(crate) fn clear_scheme_topology_registration(
     scheme_id: u64,
     prev_parcels: &[(ResourceKey, Arc<ParcelStamp>)],
-) -> ResourceKeyMap<SelfTopologyEdge> {
-    let mut removed = ResourceKeyMap::default();
-    for (key, stamp) in prev_parcels {
+) -> FxHashMap<usize, SelfTopologyEdge> {
+    let mut removed = FxHashMap::default();
+    for (_, stamp) in prev_parcels {
         let mut edges = stamp.interaction_set.lock().unwrap();
         if let Some(idx) = edges.iter().position(|edge| edge.scheme_id == scheme_id) {
             let edge = edges.remove(idx);
-            removed.insert(*key, (edge.role, edge.kind_bits, edge.ctx));
+            removed
+                .entry(interaction_set_id(stamp))
+                .or_insert((edge.role, edge.kind_bits, edge.ctx));
         }
         prune_dead_edges(&mut edges);
     }
@@ -900,16 +931,11 @@ pub(crate) fn update_scheme_topology(
     scheme_id: u64,
     ctx: ContextHandle,
     dirty_flag: &Arc<AtomicBool>,
-    previous_self_edges: &ResourceKeyMap<SelfTopologyEdge>,
+    previous_self_edges: &FxHashMap<usize, SelfTopologyEdge>,
 ) {
     let weak_dirty = Arc::downgrade(dirty_flag);
 
-    for (key, access) in net {
-        let Some(stamp) = resource_stamps.get(key) else {
-            continue;
-        };
-        let role = interaction_role_from_net(access);
-        let kind_bits = interaction_kind_bits_from_net(access);
+    for (stamp, role, kind_bits) in net_by_interaction_set(net, resource_stamps) {
         let new_edge = (role, kind_bits, ctx);
         let mut edges = stamp.interaction_set.lock().unwrap();
         prune_dead_edges(&mut edges);
@@ -917,7 +943,7 @@ pub(crate) fn update_scheme_topology(
         let existing = edges.iter().position(|edge| edge.scheme_id == scheme_id);
         let topology_changed = match existing {
             Some(idx) => !edge_matches(&edges[idx], role, kind_bits, ctx),
-            None => previous_self_edges.get(key) != Some(&new_edge),
+            None => previous_self_edges.get(&interaction_set_id(&stamp)) != Some(&new_edge),
         };
 
         if topology_changed {
@@ -1294,6 +1320,68 @@ mod tests {
             assert!(!expected.waits.is_empty() && !expected.cpu_waits.is_empty());
             assert!(expected.prologue.buffers.iter().any(|(h, _)| *h == 20));
         }
+    }
+
+    /// A scheme that reads a whole tensor and writes a range of it reaches one interaction
+    /// set through two keys. Re-registering that footprint unchanged must not dirty a peer
+    /// scheme with the same footprint (the shape of per-pass schemes sharing layer scratch).
+    #[test]
+    fn view_keys_of_one_parcel_rerecord_without_dirtying_peers() {
+        let ctx = 1;
+        let whole = buf_key(10);
+        let range = ResourceKey::BufferRange {
+            parent: 10,
+            offset: 0,
+            len: 32,
+        };
+        let parcel = ParcelStamp::new(Weak::new());
+        let access = |writes: bool| NetAccess {
+            reads: !writes,
+            writes,
+            read_kinds: if writes {
+                UsageKindFlags::empty()
+            } else {
+                UsageKindFlags::COMPUTE
+            },
+            read_pipeline_kinds: UsageKindFlags::empty(),
+            write_kinds: if writes {
+                UsageKindFlags::COMPUTE
+            } else {
+                UsageKindFlags::empty()
+            },
+        };
+        let mut net: ResourceKeyMap<NetAccess> = ResourceKeyMap::default();
+        net.insert(whole, access(false));
+        net.insert(range, access(true));
+        let scheme_stamps = || {
+            let mut stamps: ResourceKeyMap<Arc<ParcelStamp>> = ResourceKeyMap::default();
+            stamps.insert(whole, Arc::new(parcel.clone_shared_cells()));
+            stamps.insert(range, Arc::new(parcel.clone_shared_cells()));
+            stamps
+        };
+        let (stamps_a, stamps_b) = (scheme_stamps(), scheme_stamps());
+        let (dirty_a, dirty_b) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+
+        let mut prev_a = reregister_scheme_topology(&net, &stamps_a, &[], 1, ctx, &dirty_a);
+        let mut prev_b = reregister_scheme_topology(&net, &stamps_b, &[], 2, ctx, &dirty_b);
+        assert!(dirty_a.load(Ordering::Acquire), "a new peer dirties the first scheme");
+        dirty_a.store(false, Ordering::Release);
+
+        for _ in 0..3 {
+            prev_a = reregister_scheme_topology(&net, &stamps_a, &prev_a, 1, ctx, &dirty_a);
+            prev_b = reregister_scheme_topology(&net, &stamps_b, &prev_b, 2, ctx, &dirty_b);
+        }
+        assert!(
+            !dirty_a.load(Ordering::Acquire),
+            "unchanged peer footprint must not dirty"
+        );
+        assert!(
+            !dirty_b.load(Ordering::Acquire),
+            "unchanged peer footprint must not dirty"
+        );
+        let edges = parcel.interaction_set.lock().unwrap();
+        assert_eq!(edges.len(), 2, "one edge per scheme per interaction set");
+        assert!(edges.iter().all(|edge| edge.role == InteractionRole::Writes));
     }
 
     #[test]
