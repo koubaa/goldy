@@ -495,6 +495,83 @@ pub fn compute_cross_submit_sync_into(
     out.cpu_waits.sort_by_key(|e| (e.context, e.value));
 }
 
+/// [`compute_cross_submit_sync_into`] over live stamps instead of a [`LedgerSnapshot`].
+///
+/// Each key's hazards are derived under that stamp's sync lock, so no ledger is cloned.
+/// `index` is scratch mapping each registry key to its position.
+#[allow(clippy::too_many_arguments)]
+fn compute_cross_submit_sync_from_stamps_into(
+    out: &mut SubmitSync,
+    wait_map: &mut HashMap<ContextHandle, u64>,
+    cpu_wait_map: &mut HashMap<ContextHandle, u64>,
+    index: &mut ResourceKeyMap<usize>,
+    net: &ResourceKeyMap<NetAccess>,
+    registry: &[(ResourceKey, Arc<ParcelStamp>)],
+    submitting_ctx: ContextHandle,
+    separate_graphics: bool,
+) {
+    out.prologue.buffers.clear();
+    out.prologue.textures.clear();
+    out.prologue.transient_ids.clear();
+    wait_map.clear();
+    cpu_wait_map.clear();
+    index.clear();
+    for (i, (key, _)) in registry.iter().enumerate() {
+        index.entry(*key).or_insert(i);
+    }
+
+    for (key, access) in net {
+        if let Some(&i) = index.get(key) {
+            let sync = registry[i].1.sync.lock().unwrap();
+            apply_cross_submit_hazards_for_resource(
+                *key,
+                *access,
+                &sync,
+                submitting_ctx,
+                separate_graphics,
+                &mut out.prologue,
+                wait_map,
+                cpu_wait_map,
+            );
+            continue;
+        }
+        let aliasing: LedgerSnapshot = registry
+            .iter()
+            .filter(|(k, _)| resource_keys_alias(*k, *key))
+            .map(|(k, stamp)| {
+                (
+                    *k,
+                    LedgerEntry {
+                        sync: stamp.sync.lock().unwrap().clone(),
+                    },
+                )
+            })
+            .collect();
+        let Some(entry) = find_ledger_entry(&aliasing, *key) else {
+            continue;
+        };
+        apply_cross_submit_hazards_for_resource(
+            *key,
+            *access,
+            &entry.sync,
+            submitting_ctx,
+            separate_graphics,
+            &mut out.prologue,
+            wait_map,
+            cpu_wait_map,
+        );
+    }
+
+    out.waits.clear();
+    out.waits
+        .extend(wait_map.drain().map(|(context, value)| Epoch { context, value }));
+    out.waits.sort_by_key(|e| (e.context, e.value));
+    out.cpu_waits.clear();
+    out.cpu_waits
+        .extend(cpu_wait_map.drain().map(|(context, value)| Epoch { context, value }));
+    out.cpu_waits.sort_by_key(|e| (e.context, e.value));
+}
+
 /// Derive cross-submission sync from this submission's net access and the resource ledger.
 #[allow(
     dead_code,
@@ -592,7 +669,7 @@ pub(crate) struct CrossSubmitScratch {
     net: ResourceKeyMap<NetAccess>,
     registry: Vec<(ResourceKey, Arc<ParcelStamp>)>,
     seen: FxHashSet<ResourceKey>,
-    ledger: LedgerSnapshot,
+    registry_index: ResourceKeyMap<usize>,
     wait_map: HashMap<ContextHandle, u64>,
     cpu_wait_map: HashMap<ContextHandle, u64>,
     submit_sync: SubmitSync,
@@ -612,7 +689,7 @@ impl Default for CrossSubmitScratch {
                 s.reserve(32);
                 s
             },
-            ledger: {
+            registry_index: {
                 let mut m = ResourceKeyMap::default();
                 m.reserve(32);
                 m
@@ -633,7 +710,7 @@ impl CrossSubmitScratch {
         self.net.clear();
         self.registry.clear();
         self.seen.clear();
-        self.ledger.clear();
+        self.registry_index.clear();
         self.wait_map.clear();
         self.cpu_wait_map.clear();
         self.submit_sync.prologue.buffers.clear();
@@ -662,17 +739,14 @@ impl CrossSubmitScratch {
             resource_stamps_from_ir_into(&mut self.registry, &mut self.seen, ir, resource_stamps);
         }
         {
-            let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
-            build_ledger_snapshot_into(&mut self.ledger, &self.registry);
-        }
-        {
             let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
-            compute_cross_submit_sync_into(
+            compute_cross_submit_sync_from_stamps_into(
                 &mut self.submit_sync,
                 &mut self.wait_map,
                 &mut self.cpu_wait_map,
+                &mut self.registry_index,
                 &self.net,
-                &self.ledger,
+                &self.registry,
                 submitting_ctx,
                 separate_graphics,
             );
@@ -682,7 +756,7 @@ impl CrossSubmitScratch {
 
     /// Plan dynamic ledger waits from topology-derived access and stamp inputs.
     ///
-    /// Clean retained submits cache these inputs so the hot path only snapshots
+    /// Clean retained submits cache these inputs so the hot path only reads
     /// current epochs and derives waits; it does not rescan GraphIR.
     pub fn plan_precomputed(
         &mut self,
@@ -693,17 +767,14 @@ impl CrossSubmitScratch {
     ) -> &SubmitSync {
         self.clear();
         {
-            let _tz = crate::tracy_zone!("goldy.cross_sync.ledger_snapshot");
-            build_ledger_snapshot_into(&mut self.ledger, registry);
-        }
-        {
             let _tz = crate::tracy_zone!("goldy.cross_sync.compute_sync");
-            compute_cross_submit_sync_into(
+            compute_cross_submit_sync_from_stamps_into(
                 &mut self.submit_sync,
                 &mut self.wait_map,
                 &mut self.cpu_wait_map,
+                &mut self.registry_index,
                 net,
-                &self.ledger,
+                registry,
                 submitting_ctx,
                 separate_graphics,
             );
@@ -1145,6 +1216,84 @@ mod tests {
         let sync = stamp.sync.lock().unwrap();
         assert_eq!(sync.last_write.get(ctx), Some(9));
         assert_eq!(sync.last_write_kinds.get(ctx), Some(UsageKindFlags::TRANSFER.bits()));
+    }
+
+    /// Reading stamps in place must plan exactly what a cloned ledger snapshot plans,
+    /// including a key with no stamp of its own that merges aliasing range producers.
+    #[test]
+    fn stamp_plan_matches_snapshot_plan() {
+        let (ctx, peer) = (1, 2);
+        let range = |offset| ResourceKey::BufferRange {
+            parent: 20,
+            offset,
+            len: 16,
+        };
+        let stamped = |f: &dyn Fn(&mut ResourceSync)| {
+            let stamp = empty_stamp();
+            f(&mut stamp.sync.lock().unwrap());
+            stamp
+        };
+        let registry = vec![
+            (
+                buf_key(10),
+                stamped(&|s| s.record_write(ctx, 5, WRITE_KINDS_COMPUTE_TRANSFER)),
+            ),
+            (
+                buf_key(11),
+                stamped(&|s| s.record_write(peer, 7, UsageKindFlags::COMPUTE.bits())),
+            ),
+            (
+                buf_key(12),
+                stamped(&|s| {
+                    s.record_read(ctx, 8);
+                    s.record_read(peer, 9);
+                    s.record_foreign_read(peer, 3);
+                }),
+            ),
+            (
+                range(0),
+                stamped(&|s| s.record_write(ctx, 4, WRITE_KINDS_COMPUTE_TRANSFER)),
+            ),
+            (
+                range(16),
+                stamped(&|s| s.record_write(peer, 6, UsageKindFlags::COMPUTE.bits())),
+            ),
+        ];
+        let read = NetAccess {
+            reads: true,
+            read_kinds: UsageKindFlags::COMPUTE,
+            ..Default::default()
+        };
+        let write = NetAccess {
+            writes: true,
+            write_kinds: UsageKindFlags::COMPUTE,
+            ..Default::default()
+        };
+        let mut net: ResourceKeyMap<NetAccess> = ResourceKeyMap::default();
+        net.insert(buf_key(10), read);
+        net.insert(buf_key(11), write);
+        net.insert(buf_key(12), write);
+        net.insert(buf_key(20), read);
+        net.insert(buf_key(99), write);
+
+        let ledger = build_ledger_snapshot(&registry);
+        for separate_graphics in [false, true] {
+            let mut expected = SubmitSync::default();
+            compute_cross_submit_sync_into(
+                &mut expected,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &net,
+                &ledger,
+                ctx,
+                separate_graphics,
+            );
+            let mut scratch = CrossSubmitScratch::new();
+            let actual = scratch.plan_precomputed(&net, &registry, ctx, separate_graphics);
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            assert!(!expected.waits.is_empty() && !expected.cpu_waits.is_empty());
+            assert!(expected.prologue.buffers.iter().any(|(h, _)| *h == 20));
+        }
     }
 
     #[test]
