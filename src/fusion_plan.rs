@@ -393,9 +393,21 @@ type Compiled = Result<Arc<PreparedKernel>, String>;
 
 /// Fused pipelines by program identity, shared with compile workers.
 #[derive(Default)]
-struct Compiles {
+pub(crate) struct Compiles {
     done: HashMap<KernelId, Compiled>,
     running: HashSet<KernelId>,
+    /// Compiles actually started. A second scheme with the same program reuses `done`.
+    started: u64,
+}
+
+pub(crate) fn new_compile_cache() -> Arc<Mutex<Compiles>> {
+    Arc::new(Mutex::new(Compiles::default()))
+}
+
+impl Compiles {
+    pub(crate) fn started(&self) -> u64 {
+        self.started
+    }
 }
 
 /// The planner a [`crate::Scheme`] owns.
@@ -405,6 +417,9 @@ pub(crate) struct FusionPlanner {
     rejected: Vec<Rejection>,
     compiles: Arc<Mutex<Compiles>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    /// Injected compile failures. They stay on this planner so a test fault
+    /// does not overwrite a program another scheme already compiled.
+    faulted: HashMap<KernelId, Compiled>,
     /// Failed compiles already counted in `events`.
     failures_seen: HashSet<KernelId>,
     plan: Option<Plan>,
@@ -422,13 +437,14 @@ impl Drop for FusionPlanner {
 }
 
 impl FusionPlanner {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(compiles: Arc<Mutex<Compiles>>) -> Self {
         Self {
             phase: Phase::Settling,
             regions: Vec::new(),
             rejected: Vec::new(),
-            compiles: Arc::new(Mutex::new(Compiles::default())),
+            compiles,
             workers: Vec::new(),
+            faulted: HashMap::new(),
             failures_seen: HashSet::new(),
             plan: None,
             events: FusionEvents::default(),
@@ -478,6 +494,7 @@ impl FusionPlanner {
         self.phase = Phase::Settling;
         self.regions.clear();
         self.rejected.clear();
+        self.faulted.clear();
         let plan = self.plan.take();
         if plan.is_some() {
             self.events.fallbacks += 1;
@@ -550,7 +567,12 @@ impl FusionPlanner {
             let compiles = self.compiles.lock().unwrap();
             let mut outcomes = Vec::with_capacity(self.regions.len());
             for region in &self.regions {
-                outcomes.push(compiles.done.get(&region.id)?.clone());
+                let outcome = self
+                    .faulted
+                    .get(&region.id)
+                    .cloned()
+                    .or_else(|| compiles.done.get(&region.id).cloned());
+                outcomes.push(outcome?);
             }
             outcomes
         };
@@ -609,6 +631,7 @@ impl FusionPlanner {
     ) {
         self.regions.clear();
         self.rejected.clear();
+        self.faulted.clear();
         let taken = self.match_semantic(ir, sites, semantic, target);
         let view = |i: usize| -> Option<StageView<'_>> {
             if taken[i] {
@@ -795,11 +818,17 @@ impl FusionPlanner {
         let fault = crate::validation_env::fusion_compile_fault();
         let mut started = false;
         for region in &self.regions {
+            if fault {
+                self.faulted
+                    .insert(region.id, Err("injected fused compile failure".to_string()));
+                continue;
+            }
             {
                 let mut compiles = self.compiles.lock().unwrap();
                 if compiles.done.contains_key(&region.id) || !compiles.running.insert(region.id) {
                     continue;
                 }
+                compiles.started += 1;
             }
             started = true;
             let (forwarded, elided) = region.program.locality();

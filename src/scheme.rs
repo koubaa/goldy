@@ -994,7 +994,7 @@ impl Scheme {
             prev_topology_parcels: Vec::new(),
             stats: ReplayStats::default(),
             specialization: crate::specialization::SchemePredictor::new(),
-            fusion: crate::fusion_plan::FusionPlanner::new(),
+            fusion: crate::fusion_plan::FusionPlanner::new(Arc::clone(&ctx.runtime().inner.fusion_compiles)),
             automatic_fusion: None,
             submit_static: None,
             scheme_id: NEXT_SCHEME_ID.fetch_add(1, Ordering::Relaxed),

@@ -331,6 +331,7 @@ impl Adapter {
                 stdlib_matmul: Mutex::default(),
                 validation,
                 compute_partition_split,
+                fusion_compiles: crate::fusion_plan::new_compile_cache(),
             }),
         })
     }
@@ -619,6 +620,8 @@ pub(crate) struct DeviceInner {
     pub(crate) validation: Validation,
     /// Partition policy for this runtime. See [`resolve_compute_partition_split`].
     compute_partition_split: ComputePartitionSplit,
+    /// Fused-kernel compiles, shared by every scheme on this device.
+    pub(crate) fusion_compiles: std::sync::Arc<Mutex<crate::fusion_plan::Compiles>>,
 }
 
 impl Clone for Runtime {
@@ -774,6 +777,7 @@ impl Runtime {
                 stdlib_matmul: Mutex::default(),
                 validation: self.inner.validation,
                 compute_partition_split: self.inner.compute_partition_split,
+                fusion_compiles: Arc::clone(&self.inner.fusion_compiles),
             }),
         }
     }
@@ -1349,6 +1353,7 @@ impl Runtime {
                 stdlib_matmul: Mutex::default(),
                 validation,
                 compute_partition_split,
+                fusion_compiles: crate::fusion_plan::new_compile_cache(),
             }),
         })
     }
