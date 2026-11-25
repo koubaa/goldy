@@ -2,7 +2,7 @@
 //!
 //! - Any non-empty value enables structured [`tracing`] logs for GPU timings.
 //! - `chrome`, `chrome:`, `chrome=<path>`, or `chrome:<path>` additionally writes a
-//!   Perfetto-compatible Chrome trace JSON array (pretty-printed) to disk after each readback.
+//!   Perfetto-compatible Chrome trace JSON array to disk, appending each timing as it is read back.
 //!
 //! While profiling is enabled, the CB-retention facility is disabled entirely (see
 //! `validation_env::retained_cb_reuse_disabled`): each submit re-records via ordinary
@@ -13,6 +13,8 @@
 //! `--no-default-features`.
 #![allow(dead_code)]
 
+use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -138,44 +140,55 @@ fn chrome_record_complete(backend: &str, timeline: u64, dispatch_label: Option<&
     let ts_us = wall_ts_us();
     let tid = format!("goldy-{backend}");
 
-    let mut guard = CHROME_EVENTS.lock().unwrap();
-    guard.push(ChromeEvent {
-        name,
+    let event = format!(
+        r#"  {{"name":"{}","cat":"gpu","ph":"X","ts":{:.3},"dur":{:.3},"pid":1,"tid":"{}","args":{{"timeline":{}}}}}"#,
+        escape_json_str(&name),
         ts_us,
         dur_us,
-        tid,
-        timeline,
-    });
-    if let Err(e) = flush_chrome_trace(&path, &guard) {
+        escape_json_str(&tid),
+        timeline
+    );
+    let mut trace = CHROME_TRACE.lock().unwrap();
+    if let Err(e) = append_chrome_event(&mut trace, &path, &event) {
         tracing::warn!("GOLDY_GPU_PROFILE chrome export failed: {e}");
     }
 }
 
-struct ChromeEvent {
-    name: String,
-    ts_us: f64,
-    dur_us: f64,
-    tid: String,
-    timeline: u64,
+/// Open trace file. Each append overwrites the closing `\n]`, so the file is a valid JSON
+/// array after every event without rewriting the earlier ones.
+static CHROME_TRACE: Mutex<Option<File>> = Mutex::new(None);
+
+fn append_chrome_event(trace: &mut Option<File>, path: &Path, event: &str) -> std::io::Result<()> {
+    match trace {
+        Some(file) => {
+            file.seek(SeekFrom::End(-2))?;
+            write!(file, ",\n{event}\n]")
+        }
+        None => {
+            let mut file = File::create(path)?;
+            write!(file, "[\n{event}\n]")?;
+            *trace = Some(file);
+            Ok(())
+        }
+    }
 }
 
-static CHROME_EVENTS: Mutex<Vec<ChromeEvent>> = Mutex::new(Vec::new());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn flush_chrome_trace(path: &Path, events: &[ChromeEvent]) -> std::io::Result<()> {
-    let mut s = String::from("[\n");
-    for (i, e) in events.iter().enumerate() {
-        if i > 0 {
-            s.push_str(",\n");
-        }
-        s.push_str(&format!(
-            r#"  {{"name":"{}","cat":"gpu","ph":"X","ts":{:.3},"dur":{:.3},"pid":1,"tid":"{}","args":{{"timeline":{}}}}}"#,
-            escape_json_str(&e.name),
-            e.ts_us,
-            e.dur_us,
-            escape_json_str(&e.tid),
-            e.timeline
-        ));
+    #[test]
+    fn chrome_trace_is_a_closed_array_after_every_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.json");
+        let mut trace = None;
+        append_chrome_event(&mut trace, &path, r#"  {"a":1}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[\n  {\"a\":1}\n]");
+        append_chrome_event(&mut trace, &path, r#"  {"b":2}"#).unwrap();
+        append_chrome_event(&mut trace, &path, r#"  {"c":3}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[\n  {\"a\":1},\n  {\"b\":2},\n  {\"c\":3}\n]"
+        );
     }
-    s.push_str("\n]");
-    std::fs::write(path, s)
 }
