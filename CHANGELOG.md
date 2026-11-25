@@ -127,6 +127,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Less host work per retained resubmit** — cross-submit planning reads each parcel's
+  sync state under its lock instead of cloning it into a ledger snapshot (twice per key),
+  the Vulkan bindless slot table uses Fx hashing with inline per-context entries (as DX12
+  already did), and the resubmit path finds its retained command buffer by key instead of
+  scanning the context's set. On lavapipe this cuts Inkling Mini's submitting-thread CPU
+  from about 3.4 to 2.6 ms per token; the plans are unchanged.
+
 - **Vulkan device creation** requests surface extensions, `VK_KHR_swapchain`,
   `fragmentStoresAndAtomics`, `shaderDrawParameters`, `shaderFloat16`,
   `shaderInt8`, `shaderInt16`, and `shaderInt64` only when the loader or device
