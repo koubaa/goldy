@@ -160,8 +160,18 @@ fn structure(scheme: &Scheme) -> String {
 }
 
 /// Whether matrix products run on the Goldy kernels that semantic fusion describes.
+/// Metal's library GEMM is a different kernel, so those tests stay on the other backends.
 fn stdlib_matmul(device: &Runtime) -> bool {
     device.backend_type() != BackendType::Metal
+}
+
+/// `gemv_f32` is what a chained GEMV site describes. Apple silicon runs it; another
+/// Metal GPU may use the library GEMV.
+fn stdlib_gemv(device: &Runtime) -> bool {
+    if device.backend_type() != BackendType::Metal {
+        return true;
+    }
+    device.adapter().name().contains("Apple")
 }
 
 /// The single fused region's schedule.
@@ -185,6 +195,84 @@ fn gemv_schedule(device: &Runtime) -> FusionSchedule {
 
 const ROWS: u32 = 70;
 const INNER: u32 = 100;
+
+#[test]
+fn gemv_into_gemv_over_a_short_rank() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_gemv(&device) {
+        return;
+    }
+    // The short vector is recomputed in every workgroup, so the consumer keeps its grid.
+    let (m, rank, k) = (4u32, 4u32, 32u32);
+    let init = [
+        Init::F32(TensorShape::matrix(rank, k), data(1, rank * k)),
+        Init::F32(TensorShape::vector(k), data(2, k)),
+        Init::F32(TensorShape::vector(rank), vec![0.0; rank as usize]),
+        Init::F32(TensorShape::matrix(m, rank), data(3, m * rank)),
+        Init::F32(TensorShape::vector(m), vec![0.0; m as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            rec.matmul_into("down", t[0].view(), t[1].view(), t[2].view())?;
+            rec.matmul_into("forget", t[3].view(), t[2].view(), t[4].view())?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        4,
+    );
+    assert_one_semantic_region(&scheme, 2);
+    assert_eq!(schedule(&scheme), gemv_schedule(&device));
+}
+
+fn record_chain(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
+    rec.matmul_into("down", t[0].view(), t[1].view(), t[2].view())?;
+    rec.matmul_into("forget", t[3].view(), t[2].view(), t[4].view())?;
+    Ok((Vec::new(), Vec::new()))
+}
+
+fn chain(m: u32, rank: u32, k: u32) -> [Init; 5] {
+    [
+        Init::F32(TensorShape::matrix(rank, k), data(1, rank * k)),
+        Init::F32(TensorShape::vector(k), data(2, k)),
+        Init::F32(TensorShape::vector(rank), vec![0.0; rank as usize]),
+        Init::F32(TensorShape::matrix(m, rank), data(3, m * rank)),
+        Init::F32(TensorShape::vector(m), vec![0.0; m as usize]),
+    ]
+}
+
+/// Rows that are not a multiple of four, and a rank that is not a power of two.
+#[test]
+fn gemv_chain_covers_a_partial_workgroup() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_gemv(&device) {
+        return;
+    }
+    for (m, rank, k) in [(9u32, 5u32, 40u32), (13, 37, 32)] {
+        let scheme = fused_matches_unfused(&device, &chain(m, rank, k), record_chain, 8);
+        assert_one_semantic_region(&scheme, 2);
+    }
+}
+
+/// A large consumer stays two dispatches. One workgroup must not walk every row.
+#[test]
+fn a_large_gemv_chain_stays_two_dispatches() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    if !stdlib_gemv(&device) {
+        return;
+    }
+    let mut twin = Twin::new(&device, &chain(4096, 16, 4096), record_chain);
+    twin.submit(2);
+    assert!(
+        twin.fused().fusion_report().regions.is_empty(),
+        "{:?}",
+        twin.fused().fusion_report()
+    );
+    assert_eq!(twin.fused().executed_node_count(), 2);
+}
 
 #[test]
 fn contraction_with_a_pointwise_epilogue() {

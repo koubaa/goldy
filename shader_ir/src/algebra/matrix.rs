@@ -291,6 +291,7 @@ fn emit(
         loads: loads + turns * epilogue.loads,
         work: work + epilogue.work,
         matrix: macs,
+        barriers: epilogue.barriers,
     };
     Ok(Lowered {
         kernel: ShaderKernel {

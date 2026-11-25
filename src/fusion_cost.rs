@@ -34,6 +34,8 @@ pub struct FusionCostModel {
     pub library_dispatch_ns: f64,
     /// Multiply-adds of a matrix product the native library runs.
     pub library_macs_per_ns: f64,
+    /// One workgroup barrier on the longest thread.
+    pub barrier_ns: f64,
 }
 
 impl Default for FusionCostModel {
@@ -50,6 +52,7 @@ impl Default for FusionCostModel {
             matrix_macs_per_ns: 2000.0,
             library_dispatch_ns: 5000.0,
             library_macs_per_ns: 8000.0,
+            barrier_ns: 40.0,
         }
     }
 }
@@ -62,6 +65,7 @@ impl FusionCostModel {
             estimate.serial as f64 * self.step_ns + estimate.loads as f64 * self.load_ns,
             estimate.work as f64 / self.ops_per_ns,
             estimate.matrix as f64 / self.matrix_macs_per_ns,
+            estimate.barriers as f64 * self.barrier_ns,
         ];
         self.dispatch_ns + busy.into_iter().fold(0.0, f64::max)
     }
