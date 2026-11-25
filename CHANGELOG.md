@@ -131,8 +131,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sync state under its lock instead of cloning it into a ledger snapshot (twice per key),
   the Vulkan bindless slot table uses Fx hashing with inline per-context entries (as DX12
   already did), and the resubmit path finds its retained command buffer by key instead of
-  scanning the context's set. On lavapipe this cuts Inkling Mini's submitting-thread CPU
-  from about 3.4 to 2.6 ms per token; the plans are unchanged.
+  scanning the context's set. The plans are unchanged. With Inkling Mini's schemes
+  replaying clean on lavapipe, its submitting-thread CPU drops from about 3.4 to 2.5 ms
+  per token.
 
 - **Vulkan device creation** requests surface extensions, `VK_KHR_swapchain`,
   `fragmentStoresAndAtomics`, `shaderDrawParameters`, `shaderFloat16`,
