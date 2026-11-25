@@ -101,7 +101,6 @@ impl SiteBuilder {
     }
 
     /// An index parameter in `range`, read from `source`.
-    #[cfg(feature = "tensor")]
     pub(crate) fn index_param(
         &mut self,
         name: &str,
