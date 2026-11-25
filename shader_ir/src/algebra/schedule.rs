@@ -108,6 +108,9 @@ pub struct IndexSource {
     pub element: u32,
     /// [`ElementType::I32`] or [`ElementType::U32`].
     pub element_type: ElementType,
+    /// When the loaded value is outside the parameter's declared range, stores that
+    /// depend on it write zero instead of the value computed from the clamped index.
+    pub zero_if_outside: bool,
 }
 
 /// A region lowered to one kernel.
@@ -801,15 +804,41 @@ impl Prepared {
         }
     }
 
-    /// `q{p}`: the value of each index parameter, read from its source.
-    pub(super) fn index_params(&self, sources: &[IndexSource], body: &mut Vec<Stmt>) {
+    /// `q{p}`: the value of each index parameter, read from its source and clamped
+    /// into the range the region declared. `in{p}` is whether the raw value was
+    /// already inside that range.
+    pub(super) fn index_params(&self, sources: &[IndexSource], body: &mut Vec<Stmt>) -> Result<(), LowerError> {
         for (p, source) in sources.iter().enumerate() {
             let at = Expr::Index {
                 base: Box::new(var(&parcel_name(source.parcel))),
                 index: Box::new(Expr::LitU32(source.element)),
             };
-            body.push(let_int(&format!("q{p}"), cast(at, "int")));
+            let q = format!("q{p}");
+            let inn = format!("in{p}");
+            body.push(let_int(&q, cast(at, "int")));
+            let range = self.region.param_range(IndexParam(p as u32));
+            let lo = int(range.start)?;
+            let hi = int(range.end.saturating_sub(1))?;
+            body.push(Stmt::Let {
+                name: inn.clone(),
+                mutable: false,
+                ty: Some("bool".into()),
+                init: bin(
+                    BinOp::And,
+                    bin(BinOp::Ge, var(&q), lo.clone()),
+                    bin(BinOp::Le, var(&q), hi),
+                ),
+            });
+            body.push(Stmt::If {
+                cond: Expr::Unary {
+                    op: IrUnaryOp::Not,
+                    expr: Box::new(var(&inn)),
+                },
+                then_body: vec![assign(&q, lo)],
+                else_body: None,
+            });
         }
+        Ok(())
     }
 
     fn lower(&self, schedule: Schedule, sources: &[IndexSource]) -> Result<Lowered, LowerError> {
@@ -900,7 +929,7 @@ impl Prepared {
                     ));
                 }
             }
-            self.index_params(sources, &mut work);
+            self.index_params(sources, &mut work)?;
             work.push(Stmt::Let {
                 name: "valid".into(),
                 mutable: false,
@@ -946,7 +975,7 @@ impl Prepared {
                 decl_dest.extend(part_decls);
                 work.extend(reductions);
             }
-            let values = self.outputs(k, &mut emit)?;
+            let values = self.outputs(k, &mut emit, sources)?;
             let cond = match lanes {
                 Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
                 None => var("valid"),
@@ -1036,7 +1065,7 @@ impl Prepared {
     /// Computes every output of part `k` at element `c{n}` into a local and stores them
     /// all, the stores after every computation. Sequential sibling reductions of the
     /// outputs that span the whole domain share loops.
-    pub(super) fn outputs(&self, k: usize, emit: &mut Emit) -> Result<Vec<Stmt>, LowerError> {
+    pub(super) fn outputs(&self, k: usize, emit: &mut Emit, sources: &[IndexSource]) -> Result<Vec<Stmt>, LowerError> {
         let mut values = Vec::new();
         let sequential = self.top_reductions(k, true, |r| {
             matches!(
@@ -1072,6 +1101,7 @@ impl Prepared {
             else {
                 let x = emit.term(term, &mut values)?;
                 values.push(let_float(&name, x));
+                stores.extend(zero_outside(sources, &name));
                 stores.push(store);
                 continue;
             };
@@ -1088,9 +1118,11 @@ impl Prepared {
                 then_body: guarded,
                 else_body: None,
             });
+            let mut guarded_store = zero_outside(sources, &name);
+            guarded_store.push(store);
             stores.push(Stmt::If {
                 cond: within,
-                then_body: vec![store],
+                then_body: guarded_store,
                 else_body: None,
             });
         }
@@ -1862,6 +1894,23 @@ impl Term {
             _ => self.for_each_child(&mut |c| c.walk_reads(ranges, f)),
         }
     }
+}
+
+/// Stores that depend on an out-of-range index parameter write zero.
+fn zero_outside(sources: &[IndexSource], name: &str) -> Vec<Stmt> {
+    sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.zero_if_outside)
+        .map(|(p, _)| Stmt::If {
+            cond: Expr::Unary {
+                op: IrUnaryOp::Not,
+                expr: Box::new(var(&format!("in{p}"))),
+            },
+            then_body: vec![assign(name, float(0.0))],
+            else_body: None,
+        })
+        .collect()
 }
 
 pub(super) fn var(name: &str) -> Expr {
