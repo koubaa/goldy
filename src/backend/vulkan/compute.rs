@@ -3096,7 +3096,13 @@ pub(super) fn try_resubmit_retained_with_scope(
     // Update the last signal value so eviction can defer-free the CB safely.
     {
         let mut sc = scope.sc.lock().unwrap();
-        if let Some(retained) = sc.retained_compute_cbs.values_mut().find(|r| r.command_buffer == cmd) {
+        if let Some(retained) = sc
+            .retained_compute_cbs
+            .get_mut(&key)
+            .filter(|r| r.command_buffer == cmd)
+        {
+            retained.last_signal_value = signal_value;
+        } else if let Some(retained) = sc.retained_compute_cbs.values_mut().find(|r| r.command_buffer == cmd) {
             retained.last_signal_value = signal_value;
         }
     }
