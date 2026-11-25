@@ -160,9 +160,14 @@ fn structure(scheme: &Scheme) -> String {
 }
 
 /// Whether matrix products run on the Goldy kernels that semantic fusion describes.
-///
-/// Apple silicon runs `gemv_f32`. Another Metal GPU may use the library GEMV.
+/// Metal's library GEMM is a different kernel, so those tests stay on the other backends.
 fn stdlib_matmul(device: &Runtime) -> bool {
+    device.backend_type() != BackendType::Metal
+}
+
+/// `gemv_f32` is what a chained GEMV site describes. Apple silicon runs it; another
+/// Metal GPU may use the library GEMV.
+fn stdlib_gemv(device: &Runtime) -> bool {
     if device.backend_type() != BackendType::Metal {
         return true;
     }
@@ -195,7 +200,7 @@ const INNER: u32 = 100;
 fn gemv_into_gemv_over_a_short_rank() {
     let _gpu = gpu_lock();
     let device = runtime();
-    if !stdlib_matmul(&device) {
+    if !stdlib_gemv(&device) {
         return;
     }
     // The short vector is recomputed in every workgroup, so the consumer keeps its grid.
@@ -242,7 +247,7 @@ fn chain(m: u32, rank: u32, k: u32) -> [Init; 5] {
 fn gemv_chain_covers_a_partial_workgroup() {
     let _gpu = gpu_lock();
     let device = runtime();
-    if !stdlib_matmul(&device) {
+    if !stdlib_gemv(&device) {
         return;
     }
     for (m, rank, k) in [(9u32, 5u32, 40u32), (13, 37, 32)] {
@@ -256,7 +261,7 @@ fn gemv_chain_covers_a_partial_workgroup() {
 fn a_large_gemv_chain_stays_two_dispatches() {
     let _gpu = gpu_lock();
     let device = runtime();
-    if !stdlib_matmul(&device) {
+    if !stdlib_gemv(&device) {
         return;
     }
     let mut twin = Twin::new(&device, &chain(4096, 16, 4096), record_chain);
