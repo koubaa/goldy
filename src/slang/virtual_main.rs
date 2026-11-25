@@ -4,7 +4,7 @@
 //! `[goldy_vertex]`, or `[goldy_fragment]` using ergonomic typed parameters
 //! (`Scattered<T>`, `ThreadId`, etc.).  This module transforms those into
 //! standard `[shader("...")]` entry points that the Slang compiler accepts,
-//! with a fixed 16-word signature mapping to the 128-byte `PushLayout`.
+//! with a signature that maps onto the 128-byte `PushLayout`.
 //!
 //! # Push constant layout
 //!
