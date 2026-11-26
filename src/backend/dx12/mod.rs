@@ -318,7 +318,14 @@ impl Dx12Backend {
                     let path = cache_root
                         .join("goldy")
                         .join(format!("dx12_pso_{}.bin", logical_device.adapter_id));
-                    if let Err(e) = pso_cache::save_maps(&path, &pso_cache.graphics_blobs, &pso_cache.compute_blobs) {
+                    let identity = pso_cache::PsoCacheIdentity {
+                        driver_version: pso_cache.driver_version,
+                        vendor_id: pso_cache.vendor_id,
+                        device_id: pso_cache.device_id,
+                    };
+                    if let Err(e) =
+                        pso_cache::save_maps(&path, identity, &pso_cache.graphics_blobs, &pso_cache.compute_blobs)
+                    {
                         tracing::warn!(
                             error = ?e,
                             path = ?path,

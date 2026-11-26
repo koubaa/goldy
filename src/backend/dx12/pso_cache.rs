@@ -1,14 +1,86 @@
 //! Persisted DX12 cached PSO blobs (`GetCachedBlob`).
+//!
+//! A cached blob is valid only for the driver that produced it. After a driver
+//! update, `CreateComputePipelineState` / `CreateGraphicsPipelineState` fail
+//! with `D3D12_ERROR_DRIVER_VERSION_MISMATCH` (`0x887E0002`). Blobs from one
+//! driver generation share a 24-byte prefix (header GUID plus driver id), so a
+//! single rejection drops that whole generation instead of failing every PSO.
 
 use crate::types::{DepthStencilState, PrimitiveTopology, TextureFormat, VertexBufferLayout};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use windows::Win32::Foundation::{D3D12_ERROR_ADAPTER_NOT_FOUND, D3D12_ERROR_DRIVER_VERSION_MISMATCH};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::D3D12_CACHED_PIPELINE_STATE;
 
+use super::types::PsoCache;
 use super::utils;
+
+/// Header GUID (16) plus the 8-byte driver id embedded by `GetCachedBlob`.
+pub(super) const DRIVER_STAMP_PREFIX: usize = 24;
+
+/// Adapter identity stored in the on-disk cache header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PsoCacheIdentity {
+    pub driver_version: u64,
+    pub vendor_id: u32,
+    pub device_id: u32,
+}
+
+pub(super) fn is_driver_cache_mismatch(err: &windows::core::Error) -> bool {
+    let code = err.code();
+    code == D3D12_ERROR_DRIVER_VERSION_MISMATCH || code == D3D12_ERROR_ADAPTER_NOT_FOUND
+}
+
+/// Drop every cached blob that shares `rejected`'s driver-generation prefix.
+///
+/// `rejected` itself may already have been removed. Returns how many entries
+/// were removed from the two maps.
+pub(super) fn drop_matching_driver_stamp(cache: &mut PsoCache, rejected: &[u8]) -> usize {
+    let Some(stamp) = rejected.get(..DRIVER_STAMP_PREFIX) else {
+        return 0;
+    };
+    let matches = |blob: &Vec<u8>| blob.len() >= DRIVER_STAMP_PREFIX && &blob[..DRIVER_STAMP_PREFIX] == stamp;
+    let graphics = cache.graphics_blobs.values().filter(|blob| matches(blob)).count();
+    let compute = cache.compute_blobs.values().filter(|blob| matches(blob)).count();
+    if graphics + compute == 0 {
+        return 0;
+    }
+    cache.graphics_blobs.retain(|_, blob| !matches(blob));
+    cache.compute_blobs.retain(|_, blob| !matches(blob));
+    cache.dirty = true;
+    graphics + compute
+}
+
+/// Keep only blobs from the same driver generation as `live`.
+///
+/// Runs once per device. A cache hit on a current blob therefore clears
+/// leftovers from an older driver without attempting those creates.
+pub(super) fn retain_live_driver_stamp(cache: &mut PsoCache, live: &[u8]) {
+    if cache.driver_stamp_aligned {
+        return;
+    }
+    cache.driver_stamp_aligned = true;
+    let Some(stamp) = live.get(..DRIVER_STAMP_PREFIX) else {
+        return;
+    };
+    let foreign = |blob: &Vec<u8>| blob.len() >= DRIVER_STAMP_PREFIX && &blob[..DRIVER_STAMP_PREFIX] != stamp;
+    let graphics = cache.graphics_blobs.values().filter(|blob| foreign(blob)).count();
+    let compute = cache.compute_blobs.values().filter(|blob| foreign(blob)).count();
+    if graphics + compute == 0 {
+        return;
+    }
+    cache.graphics_blobs.retain(|_, blob| !foreign(blob));
+    cache.compute_blobs.retain(|_, blob| !foreign(blob));
+    cache.dirty = true;
+    tracing::warn!(
+        dropped_graphics = graphics,
+        dropped_compute = compute,
+        "dropping DX12 PSO cache entries built for a different driver"
+    );
+}
 
 #[must_use]
 pub(super) fn d3d12_cached_pso(blob: &[u8]) -> D3D12_CACHED_PIPELINE_STATE {
@@ -24,7 +96,10 @@ pub(super) unsafe fn id3dblob_to_vec(blob: &ID3DBlob) -> Vec<u8> {
     std::slice::from_raw_parts(ptr, len).to_vec()
 }
 const FILE_MAGIC: &[u8; 8] = b"GD12PSOB";
-const FILE_VERSION: u32 = 1;
+/// Version 2 stores the DXGI driver version and vendor/device id ahead of the maps.
+/// Version 1 files (maps only) still load so an in-use cache is not thrown away.
+const FILE_VERSION: u32 = 2;
+const FILE_VERSION_LEGACY: u32 = 1;
 
 fn vertex_format_tag(f: crate::types::VertexFormat) -> u8 {
     use crate::types::VertexFormat as V;
@@ -140,19 +215,26 @@ pub(super) fn compute_pso_key(cs: &[u8]) -> u64 {
 
 pub(super) type PsoBlobMaps = (HashMap<u64, Vec<u8>>, HashMap<u64, Vec<u8>>);
 
-pub(super) fn load_maps(path: &Path) -> PsoBlobMaps {
+pub(super) fn load_maps(path: &Path, identity: PsoCacheIdentity) -> PsoBlobMaps {
     let empty = (HashMap::<u64, Vec<u8>>::new(), HashMap::<u64, Vec<u8>>::new());
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(_) => return empty,
     };
-    let Ok(parsed) = parse_file(&data) else {
-        return empty;
-    };
-    parsed
+    match parse_file(&data, Some(identity)) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "ignoring DX12 PSO disk cache"
+            );
+            empty
+        }
+    }
 }
 
-fn parse_file(data: &[u8]) -> Result<PsoBlobMaps> {
+fn parse_file(data: &[u8], expected: Option<PsoCacheIdentity>) -> Result<PsoBlobMaps> {
     if data.len() < 8 + 4 + 8 + 8 {
         anyhow::bail!("truncated DX12 PSO cache");
     }
@@ -163,11 +245,39 @@ fn parse_file(data: &[u8]) -> Result<PsoBlobMaps> {
     cursor += 8;
 
     let version = u32::from_le_bytes(data[cursor..cursor + 4].try_into()?);
-    if version != FILE_VERSION {
+    cursor += 4;
+    if version == FILE_VERSION {
+        if cursor + 8 + 4 + 4 > data.len() {
+            anyhow::bail!("truncated DX12 PSO cache identity");
+        }
+        let driver_version = u64::from_le_bytes(data[cursor..cursor + 8].try_into()?);
+        cursor += 8;
+        let vendor_id = u32::from_le_bytes(data[cursor..cursor + 4].try_into()?);
+        cursor += 4;
+        let device_id = u32::from_le_bytes(data[cursor..cursor + 4].try_into()?);
+        cursor += 4;
+        if let Some(expected) = expected {
+            let got = PsoCacheIdentity {
+                driver_version,
+                vendor_id,
+                device_id,
+            };
+            if got != expected {
+                anyhow::bail!(
+                    "DX12 PSO cache driver {driver_version:#x} vendor {vendor_id:#x} device {device_id:#x} does not match this adapter (driver {:#x} vendor {:#x} device {:#x})",
+                    expected.driver_version,
+                    expected.vendor_id,
+                    expected.device_id,
+                );
+            }
+        }
+    } else if version != FILE_VERSION_LEGACY {
         anyhow::bail!("unsupported DX12 PSO cache version {version}");
     }
-    cursor += 4;
 
+    if cursor + 8 > data.len() {
+        anyhow::bail!("truncated DX12 PSO cache");
+    }
     let n_graphics = usize::try_from(u64::from_le_bytes(data[cursor..cursor + 8].try_into()?))?;
     cursor += 8;
 
@@ -214,6 +324,7 @@ fn parse_file(data: &[u8]) -> Result<PsoBlobMaps> {
 
 pub(super) fn save_maps(
     path: &Path,
+    identity: PsoCacheIdentity,
     graphics: &HashMap<u64, Vec<u8>>,
     compute: &HashMap<u64, Vec<u8>>,
 ) -> std::io::Result<()> {
@@ -223,6 +334,9 @@ pub(super) fn save_maps(
     let mut out = Vec::new();
     out.write_all(FILE_MAGIC)?;
     out.write_all(&FILE_VERSION.to_le_bytes())?;
+    out.write_all(&identity.driver_version.to_le_bytes())?;
+    out.write_all(&identity.vendor_id.to_le_bytes())?;
+    out.write_all(&identity.device_id.to_le_bytes())?;
 
     let n_g = graphics.len().min(u64::MAX as usize) as u64;
     out.write_all(&n_g.to_le_bytes())?;
@@ -367,14 +481,22 @@ mod tests {
         assert_ne!(compute_pso_key(b"aaa"), compute_pso_key(b"aab"));
     }
 
+    fn test_identity() -> PsoCacheIdentity {
+        PsoCacheIdentity {
+            driver_version: 0x20_0000_0010_0440,
+            vendor_id: 0x10de,
+            device_id: 0x2803,
+        }
+    }
+
     #[test]
     fn save_load_roundtrip_empty() {
         let td = TempDir::new().unwrap();
         let path = td.path().join("pso.bin");
         let g_in = HashMap::<u64, Vec<u8>>::new();
         let c_in = HashMap::<u64, Vec<u8>>::new();
-        save_maps(&path, &g_in, &c_in).unwrap();
-        let (g_out, c_out) = load_maps(&path);
+        save_maps(&path, test_identity(), &g_in, &c_in).unwrap();
+        let (g_out, c_out) = load_maps(&path, test_identity());
         assert!(g_out.is_empty());
         assert!(c_out.is_empty());
     }
@@ -388,17 +510,82 @@ mod tests {
         g.insert(9u64, vec![255]);
         let mut c = HashMap::new();
         c.insert(100u64, vec![1, 2, 3, 4]);
-        save_maps(&path, &g, &c).unwrap();
-        let (g2, c2) = load_maps(&path);
+        save_maps(&path, test_identity(), &g, &c).unwrap();
+        let (g2, c2) = load_maps(&path, test_identity());
         assert_eq!(g2, g);
         assert_eq!(c2, c);
+    }
+
+    #[test]
+    fn load_maps_driver_mismatch_returns_empty() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("pso.bin");
+        let mut c = HashMap::new();
+        c.insert(1u64, vec![9, 9, 9]);
+        save_maps(&path, test_identity(), &HashMap::new(), &c).unwrap();
+        let other = PsoCacheIdentity {
+            driver_version: test_identity().driver_version.wrapping_add(1),
+            ..test_identity()
+        };
+        let (g, c_out) = load_maps(&path, other);
+        assert!(g.is_empty());
+        assert!(c_out.is_empty());
+    }
+
+    #[test]
+    fn load_maps_legacy_v1_still_loads() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("pso.bin");
+        let mut data = Vec::new();
+        data.extend_from_slice(FILE_MAGIC);
+        data.extend_from_slice(&FILE_VERSION_LEGACY.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&7u64.to_le_bytes());
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&[1, 2, 3]);
+        data.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(&path, data).unwrap();
+        let (g, c) = load_maps(&path, test_identity());
+        assert_eq!(g.get(&7), Some(&vec![1, 2, 3]));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn driver_stamp_rejection_drops_whole_generation() {
+        let mut cache = PsoCache::new(HashMap::new(), HashMap::new(), 1, 0x10de, 0x2803);
+        let old = vec![0u8; DRIVER_STAMP_PREFIX];
+        let mut kept = vec![1u8; DRIVER_STAMP_PREFIX];
+        kept.extend_from_slice(&[9]);
+        cache.graphics_blobs.insert(1, old.clone());
+        cache.compute_blobs.insert(2, old.clone());
+        cache.compute_blobs.insert(3, kept.clone());
+        let dropped = drop_matching_driver_stamp(&mut cache, &old);
+        assert_eq!(dropped, 2);
+        assert!(cache.graphics_blobs.is_empty());
+        assert_eq!(cache.compute_blobs.get(&3), Some(&kept));
+        assert!(cache.dirty);
+    }
+
+    #[test]
+    fn live_driver_stamp_drops_foreign_entries_once() {
+        let mut cache = PsoCache::new(HashMap::new(), HashMap::new(), 1, 0x10de, 0x2803);
+        let mut old = vec![0u8; DRIVER_STAMP_PREFIX];
+        old[0] = 2;
+        let live = vec![7u8; DRIVER_STAMP_PREFIX + 4];
+        cache.compute_blobs.insert(1, old);
+        cache.compute_blobs.insert(2, live.clone());
+        retain_live_driver_stamp(&mut cache, &live);
+        assert_eq!(cache.compute_blobs.len(), 1);
+        retain_live_driver_stamp(&mut cache, &live);
+        assert!(cache.driver_stamp_aligned);
+        assert_eq!(cache.compute_blobs.len(), 1);
     }
 
     #[test]
     fn load_maps_missing_file_returns_empty() {
         let td = TempDir::new().unwrap();
         let path = td.path().join("never_written.bin");
-        let (g, c) = load_maps(&path);
+        let (g, c) = load_maps(&path, test_identity());
         assert!(g.is_empty());
         assert!(c.is_empty());
     }
@@ -408,7 +595,7 @@ mod tests {
         let mut data = vec![b'X'; 8];
         data.extend_from_slice(&FILE_VERSION.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes());
-        assert!(parse_file(&data).is_err());
+        assert!(parse_file(&data, None).is_err());
     }
 
     #[test]
@@ -417,7 +604,8 @@ mod tests {
         data.extend_from_slice(FILE_MAGIC);
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes());
-        assert!(parse_file(&data).is_err());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_file(&data, None).is_err());
     }
 
     #[test]
@@ -426,6 +614,6 @@ mod tests {
         data.extend_from_slice(FILE_MAGIC);
         data.extend_from_slice(&FILE_VERSION.to_le_bytes());
         data.extend_from_slice(&0u64.to_le_bytes());
-        assert!(parse_file(&data).is_err());
+        assert!(parse_file(&data, None).is_err());
     }
 }

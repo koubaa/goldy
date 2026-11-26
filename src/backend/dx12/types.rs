@@ -1102,14 +1102,30 @@ pub(crate) struct PsoCache {
     pub compute_blobs: HashMap<u64, Vec<u8>>,
     /// `true` if either blob map changed since loading from the disk file.
     pub dirty: bool,
+    /// DXGI UMD version (`IDXGIAdapter::CheckInterfaceSupport`) for this device.
+    pub driver_version: u64,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    /// Set once a live blob's driver stamp has been applied to both maps.
+    pub driver_stamp_aligned: bool,
 }
 
 impl PsoCache {
-    pub(crate) fn new(graphics_blobs: HashMap<u64, Vec<u8>>, compute_blobs: HashMap<u64, Vec<u8>>) -> Self {
+    pub(crate) fn new(
+        graphics_blobs: HashMap<u64, Vec<u8>>,
+        compute_blobs: HashMap<u64, Vec<u8>>,
+        driver_version: u64,
+        vendor_id: u32,
+        device_id: u32,
+    ) -> Self {
         Self {
             graphics_blobs,
             compute_blobs,
             dirty: false,
+            driver_version,
+            vendor_id,
+            device_id,
+            driver_stamp_aligned: false,
         }
     }
 }
