@@ -667,3 +667,78 @@ fn tanh_and_sigmoid_lower_to_stable_helpers() {
     assert!(got[1] > 0.4 && got[1] < 0.5, "{}", got[1]);
     assert_eq!(got[3], 1.0, "tanh(30) saturates");
 }
+
+#[test]
+fn a_short_gemv_feeds_the_next_with_both_lane_orders() {
+    let (m, r, k) = (8u32, 4u32, 40u32);
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "y"], [0, 1, 2], r, k)).unwrap();
+    graph.push(gemv(["B", "y", "z"], [3, 2, 4], m, r)).unwrap();
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert!(matches!(lowered.schedule, Schedule::Lanes { lanes: 32, .. }));
+    let slang = source(&lowered);
+    assert!(slang.contains("groupshared"), "{slang}");
+    assert!(slang.matches("GroupMemoryBarrierWithGroupSync").count() >= 2, "{slang}");
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, data(1, r * k)),
+            (1, data(2, k)),
+            (2, vec![0.0; r as usize]),
+            (3, data(3, m * r)),
+            (4, vec![0.0; m as usize]),
+        ]),
+    );
+}
+
+#[test]
+fn two_chains_share_one_kernel() {
+    let (m, r, k) = (8u32, 4u32, 16u32);
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "p"], [0, 1, 2], r, k)).unwrap();
+    graph.push(gemv(["D", "x", "q"], [3, 1, 4], r, k)).unwrap();
+    graph.push(gemv(["B", "p", "u"], [5, 2, 6], m, r)).unwrap();
+    graph.push(gemv(["C", "q", "v"], [7, 4, 8], m, r)).unwrap();
+    graph
+        .push(map(&[("u", 6), ("v", 8)], ("z", 9), m, Term::arg(0) + Term::arg(1)))
+        .unwrap();
+    let lowered = lower(graph.region(), &[]).unwrap();
+    let slang = source(&lowered);
+    assert!(slang.matches("groupshared float").count() >= 2, "{slang}");
+    assert_sequential(
+        &graph,
+        &env(&[
+            (0, data(1, r * k)),
+            (1, data(2, k)),
+            (2, vec![0.0; r as usize]),
+            (3, data(3, r * k)),
+            (4, vec![0.0; r as usize]),
+            (5, data(4, m * r)),
+            (6, vec![0.0; m as usize]),
+            (7, data(5, m * r)),
+            (8, vec![0.0; m as usize]),
+            (9, vec![0.0; m as usize]),
+        ]),
+    );
+}
+
+#[test]
+fn a_chain_of_256_lowers_and_257_does_not() {
+    let mut ok = Graph::new();
+    ok.push(gemv(["A", "x", "y"], [0, 1, 2], 256, 4)).unwrap();
+    ok.push(gemv(["B", "y", "z"], [3, 2, 4], 4, 256)).unwrap();
+    assert!(lower(ok.region(), &[]).is_ok());
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "y"], [0, 1, 2], 257, 4)).unwrap();
+    graph.push(gemv(["B", "y", "z"], [3, 2, 4], 4, 257)).unwrap();
+    assert!(lower(graph.region(), &[]).is_err());
+}
+
+#[test]
+fn a_long_vector_between_gemvs_is_not_one_kernel() {
+    let (m, r, k) = (4u32, 257u32, 4u32);
+    let mut graph = Graph::new();
+    graph.push(gemv(["A", "x", "y"], [0, 1, 2], r, k)).unwrap();
+    graph.push(gemv(["B", "y", "z"], [3, 2, 4], m, r)).unwrap();
+    assert!(lower(graph.region(), &[]).is_err());
+}

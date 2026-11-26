@@ -94,6 +94,11 @@ pub enum ContractionPrecision {
 pub const WORKGROUP_THREADS: u32 = 256;
 /// Threads per workgroup of a [`Schedule::Lanes`] that [`lower`] chooses.
 pub const LANE_WORKGROUP_THREADS: u32 = 128;
+/// Longest vector a lane-ordered product may materialize for the product that
+/// consumes it. Longer chains stay separate dispatches.
+/// Scratch bound for a chained vector. Profitability ends well below this; the
+/// cost model is what declines a chain.
+const CHAIN_VECTOR_MAX: u32 = 256;
 
 /// Where the runtime value of an index parameter comes from: one integer element of
 /// a parcel, read once per thread.
@@ -103,6 +108,9 @@ pub struct IndexSource {
     pub element: u32,
     /// [`ElementType::I32`] or [`ElementType::U32`].
     pub element_type: ElementType,
+    /// When the loaded value is outside the parameter's declared range, stores that
+    /// depend on it write zero instead of the value computed from the clamped index.
+    pub zero_if_outside: bool,
 }
 
 /// A region lowered to one kernel.
@@ -662,6 +670,8 @@ impl Prepared {
             loads: None,
             depth: 0,
             output: String::new(),
+            lane_guard: true,
+            chains: Vec::new(),
         };
         self.enter(&mut emit, 0);
         emit
@@ -676,6 +686,7 @@ impl Prepared {
         }
         emit.cache.clear();
         emit.hoisted.clear();
+        emit.chains.clear();
         emit.output = self.name(self.bodies[part.outputs[0]].0).to_string();
     }
 
@@ -718,6 +729,12 @@ impl Prepared {
     pub(super) fn estimate(&self, k: usize, lanes: Option<u32>, hoisted: &[Term], computed: &[&Term]) -> Estimate {
         let part = &self.parts[k];
         let mut known: Vec<&Term> = computed.to_vec();
+        let mut chained = Vec::new();
+        for &n in &part.outputs {
+            collect_chains(&self.bodies[n].1, None, &mut chained);
+        }
+        // The chained product is computed once per workgroup, not inside every row.
+        known.extend(chained.iter().map(|slot| &slot.term));
         let (mut serial, mut loads, mut per_thread) = (0, 0, 0);
         for term in hoisted {
             serial += cost::serial(term, &known);
@@ -746,8 +763,31 @@ impl Prepared {
             }
             known.extend(pending);
         }
+        let per_group = match lanes {
+            Some(lanes) => (LANE_WORKGROUP_THREADS / lanes).max(1),
+            None => WORKGROUP_THREADS,
+        };
+        let mut barriers = 0u64;
+        if let Some(lanes) = lanes {
+            // `per_group` row-groups compute that many chain elements at once.
+            let wave = u64::from(per_group.max(1));
+            let tree = u64::from(lanes.max(2).ilog2());
+            for slot in &chained {
+                let chunks = u64::from(slot.extent).div_ceil(wave).max(1);
+                let per_thread = cost::serial(&slot.term, &[]).div_ceil(u64::from(lanes));
+                serial += chunks * per_thread;
+                loads += chunks * cost::loads(&slot.term, &[]).div_ceil(u64::from(lanes));
+                // Scratch write, the lane tree, and the store, once per chunk.
+                barriers += chunks * (2 + tree);
+            }
+        }
         let threads = part.elements() * u64::from(lanes.unwrap_or(1));
         let mut work = threads * per_thread;
+        let groups = part.elements().div_ceil(u64::from(per_group.max(1))).max(1);
+        for slot in &chained {
+            // Every workgroup recomputes the vector.
+            work += groups * u64::from(slot.extent) * cost::ops(&slot.term, &[]);
+        }
         for &n in &part.outputs {
             let body = &self.bodies[n].1;
             serial += cost::serial(body, &known) + 1;
@@ -759,19 +799,46 @@ impl Prepared {
             serial,
             loads,
             work,
+            barriers,
             ..Estimate::default()
         }
     }
 
-    /// `q{p}`: the value of each index parameter, read from its source.
-    pub(super) fn index_params(&self, sources: &[IndexSource], body: &mut Vec<Stmt>) {
+    /// `q{p}`: the value of each index parameter, read from its source and clamped
+    /// into the range the region declared. `in{p}` is whether the raw value was
+    /// already inside that range.
+    pub(super) fn index_params(&self, sources: &[IndexSource], body: &mut Vec<Stmt>) -> Result<(), LowerError> {
         for (p, source) in sources.iter().enumerate() {
             let at = Expr::Index {
                 base: Box::new(var(&parcel_name(source.parcel))),
                 index: Box::new(Expr::LitU32(source.element)),
             };
-            body.push(let_int(&format!("q{p}"), cast(at, "int")));
+            let q = format!("q{p}");
+            let inn = format!("in{p}");
+            body.push(let_int(&q, cast(at, "int")));
+            let range = self.region.param_range(IndexParam(p as u32));
+            let lo = int(range.start)?;
+            let hi = int(range.end.saturating_sub(1))?;
+            body.push(Stmt::Let {
+                name: inn.clone(),
+                mutable: false,
+                ty: Some("bool".into()),
+                init: bin(
+                    BinOp::And,
+                    bin(BinOp::Ge, var(&q), lo.clone()),
+                    bin(BinOp::Le, var(&q), hi),
+                ),
+            });
+            body.push(Stmt::If {
+                cond: Expr::Unary {
+                    op: IrUnaryOp::Not,
+                    expr: Box::new(var(&inn)),
+                },
+                then_body: vec![assign(&q, lo)],
+                else_body: None,
+            });
         }
+        Ok(())
     }
 
     fn lower(&self, schedule: Schedule, sources: &[IndexSource]) -> Result<Lowered, LowerError> {
@@ -824,6 +891,8 @@ impl Prepared {
             };
             let elements = part.elements();
             let per_group = lanes.map_or(threads, |(_, elements, _)| elements);
+            // A chained product is recomputed in every workgroup, so the consumer
+            // keeps its normal grid.
             let part_groups = elements.div_ceil(u64::from(per_group.max(1)));
             if elements > i32::MAX as u64 {
                 return Err(LowerError::Grid { elements });
@@ -845,7 +914,7 @@ impl Prepared {
                         var("local"),
                     ),
                 )),
-                Some((lanes, elements, _)) => {
+                Some((lanes, row_elems, _)) => {
                     if local.is_none() {
                         work.push(let_int("local", cast(field(BuiltinFn::LocalId), "int")));
                     }
@@ -854,12 +923,13 @@ impl Prepared {
                         "t",
                         bin(
                             BinOp::Add,
-                            bin(BinOp::Mul, group, int(elements as i64)?),
+                            bin(BinOp::Mul, group, int(row_elems as i64)?),
                             bin(BinOp::Div, var("local"), int(lanes as i64)?),
                         ),
                     ));
                 }
             }
+            self.index_params(sources, &mut work)?;
             work.push(Stmt::Let {
                 name: "valid".into(),
                 mutable: false,
@@ -877,12 +947,20 @@ impl Prepared {
                     rest = var(&format!("rest{a}"));
                 }
             }
-            self.index_params(sources, &mut work);
             let hoisted = self.hoist(k, &mut emit, &mut work)?;
 
-            if let Some((lanes, elements, exchange)) = lanes {
-                // The partition keeps an output spanning part of the domain to lane
-                // reductions an output spanning all of it computes.
+            if let Some((lanes, row_elems, exchange)) = lanes {
+                if !self.chain_slots(k).is_empty() {
+                    let mut chains = self.chain_slots(k);
+                    for slot in &mut chains {
+                        slot.slot = emit.fresh("y");
+                    }
+                    let mut chain_decls = Vec::new();
+                    workgroup_bytes +=
+                        emit.precompute_chains(&chains, lanes, row_elems, &mut chain_decls, &mut work)?;
+                    decls.extend(chain_decls);
+                    emit.chains = chains;
+                }
                 let pending = self.top_reductions(k, true, is_lane_ordered);
                 let mut reduced = Vec::new();
                 let mut reductions = Vec::new();
@@ -892,14 +970,12 @@ impl Prepared {
                 }
                 let mut part_decls = Vec::new();
                 workgroup_bytes +=
-                    emit.exchange(&reduced, lanes, elements, exchange, &mut part_decls, &mut reductions)?;
-                match single {
-                    true => work.extend(part_decls),
-                    false => decls.extend(part_decls),
-                }
+                    emit.exchange(&reduced, lanes, row_elems, exchange, &mut part_decls, &mut reductions)?;
+                let decl_dest = if !single { &mut decls } else { &mut work };
+                decl_dest.extend(part_decls);
                 work.extend(reductions);
             }
-            let values = self.outputs(k, &mut emit)?;
+            let values = self.outputs(k, &mut emit, sources)?;
             let cond = match lanes {
                 Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
                 None => var("valid"),
@@ -959,6 +1035,15 @@ impl Prepared {
         })
     }
 
+    /// Lane products nested in this part's outputs whose vector fits in one workgroup.
+    fn chain_slots(&self, k: usize) -> Vec<ChainSlot> {
+        let mut found = Vec::new();
+        for &n in &self.parts[k].outputs {
+            collect_chains(&self.bodies[n].1, None, &mut found);
+        }
+        found
+    }
+
     /// The distinct reductions `keep` selects outside any select and any other
     /// reduction of part `k`'s outputs, in evaluation order; with `whole`, of only the
     /// outputs that span the part's whole domain.
@@ -980,7 +1065,7 @@ impl Prepared {
     /// Computes every output of part `k` at element `c{n}` into a local and stores them
     /// all, the stores after every computation. Sequential sibling reductions of the
     /// outputs that span the whole domain share loops.
-    pub(super) fn outputs(&self, k: usize, emit: &mut Emit) -> Result<Vec<Stmt>, LowerError> {
+    pub(super) fn outputs(&self, k: usize, emit: &mut Emit, sources: &[IndexSource]) -> Result<Vec<Stmt>, LowerError> {
         let mut values = Vec::new();
         let sequential = self.top_reductions(k, true, |r| {
             matches!(
@@ -1016,6 +1101,7 @@ impl Prepared {
             else {
                 let x = emit.term(term, &mut values)?;
                 values.push(let_float(&name, x));
+                stores.extend(zero_outside(sources, &name));
                 stores.push(store);
                 continue;
             };
@@ -1032,9 +1118,11 @@ impl Prepared {
                 then_body: guarded,
                 else_body: None,
             });
+            let mut guarded_store = zero_outside(sources, &name);
+            guarded_store.push(store);
             stores.push(Stmt::If {
                 cond: within,
-                then_body: vec![store],
+                then_body: guarded_store,
                 else_body: None,
             });
         }
@@ -1048,6 +1136,41 @@ pub(super) struct Resources {
     pub(super) params: Vec<KernelParam>,
     pub(super) parcels: Vec<(ParcelId, bool)>,
     pub(super) scalars: Vec<ScalarParam>,
+}
+
+/// Nested lane-ordered products whose only free index is the enclosing reduction's.
+/// `CHAIN_VECTOR_MAX` only bounds scratch; the cost model decides whether the chain
+/// is worth fusing. Inner products come first.
+fn collect_chains(term: &Term, enclosing: Option<(IndexVar, u32)>, out: &mut Vec<ChainSlot>) {
+    match term {
+        Term::Reduce {
+            index,
+            extent,
+            order,
+            body,
+            ..
+        } => {
+            collect_chains(body, Some((*index, *extent)), out);
+            if let (Some((enc_index, enc_extent)), ReduceOrder::Lanes { .. }) = (enclosing, *order) {
+                let free = term.free_indices();
+                let fits = enc_extent > 0 && enc_extent <= CHAIN_VECTOR_MAX;
+                if fits
+                    && free.len() == 1
+                    && free.contains(&enc_index)
+                    && !out.iter().any(|slot| slot.term.alpha_eq(term))
+                {
+                    out.push(ChainSlot {
+                        term: term.clone(),
+                        slot: String::new(),
+                        index: enc_index,
+                        extent: enc_extent,
+                    });
+                }
+            }
+        }
+        Term::Select { .. } => {}
+        other => other.for_each_child(&mut |child| collect_chains(child, enclosing, out)),
+    }
 }
 
 /// `reductions` grouped by extent and accumulator count, in first-appearance order.
@@ -1098,6 +1221,19 @@ pub(super) struct Emit<'a> {
     pub(super) depth: u32,
     /// The output being lowered, for errors.
     output: String,
+    /// When false, a lane reduction runs on every thread. The consumer's `valid`
+    /// flag does not apply to a vector computed once per workgroup.
+    lane_guard: bool,
+    /// Nested lane reductions materialized in workgroup memory for this part.
+    chains: Vec<ChainSlot>,
+}
+
+/// A lane-ordered product computed once per workgroup into `slot`, then read at `index`.
+struct ChainSlot {
+    term: Term,
+    slot: String,
+    index: IndexVar,
+    extent: u32,
 }
 
 impl Emit<'_> {
@@ -1129,6 +1265,144 @@ impl Emit<'_> {
             .iter()
             .find(|(t, _)| t.alpha_eq(term))
             .map(|(_, n)| n.clone())
+    }
+
+    fn forget(&mut self, term: &Term) {
+        self.cache.retain(|(t, _)| !t.alpha_eq(term));
+    }
+
+    fn chain_slot(&self, term: &Term) -> Option<(String, IndexVar)> {
+        self.chains
+            .iter()
+            .find(|slot| slot.term.alpha_eq(term))
+            .map(|slot| (slot.slot.clone(), slot.index))
+    }
+
+    /// Computes each nested lane product in `slots` into workgroup memory, once per
+    /// workgroup, in the same 32-lane association the product names. Every thread
+    /// participates. Returns the bytes of workgroup memory.
+    fn precompute_chains(
+        &mut self,
+        slots: &[ChainSlot],
+        lanes: u32,
+        elements: u32,
+        decls: &mut Vec<Stmt>,
+        out: &mut Vec<Stmt>,
+    ) -> Result<u32, LowerError> {
+        if slots.is_empty() {
+            return Ok(0);
+        }
+        let scratch = self.fresh("r");
+        decls.push(Stmt::WorkgroupArray {
+            name: scratch.clone(),
+            elem: "float".into(),
+            len: lanes * elements,
+        });
+        let mut bytes = lanes * elements * 4;
+        let slot_at = |name: &str, at: Expr| Expr::Index {
+            base: Box::new(var(name)),
+            index: Box::new(at),
+        };
+        for slot in slots {
+            let Term::Reduce { op, .. } = &slot.term else {
+                continue;
+            };
+            let op = *op;
+            decls.push(Stmt::WorkgroupArray {
+                name: slot.slot.clone(),
+                elem: "float".into(),
+                len: slot.extent,
+            });
+            bytes += slot.extent * 4;
+            // Row group `g` computes element `base + g`, so the four groups in a
+            // 128-thread workgroup do not repeat the same product.
+            let base = self.fresh("i");
+            let elem = self.fresh("e");
+            out.push(let_int(&base, int(0)?));
+            out.push(let_int(
+                &elem,
+                bin(
+                    BinOp::Add,
+                    var(&base),
+                    bin(BinOp::Div, var("local"), int(i64::from(lanes))?),
+                ),
+            ));
+            let old = self.bind(slot.index, elem.clone(), slot.extent);
+            self.lane_guard = false;
+            let mut body = Vec::new();
+            body.push(assign(
+                &elem,
+                bin(
+                    BinOp::Add,
+                    var(&base),
+                    bin(BinOp::Div, var("local"), int(i64::from(lanes))?),
+                ),
+            ));
+            let active = bin(BinOp::Lt, var(&elem), int(i64::from(slot.extent))?);
+            // An inactive group still runs the reduction, on element 0, so the
+            // barriers stay uniform and the load stays in range.
+            body.push(Stmt::If {
+                cond: Expr::Unary {
+                    op: IrUnaryOp::Not,
+                    expr: Box::new(active.clone()),
+                },
+                then_body: vec![assign(&elem, int(0)?)],
+                else_body: None,
+            });
+            let group = [&slot.term];
+            let partials = self.lanes(&group, lanes, &mut body)?;
+            self.lane_guard = true;
+            let partial = partials.into_iter().next().expect("one reduction");
+            body.push(Stmt::Assign {
+                target: slot_at(&scratch, var("local")),
+                value: partial,
+            });
+            body.push(barrier());
+            let s = self.fresh("s");
+            body.push(let_int(&s, int(i64::from(lanes / 2))?));
+            let combined = Stmt::Assign {
+                target: slot_at(&scratch, var("local")),
+                value: combine(
+                    op,
+                    slot_at(&scratch, var("local")),
+                    slot_at(&scratch, bin(BinOp::Add, var("local"), var(&s))),
+                ),
+            };
+            body.push(Stmt::While {
+                cond: bin(BinOp::Gt, var(&s), int(0)?),
+                body: vec![
+                    Stmt::If {
+                        cond: bin(BinOp::Lt, var("lane"), var(&s)),
+                        then_body: vec![combined],
+                        else_body: None,
+                    },
+                    barrier(),
+                    assign(&s, bin(BinOp::Div, var(&s), int(2)?)),
+                ],
+            });
+            let result = self.fresh("v");
+            body.push(let_float(
+                &result,
+                slot_at(&scratch, bin(BinOp::Sub, var("local"), var("lane"))),
+            ));
+            body.push(Stmt::If {
+                cond: bin(BinOp::And, active, bin(BinOp::Eq, var("lane"), int(0)?)),
+                then_body: vec![Stmt::Assign {
+                    target: slot_at(&slot.slot, cast(var(&elem), "uint")),
+                    value: var(&result),
+                }],
+                else_body: None,
+            });
+            body.push(barrier());
+            body.push(assign(&base, bin(BinOp::Add, var(&base), int(i64::from(elements))?)));
+            self.unbind(slot.index, old);
+            self.forget(&slot.term);
+            out.push(Stmt::While {
+                cond: bin(BinOp::Lt, var(&base), int(i64::from(slot.extent))?),
+                body,
+            });
+        }
+        Ok(bytes)
     }
 
     /// `a` as an `int` expression, checked to stay in the 32-bit range.
@@ -1297,6 +1571,15 @@ impl Emit<'_> {
                 order,
                 body,
             } => {
+                if let Some((slot, axis)) = self.chain_slot(t) {
+                    let name = self.names.get(&axis).cloned().ok_or_else(|| LowerError::Order {
+                        output: self.output.clone(),
+                    })?;
+                    return Ok(Expr::Index {
+                        base: Box::new(var(&slot)),
+                        index: Box::new(cast(var(&name), "uint")),
+                    });
+                }
                 if let Some(name) = self.cached(t).filter(|_| self.depth == 0) {
                     return Ok(var(&name));
                 }
@@ -1388,11 +1671,15 @@ impl Emit<'_> {
                 else_body: None,
             });
         }
-        out.push(Stmt::If {
-            cond: var("valid"),
-            then_body: strided,
-            else_body: None,
-        });
+        if self.lane_guard {
+            out.push(Stmt::If {
+                cond: var("valid"),
+                then_body: strided,
+                else_body: None,
+            });
+        } else {
+            out.extend(strided);
+        }
         Ok(folded
             .iter()
             .zip(&accs)
@@ -1607,6 +1894,23 @@ impl Term {
             _ => self.for_each_child(&mut |c| c.walk_reads(ranges, f)),
         }
     }
+}
+
+/// Stores that depend on an out-of-range index parameter write zero.
+fn zero_outside(sources: &[IndexSource], name: &str) -> Vec<Stmt> {
+    sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.zero_if_outside)
+        .map(|(p, _)| Stmt::If {
+            cond: Expr::Unary {
+                op: IrUnaryOp::Not,
+                expr: Box::new(var(&format!("in{p}"))),
+            },
+            then_body: vec![assign(name, float(0.0))],
+            else_body: None,
+        })
+        .collect()
 }
 
 pub(super) fn var(name: &str) -> Expr {

@@ -14,9 +14,10 @@ use super::super::{
     AccelerationStructureHandle, BufferHandle, ComputePipelineHandle, DeviceHandle, PipelineHandle,
     RayTracingPipelineHandle, RenderTargetHandle, SamplerHandle, ShaderHandle, SurfaceHandle, TextureHandle,
 };
-use crate::timeline::TimelineValue;
+use crate::timeline::{SmallContextMap, TimelineValue};
 use crate::types::{DepthFormat, TextureFormat};
 use ash::vk;
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -65,7 +66,7 @@ pub(crate) struct DescriptorRegistry {
     pub resource_registry: ResourceRegistry,
     /// Maps bindless slot → per-context last-submitted seq that referenced it.
     /// Updated at every submit. Entry removed when the slot is queued for reclamation.
-    pub slot_last_seen: HashMap<SlotKey, HashMap<super::ContextHandle, u64>>,
+    pub slot_last_seen: FxHashMap<SlotKey, SmallContextMap<u64>>,
     /// Slots waiting for referencing contexts to retire before returning to free lists.
     pub pending_slot_reclamations: Vec<PendingSlotReclamation>,
     /// Retained command buffers still baking each bindless slot (incremental refcount).
@@ -76,7 +77,7 @@ impl DescriptorRegistry {
     pub(crate) fn new() -> Self {
         Self {
             resource_registry: ResourceRegistry::new(),
-            slot_last_seen: HashMap::new(),
+            slot_last_seen: FxHashMap::default(),
             pending_slot_reclamations: Vec::new(),
             retained_users: HashMap::new(),
         }
@@ -121,12 +122,7 @@ impl DescriptorRegistry {
         slots: impl IntoIterator<Item = SlotKey>,
     ) {
         for slot in slots {
-            self.slot_last_seen
-                .entry(slot)
-                .or_default()
-                .entry(ctx)
-                .and_modify(|v| *v = (*v).max(seq))
-                .or_insert(seq);
+            self.slot_last_seen.entry(slot).or_default().mark_max(ctx, seq);
         }
     }
 
@@ -135,7 +131,7 @@ impl DescriptorRegistry {
         let requirements: Vec<_> = self
             .slot_last_seen
             .remove(&slot)
-            .map(|m| m.into_iter().collect())
+            .map(|m| m.iter().collect())
             .unwrap_or_default();
         // Always defer: empty requirements may still be referenced by retained command buffers.
         self.pending_slot_reclamations
@@ -256,7 +252,7 @@ impl DescriptorRegistry {
         for &slot in slots {
             if let Some(map) = self.slot_last_seen.get(&slot) {
                 for (ctx, seq) in map.iter() {
-                    merged.entry(*ctx).and_modify(|v| *v = (*v).max(*seq)).or_insert(*seq);
+                    merged.entry(ctx).and_modify(|v| *v = (*v).max(seq)).or_insert(seq);
                 }
             }
         }

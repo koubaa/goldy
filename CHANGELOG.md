@@ -127,6 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Less host work per retained resubmit** — cross-submit planning reads each parcel's
+  sync state under its lock instead of cloning it into a ledger snapshot (twice per key),
+  the Vulkan bindless slot table uses Fx hashing with inline per-context entries (as DX12
+  already did), and the resubmit path finds its retained command buffer by key instead of
+  scanning the context's set. The plans are unchanged. With Inkling Mini's schemes
+  replaying clean on lavapipe, its submitting-thread CPU drops from about 3.4 to 2.5 ms
+  per token.
+
 - **Vulkan device creation** requests surface extensions, `VK_KHR_swapchain`,
   `fragmentStoresAndAtomics`, `shaderDrawParameters`, `shaderFloat16`,
   `shaderInt8`, `shaderInt16`, and `shaderInt64` only when the loader or device
@@ -224,6 +232,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of the fused identity.
 
 ### Fixed
+
+- **`GOLDY_GPU_PROFILE` with batched dispatches** — Vulkan advanced the timestamp index
+  once per dispatch inside a `DispatchBatch` while the query pool holds one pair per batch,
+  so every later dispatch wrote past the pool (lavapipe segfaults on its queue thread).
+  DX12 wrote no timestamps for a batch and shifted every later label. A batch now takes
+  one query pair on both. The `chrome` export appends each event instead of rewriting the
+  whole file per event.
 
 - **Intel Mac Metal heaps** — creating a device no longer aborts with
   `Shared storage mode disallowed`. Shared heaps and Shared textures require

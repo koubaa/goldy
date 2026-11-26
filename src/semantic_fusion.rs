@@ -19,15 +19,15 @@
 use crate::backend::BufferHandle;
 use crate::fusion_plan::{KernelSite, SiteArg};
 use crate::kernel::LIMITS;
-use crate::ops::matmul::{MatMulFallback, MatMulOperand};
+use crate::ops::matmul::{MatMulDType, MatMulFallback, MatMulOperand};
 use crate::ops::matmul_kernel::GEMV_ORDER;
 use crate::ops::MatMulDesc;
 use crate::parcel::Parcel;
 use crate::task_graph::{DispatchDim, NodeKind, ResourceId, TaskNode};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
-    self, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand, Params,
-    ParcelId, ReduceOrder, Storage, Target, Term, UnaryOp,
+    self, Affine, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand,
+    Params, ParcelId, ReduceOrder, Storage, Sym, Target, Term, UnaryOp,
 };
 use goldy_shader_ir::{
     BinOp, BuiltinFn, ElementType, Expr, FusionRejection, KernelDef, KernelId, ParamCategory, ScalarType, Stmt,
@@ -101,7 +101,6 @@ impl SiteBuilder {
     }
 
     /// An index parameter in `range`, read from `source`.
-    #[cfg(feature = "tensor")]
     pub(crate) fn index_param(
         &mut self,
         name: &str,
@@ -142,7 +141,7 @@ pub(crate) fn library_matmul(
     if fallback != MatMulFallback::Gemm || !packed {
         return None;
     }
-    let site = matmul(desc, fallback, operands)?;
+    let site = matmul(desc, fallback, operands, None)?;
     Some(SemanticSite { exact: false, ..site })
 }
 
@@ -151,6 +150,7 @@ pub(crate) fn matmul(
     desc: &MatMulDesc,
     fallback: MatMulFallback,
     [(a, pa), (b, pb), (c, pc)]: [(&MatMulOperand, SiteParcel); 3],
+    ids: Option<SiteParcel>,
 ) -> Option<SemanticSite> {
     if !desc.requires_stdlib_identity_epilogue() {
         return None;
@@ -175,11 +175,53 @@ pub(crate) fn matmul(
                 order: GEMV_ORDER,
             }
         }
-        // C[i, j] = sum{s}(A[i, s] * B[s, j]), labels i, j and s.
+        // y[i] = sum{s}(A[id * stride + offset + i, s] * x[s]). `id` is one u32.
+        // An id past `experts` stores zeros, the same as `gemv_f32_indexed`.
+        MatMulFallback::GemvIndexed if desc.dtype == MatMulDType::F32 && desc.n == 1 => {
+            let index = desc.index?;
+            if index.experts == 0 {
+                return None;
+            }
+            let ids = ids?;
+            let id_parcel = s.parcel(ids);
+            let id = s.index_param(
+                "id",
+                0..i64::from(index.experts),
+                IndexSource {
+                    parcel: id_parcel,
+                    element: index.slot,
+                    element_type: ElementType::U32,
+                    // The stdlib kernel writes zeros when `id >= experts`.
+                    zero_if_outside: true,
+                },
+            );
+            if a.offset_elements > u64::from(u32::MAX) || b.offset_elements != 0 || c.offset_elements != 0 {
+                // The indexed kernel carries A's element offset and reads x and y
+                // from element 0. A nonzero x or y offset would not match it.
+                return None;
+            }
+            let row = i64::from(a.leading_dim);
+            let base = Affine::sym(Sym::Param(id)) * i64::from(index.stride_elems)
+                + Affine::constant(i64::try_from(a.offset_elements).ok()?);
+            let ld = |o: &MatMulOperand| i64::from(o.leading_dim);
+            Contraction {
+                extents: vec![m, k],
+                lhs: Operand::new("A", &[m, k], Storage::strided(pa, base, &[row, 1])),
+                rhs: operand("x", &[k], pb, b, &[ld(b)])?,
+                out: operand("y", &[m], pc, c, &[ld(c)])?,
+                labels: [vec![0, 1], vec![1], vec![0]],
+                order: GEMV_ORDER,
+            }
+        }
+        // BF16 and block-scaled factors are not f32 loads. A contraction site would
+        // drop the decode, so those kernels stay the stdlib GEMV until the algebra
+        // can name the bitcast.
         MatMulFallback::GemvBf16
         | MatMulFallback::GemmBf16
-        | MatMulFallback::GemvIndexed
-        | MatMulFallback::GemvBlock => return None,
+        | MatMulFallback::GemvBlock
+        | MatMulFallback::GemvIndexed => {
+            return None;
+        }
         MatMulFallback::Gemm => {
             let (m64, n64, k64) = (i64::from(m), i64::from(n), i64::from(k));
             let a_strides = if desc.transpose_a { [1, m64] } else { [k64, 1] };

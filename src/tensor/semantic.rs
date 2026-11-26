@@ -172,6 +172,7 @@ pub(crate) fn scatter_slice(
         element: u32::try_from(index.storage_offset()).ok()?,
         // The kernel binds every index parcel as i32.
         element_type: ElementType::I32,
+        zero_if_outside: false,
     };
     let position = s.index_param("position", 0..i64::from(target[axis]), source);
     let input = operand(&mut s, "x", src)?;
