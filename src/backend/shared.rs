@@ -31,7 +31,16 @@ use super::ShaderHandle;
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Maximum number of bindless resource indices in region A of [`PushLayout`].
+///
+/// Region A is unused: generated shaders resolve resources through the frame
+/// table. It stays 16 so user words and launch words keep their offsets and
+/// [`crate::KERNEL_ABI_VERSION`] stays 4. Removing it would free those 32 bytes
+/// for launch words and would be an ABI change.
 pub const MAX_BINDLESS_SLOTS: usize = 16;
+
+/// Resources one dispatch may bind. Independent of the push-layout size: the
+/// frame table holds the indices, not region A.
+pub const MAX_DISPATCH_RESOURCES: usize = 24;
 /// Maximum number of `u32` user parameters in region B of [`PushLayout`].
 pub const MAX_USER_SLOTS: usize = 8;
 /// Total size of [`PushLayout`] in bytes (must match the Slang `PushLayout` struct).

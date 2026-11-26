@@ -426,6 +426,8 @@ pub(crate) struct FusionPlanner {
     events: FusionEvents,
     precision: ContractionPrecision,
     cost: FusionCostModel,
+    /// Resources one fused kernel may bind on this device.
+    resource_limit: usize,
 }
 
 impl Drop for FusionPlanner {
@@ -437,7 +439,7 @@ impl Drop for FusionPlanner {
 }
 
 impl FusionPlanner {
-    pub(crate) fn new(compiles: Arc<Mutex<Compiles>>) -> Self {
+    pub(crate) fn new(compiles: Arc<Mutex<Compiles>>, resource_limit: usize) -> Self {
         Self {
             phase: Phase::Settling,
             regions: Vec::new(),
@@ -450,6 +452,18 @@ impl FusionPlanner {
             events: FusionEvents::default(),
             precision: ContractionPrecision::Exact,
             cost: FusionCostModel::default(),
+            resource_limit,
+        }
+    }
+
+    pub(crate) fn resource_limit(&self) -> usize {
+        self.resource_limit
+    }
+
+    fn limits(&self) -> goldy_shader_ir::FusionLimits {
+        goldy_shader_ir::FusionLimits {
+            resources: self.resource_limit,
+            ..crate::kernel::LIMITS
         }
     }
 
@@ -666,7 +680,7 @@ impl FusionPlanner {
             while end < n && ir.nodes[end].group == ir.nodes[start].group {
                 let Some(next) = view(end) else { break };
                 stages.push(next);
-                match admit(&stages) {
+                match admit(&stages, &self.limits()) {
                     Ok(definition) => {
                         best = Some(definition);
                         end += 1;
@@ -724,11 +738,12 @@ impl FusionPlanner {
         // Each site as recorded, priced once.
         let mut alone: HashMap<usize, f64> = HashMap::new();
         let cost = self.cost;
+        let resource_limit = self.resource_limit;
         let mut alone_ns = |i: usize, s: &SemanticSite| {
             *alone.entry(i).or_insert_with(|| {
                 let estimate = s
                     .exact
-                    .then(|| synthesize(&[s], target, ContractionPrecision::Exact).ok())
+                    .then(|| synthesize(&[s], target, ContractionPrecision::Exact, resource_limit).ok())
                     .flatten()
                     .map(|p| p.lowered.estimate);
                 cost.site_ns(s, estimate.as_ref())
@@ -751,7 +766,7 @@ impl FusionPlanner {
                 let Some(next) = site(end) else { break };
                 run.push(next);
                 unfused_ns += alone_ns(end, next);
-                match synthesize(&run, target, self.precision) {
+                match synthesize(&run, target, self.precision, self.resource_limit) {
                     Ok(program) => {
                         end += 1;
                         if !recorded(start..end) {

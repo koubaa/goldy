@@ -942,6 +942,19 @@ impl Runtime {
         self.inner.adapter.device_type()
     }
 
+    /// Resources one fused kernel may bind: the dispatch cap, or fewer when the
+    /// device's shader-stage storage-buffer limit is smaller (WebGPU).
+    pub(crate) fn fusion_resource_limit(&self) -> usize {
+        use crate::backend::shared::MAX_DISPATCH_RESOURCES;
+        let cap = self
+            .inner
+            .backend
+            .lock()
+            .unwrap()
+            .max_shader_storage_buffers(self.inner.handle);
+        (cap as usize).min(MAX_DISPATCH_RESOURCES)
+    }
+
     /// Graphics backend used by this device (Vulkan, Dx12, Metal, ...).
     pub fn backend_type(&self) -> BackendType {
         self.inner.backend.lock().unwrap().backend_type()

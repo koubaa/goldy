@@ -586,6 +586,7 @@ pub(crate) fn synthesize(
     sites: &[&SemanticSite],
     target: &Target,
     precision: ContractionPrecision,
+    resource_limit: usize,
 ) -> Result<SemanticProgram, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
     let mut graph = Graph::default();
@@ -628,10 +629,10 @@ pub(crate) fn synthesize(
         stage: sites.len() - 1,
         reason: e.to_string(),
     })?;
-    if lowered.parcels.len() > LIMITS.resources {
+    if lowered.parcels.len() > resource_limit {
         return Err(FusionRejection::ResourceLimit {
             count: lowered.parcels.len(),
-            max: LIMITS.resources,
+            max: resource_limit,
         });
     }
     if lowered.scalars.len() > LIMITS.scalars {

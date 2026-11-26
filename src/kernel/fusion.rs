@@ -7,7 +7,7 @@
 
 use super::prepare::{access_kind_to_node, prepare_kernel_as};
 use super::{KernelBindable, KernelDef, KernelParam, PreparedKernel, RecordedDispatch, SchemeNodeStart};
-use crate::backend::shared::{MAX_BINDLESS_SLOTS, MAX_USER_SLOTS};
+use crate::backend::shared::{MAX_DISPATCH_RESOURCES, MAX_USER_SLOTS};
 use crate::error::GoldyError;
 use crate::runtime::Runtime;
 use crate::scheme::Scheme;
@@ -19,8 +19,22 @@ use goldy_shader_ir::{
     PORTABLE_WORKGROUP_BYTES,
 };
 
+fn device_limits(device: &Runtime) -> FusionLimits {
+    FusionLimits {
+        resources: device.fusion_resource_limit(),
+        ..LIMITS
+    }
+}
+
+fn scheme_limits(scheme: &Scheme) -> FusionLimits {
+    FusionLimits {
+        resources: scheme.fusion_resource_limit(),
+        ..LIMITS
+    }
+}
+
 pub(crate) const LIMITS: FusionLimits = FusionLimits {
-    resources: MAX_BINDLESS_SLOTS,
+    resources: MAX_DISPATCH_RESOURCES,
     scalars: MAX_USER_SLOTS,
     workgroup_bytes: PORTABLE_WORKGROUP_BYTES,
 };
@@ -269,7 +283,7 @@ impl FusedKernel {
 
     fn prepare_as(device: &Runtime, stages: &[Invocation<'_>], conservative: bool) -> Result<Self, FusionError> {
         let views: Vec<StageView<'_>> = stages.iter().map(Invocation::view).collect();
-        let mut definition = admit(&views).inspect_err(|reason| {
+        let mut definition = admit(&views, &device_limits(device)).inspect_err(|reason| {
             tracing::debug!(%reason, "kernel fusion rejected");
         })?;
         if conservative {
@@ -314,7 +328,7 @@ impl FusedKernel {
         stages: &[Invocation<'_>],
     ) -> Result<RecordedDispatch, GoldyError> {
         let views: Vec<StageView<'_>> = stages.iter().map(Invocation::view).collect();
-        let mut definition = admit(&views).map_err(FusionError::Rejected)?;
+        let mut definition = admit(&views, &scheme_limits(scheme)).map_err(FusionError::Rejected)?;
         if self.definition.forwarded.is_empty() {
             definition = definition.conservative();
         }
@@ -373,7 +387,7 @@ pub(crate) fn prepare_synthesized(
 }
 
 /// Compose `stages` into one fused definition if they may run as one dispatch.
-pub(crate) fn admit(stages: &[StageView<'_>]) -> Result<FusedDefinition, FusionRejection> {
+pub(crate) fn admit(stages: &[StageView<'_>], limits: &FusionLimits) -> Result<FusedDefinition, FusionRejection> {
     let first = stages.first().ok_or(FusionRejection::Empty)?;
     let mut definitions = Vec::with_capacity(stages.len());
     for (k, s) in stages.iter().enumerate() {
@@ -424,7 +438,7 @@ pub(crate) fn admit(stages: &[StageView<'_>]) -> Result<FusedDefinition, FusionR
         .zip(&args)
         .map(|(definition, args)| FusionStage { definition, args })
         .collect();
-    let fused = compose(&name, &fusion, &LIMITS)?;
+    let fused = compose(&name, &fusion, limits)?;
 
     if let Some(rank) = fused.dependence_rank {
         let threads: [u32; 3] = std::array::from_fn(|a| fused.workgroup_size[a].saturating_mul(first.groups[a]));

@@ -114,14 +114,16 @@ The transform (implemented in `slang/virtual_main.rs`) runs before Slang compila
 
 ### Push Constant Layout
 
-The generated entry point always declares a fixed signature regardless of how many parameters the user function has:
+The generated entry point always declares a fixed signature regardless of how many parameters the user function has. The whole block is 128 bytes:
 
 ```
-Words  0–7:  _bw0.._bw7   — 16 × u16 bindless indices packed 2 per word
+Words  0–7:  _bw0.._bw7   — 16 × u16 of the unused bindless region
 Words  8–15: _uw0.._uw7   — 8 × u32 user scalar parameters
+Words 16–18: _rs0.._rs2   — frame-table dispatch base and table slots
+Words 19–31: _rs3..       — up to 13 tensor launch words
 ```
 
-Bindless indices are packed as pairs into 32-bit words: the low 16 bits of `_bw0` hold slot 0, the high 16 bits hold slot 1, and so on. This fits up to 16 resource/broadcast parameters and 8 scalar parameters in 64 bytes of push constants.
+Shaders do not read `_bw*`. Resource indices live in the frame table (`goldy_frame_table_index`). A dispatch may bind up to 24 resources. On WebGPU the cap is the device's `maxStorageBuffersPerShaderStage` when that is smaller. The unused bindless region stays so the user-word and launch-word offsets, and the kernel ABI, do not move.
 
 ### Before and After
 

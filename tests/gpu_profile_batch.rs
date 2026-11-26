@@ -1,8 +1,9 @@
 //! `GOLDY_GPU_PROFILE` with batched dispatches.
 //!
-//! Independent same-pipeline nodes in one wave lower to a single `DispatchBatch`, which
-//! owns one profiler label. Its timestamps must take one query pair, or every later
-//! dispatch writes past the end of the query pool.
+//! Independent same-pipeline nodes in one wave lower to a single `DispatchBatch`.
+//! The query pool reserves one pair per dispatch in that batch. Recording must
+//! advance the timestamp index once per dispatch, or a later command writes past
+//! the pool.
 //!
 //! Its own test binary: the profiler reads `GOLDY_GPU_PROFILE` once per process.
 

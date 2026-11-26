@@ -52,7 +52,7 @@ use std::sync::{Arc, Mutex};
 
 use bytemuck::Pod;
 
-use crate::backend::shared::{MAX_BINDLESS_SLOTS, MAX_USER_SLOTS};
+use crate::backend::shared::{MAX_DISPATCH_RESOURCES, MAX_USER_SLOTS};
 use crate::parcel::{Buffer, Parcel};
 use crate::scheme::{PipelineParts, Scheme};
 use crate::shader::YieldScript;
@@ -531,9 +531,9 @@ impl YieldDriver {
             // target and the shared cnt buffer when the body yields again.
             let extra_slots = if yields_to.is_empty() { 0 } else { 1 };
             let resources = program_resources.len() + 3 + 2 * yields_to.len() + extra_slots;
-            if resources > MAX_BINDLESS_SLOTS {
+            if resources > MAX_DISPATCH_RESOURCES {
                 return err(format!(
-                    "`{name}` needs {resources} resource slots (max {MAX_BINDLESS_SLOTS}); bind fewer buffers"
+                    "`{name}` needs {resources} resource slots (max {MAX_DISPATCH_RESOURCES}); bind fewer buffers"
                 ));
             }
             let user_words = program_scalars.len() + 1 + yields_to.len();
@@ -578,9 +578,9 @@ impl YieldDriver {
             .collect();
         let extra_slots = if prologue_yields_to.is_empty() { 0 } else { 1 };
         let resources = user_parcels.len() + 2 * prologue_yields_to.len() + extra_slots;
-        if resources > MAX_BINDLESS_SLOTS {
+        if resources > MAX_DISPATCH_RESOURCES {
             return err(format!(
-                "`{label}` prologue needs {resources} resource slots (max {MAX_BINDLESS_SLOTS}); bind fewer buffers"
+                "`{label}` prologue needs {resources} resource slots (max {MAX_DISPATCH_RESOURCES}); bind fewer buffers"
             ));
         }
         let user_words = scalars.len() + prologue_yields_to.len() + 1;
