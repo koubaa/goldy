@@ -239,6 +239,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DX12 wrote no timestamps for a batch and shifted every later label. A batch now takes
   one query pair on both. The `chrome` export appends each event instead of rewriting the
   whole file per event.
+- **Topology re-records between schemes sharing a tensor** — a scheme that bound one
+  tensor through several views (the whole buffer and byte ranges of it) with different
+  access overwrote its own cross-scheme topology edge on every record, and each overwrite
+  dirtied every other scheme on that tensor. Schemes sharing such a buffer re-recorded
+  each other on every submit. Registration now folds a scheme's access per parcel.
 
 - **Intel Mac Metal heaps** — creating a device no longer aborts with
   `Shared storage mode disallowed`. Shared heaps and Shared textures require
