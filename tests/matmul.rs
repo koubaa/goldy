@@ -228,6 +228,41 @@ fn transposed_gemv_adds_onto_out() {
     assert_eq!(read_f32(&mut scheme, &out), vec![91.0, 122.0, 153.0]);
 }
 
+/// A gathered product recorded inside `Scheme::group` still owns its parameter buffer
+/// after the child scheme is dropped.
+#[test]
+fn grouped_gathered_gemv_keeps_its_parameter_buffer() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let a = device
+        .acquire_buffer_with_data(&[1.0f32, 0.0, 0.0, 1.0], BufferKind::Scattered)
+        .unwrap();
+    let x = device
+        .acquire_buffer_with_data(&[3.0f32, 4.0], BufferKind::Scattered)
+        .unwrap();
+    let ids = device.acquire_buffer_with_data(&[0u32], BufferKind::Scattered).unwrap();
+    let out = device
+        .acquire_buffer_with_data(&[0.0f32, 0.0], BufferKind::Scattered)
+        .unwrap();
+    let mut desc = MatMulDesc::gemv(2, 2);
+    desc.index = Some(goldy::ops::MatMulIndex::single(0, 1, 4));
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .group("group", |child| {
+            child
+                .matmul("gather", desc)
+                .a(&a, MatMulView::packed())
+                .b(&x, MatMulView::packed())
+                .out(&out, MatMulView::packed())
+                .extra(&ids, MatMulView::packed())
+                .record();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(read_f32(&mut scheme, &out), vec![3.0, 4.0]);
+}
+
 #[test]
 fn gemv_model_shapes_match_reference() {
     for (m, k) in [(288, 288), (768, 288), (288, 768), (4099, 1031), (1, 5)] {

@@ -1113,7 +1113,12 @@ impl Scheme {
         let mut child = Scheme::new(&self.ctx);
         child.automatic_fusion = self.automatic_fusion;
         f(&mut child)?;
-        Ok(self.include(label, &child)?.finish())
+        // Parameter buffers are owned by the scheme that recorded them. The child
+        // is dropped at the end of this call, so the parent keeps them alive.
+        let params = std::mem::take(&mut child.matmul_param_buffers);
+        let id = self.include(label, &child)?.finish();
+        self.matmul_param_buffers.extend(params);
+        Ok(id)
     }
 
     fn copy_child_desc(&mut self, label: crate::SchemeLabel, child: &Scheme) -> GroupId {
