@@ -262,21 +262,23 @@ jobs:
         run: cargo test -p goldy-ffi
 
       # Private heaps and Private textures are legal on Apple silicon, so the
-      # same runner exercises the non-Apple placement. A Shared heap or texture
-      # in this mode panics.
-      - name: Run all tests (discrete placement)
+      # same runner exercises the non-Apple placement. Keep the cases explicit:
+      # allocation tests assert the selected storage modes, compute tests cover
+      # upload/readback staging and private argument buffers, and screenshots
+      # cover private render textures. The complete suite already ran above.
+      - name: Run discrete-placement coverage
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
           GOLDY_METAL_PLACEMENT: discrete
-        run: cargo test
-
-      - name: Run goldy-ffi integration tests (discrete placement)
-        env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-          GOLDY_METAL_PLACEMENT: discrete
-        run: cargo test -p goldy-ffi
+        run: |
+          cargo test --lib metal_storage
+          cargo test --lib buffer_alloc_tests
+          cargo test --lib heap_tests
+          cargo test \
+            --test compute_integration \
+            --test scheme_compute_integration \
+            --test scheme_screenshot_tests
 
   # Intel macOS (paravirtual GPU). The probe records whether Shared / Managed /
   # Private MTLHeaps are accepted. A nil heap or a missing Argument Buffers
