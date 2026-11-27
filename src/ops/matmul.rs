@@ -56,7 +56,10 @@ pub struct MatMulBlock {
     pub block_cols: u32,
 }
 
-/// Device-selected slab. `a_off = ids[slot] * stride_elems` when `id < experts`.
+/// Device-selected slab. `a_off = ids[slot + i] * stride_elems` when `id < experts`.
+///
+/// `count` ids start at `slot` and each writes `m` outputs. `x_stride == 0` reuses
+/// one `x` for every id; otherwise id `i` reads `x` at `i * x_stride`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatMulIndex {
     pub slot: u32,
@@ -65,6 +68,24 @@ pub struct MatMulIndex {
     /// When set, the f32 global-scale vector is indexed by the slab id.
     /// Otherwise element 0 is the multiplier for every slab.
     pub global_per_slab: bool,
+    /// Consecutive ids. `1` is a single slab.
+    pub count: u32,
+    /// Element stride between the `x` vectors. `0` broadcasts one vector.
+    pub x_stride: u32,
+}
+
+impl MatMulIndex {
+    /// One id at `slot`, one shared `x`.
+    pub const fn single(slot: u32, experts: u32, stride_elems: u32) -> Self {
+        Self {
+            slot,
+            experts,
+            stride_elems,
+            global_per_slab: false,
+            count: 1,
+            x_stride: 0,
+        }
+    }
 }
 
 /// Row-major `C[m, n] = alpha * op(A)[m, k] @ op(B)[k, n] + beta * C[m, n]`.
@@ -475,8 +496,12 @@ pub(crate) fn fallback_workgroups(desc: &MatMulDesc, fallback: MatMulFallback) -
             let threads = desc.m.saturating_mul(desc.n);
             (threads.div_ceil(256).max(1), 1, 1)
         }
-        MatMulFallback::Gemv | MatMulFallback::GemvBf16 | MatMulFallback::GemvIndexed | MatMulFallback::GemvBlock => {
+        MatMulFallback::Gemv | MatMulFallback::GemvBf16 | MatMulFallback::GemvBlock => {
             (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), 1, 1)
+        }
+        MatMulFallback::GemvIndexed => {
+            let count = desc.index.map(|i| i.count.max(1)).unwrap_or(1);
+            (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), count, 1)
         }
     }
 }
@@ -838,14 +863,23 @@ fn indexed_f32_user_slots(
     let index = desc
         .index
         .ok_or_else(|| GoldyError::Validation("matmul: indexed GEMV is missing its id".into()))?;
+    if index.count == 0 {
+        return Err(GoldyError::Validation("matmul: indexed GEMV count is 0".into()));
+    }
+    if a.leading_dim != desc.k {
+        return Err(GoldyError::Validation(
+            "matmul: indexed GEMV is packed, so the leading dimension is k".into(),
+        ));
+    }
     Ok(vec![
         desc.m,
         desc.k,
-        a.leading_dim,
         index.stride_elems,
         index.experts,
         index.slot,
         fit_offset("A", a.offset_elements)?,
+        index.count,
+        index.x_stride,
     ])
 }
 

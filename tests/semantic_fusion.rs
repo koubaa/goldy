@@ -1026,6 +1026,8 @@ fn indexed_gemv_honors_a_weight_offset() {
         move |rec, t| {
             let mut desc = goldy::MatMulDesc::gemv(rows, k);
             desc.index = Some(goldy::ops::MatMulIndex {
+                count: 1,
+                x_stride: 0,
                 slot,
                 experts,
                 stride_elems: rows * k,

@@ -91,17 +91,57 @@ impl<'a> TensorRecorder<'a> {
                 "matmul_indexed: ids must be a rank-1 U32 tensor".into(),
             ));
         }
-        if slot >= ids.shape().dim(0)? {
+        self.matmul_indexed_batch_into(label, weight, x, ids, slot, 1, 0, out)
+    }
+
+    /// `count` ids starting at `slot`. `out` is `[count * rows]`.
+    ///
+    /// `x_stride == 0` uses one `x` of length `k` for every id. Otherwise `x`
+    /// holds `count` vectors and id `i` reads at `i * x_stride`.
+    pub fn matmul_indexed_batch_into(
+        &mut self,
+        label: &str,
+        weight: TensorView<'_>,
+        x: TensorView<'_>,
+        ids: TensorView<'_>,
+        slot: u32,
+        count: u32,
+        x_stride: u32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        x.dtype().require_f32("matmul_indexed")?;
+        out.dtype().require_f32("matmul_indexed")?;
+        if count == 0 {
+            return Err(GoldyError::Validation("matmul_indexed: count is 0".into()));
+        }
+        if weight.shape().rank() != 3 || !weight.is_contiguous() {
             return Err(GoldyError::Validation(
-                "matmul_indexed: slot is past the id buffer".into(),
+                "matmul_indexed: weight must be a packed [experts, rows, k] tensor".into(),
+            ));
+        }
+        if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: ids must be a rank-1 U32 tensor".into(),
+            ));
+        }
+        let id_len = ids.shape().dim(0)?;
+        if slot >= id_len || count > id_len - slot {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: slot and count run past the id buffer".into(),
             ));
         }
         let experts = weight.shape().dim(0)?;
         let rows = weight.shape().dim(1)?;
         let k = weight.shape().dim(2)?;
-        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
+        let x_ok = if x_stride == 0 {
+            x.shape().dims() == [k]
+        } else {
+            x.shape().rank() == 1 && x.shape().dim(0)? >= count.saturating_mul(x_stride)
+        };
+        let out_len = rows.saturating_mul(count);
+        if !x_ok || out.shape().dims() != [out_len] {
             return Err(GoldyError::Validation(
-                "matmul_indexed: x is [k] and out is [rows]".into(),
+                "matmul_indexed: x matches the stride and out is [count * rows]".into(),
             ));
         }
         let elems = (experts as u64).saturating_mul(rows as u64).saturating_mul(k as u64);
@@ -112,7 +152,12 @@ impl<'a> TensorRecorder<'a> {
         }
         let dtype = match weight.dtype() {
             TensorDType::F32 => MatMulDType::F32,
-            TensorDType::BF16 => MatMulDType::BF16,
+            TensorDType::BF16 if count == 1 && x_stride == 0 => MatMulDType::BF16,
+            TensorDType::BF16 => {
+                return Err(GoldyError::Validation(
+                    "matmul_indexed: a run of ids is an f32 weight".into(),
+                ))
+            }
             _ => {
                 return Err(GoldyError::Validation(
                     "matmul_indexed: weight must be F32 or BF16".into(),
@@ -126,6 +171,8 @@ impl<'a> TensorRecorder<'a> {
             experts,
             stride_elems: rows.saturating_mul(k),
             global_per_slab: false,
+            count,
+            x_stride,
         });
         let a_buf = if dtype == MatMulDType::BF16 {
             weight.packed_u32_words()?.buffer()
@@ -287,6 +334,8 @@ impl<'a> TensorRecorder<'a> {
                 experts,
                 stride_elems: rows,
                 global_per_slab: weight.global.is_some_and(|g| g.shape().dim(0).unwrap_or(1) != 1),
+                count: 1,
+                x_stride: 0,
             });
             ids.buffer()
         } else {

@@ -179,7 +179,8 @@ pub(crate) fn matmul(
         // An id past `experts` stores zeros, the same as `gemv_f32_indexed`.
         MatMulFallback::GemvIndexed if desc.dtype == MatMulDType::F32 && desc.n == 1 => {
             let index = desc.index?;
-            if index.experts == 0 {
+            // A run of ids is the stdlib kernel. The contraction below is one id.
+            if index.experts == 0 || index.count != 1 || index.x_stride != 0 {
                 return None;
             }
             let ids = ids?;

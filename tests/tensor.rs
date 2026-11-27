@@ -190,6 +190,45 @@ fn matmul_indexed_reads_the_u32_expert_and_replays() {
 }
 
 #[test]
+fn matmul_indexed_batch_runs_a_row_of_ids() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // experts: identity, scale 2/3, scale 4/5.
+    let weight = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[3, 2, 2]).unwrap(),
+        &[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 5.0],
+    )
+    .unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(3), &[2, 0, 9]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(6), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_batch_into("experts", weight.view(), x.view(), ids.view(), 0, 3, 0, out.view())
+        .unwrap();
+    // expert 2, expert 0, and an id past the table.
+    assert_eq!(
+        read_f32(&mut scheme, out.buffer()),
+        vec![12.0, 20.0, 3.0, 4.0, 0.0, 0.0]
+    );
+
+    let xs = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 1.0, 3.0, 4.0]).unwrap();
+    let pair = Tensor::from_u32(&device, TensorShape::vector(2), &[0, 1]).unwrap();
+    let down = Tensor::zeros(&device, TensorShape::vector(4), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_batch_into("strided-x", weight.view(), xs.view(), pair.view(), 0, 2, 2, down.view())
+        .unwrap();
+    // id 0 with [1, 1] is [1, 1]; id 1 with [3, 4] is [6, 12].
+    assert_eq!(read_f32(&mut scheme, down.buffer()), vec![1.0, 1.0, 6.0, 12.0]);
+}
+
+#[test]
 fn strided_narrow_views_alias_parent() {
     let _gpu = gpu_lock();
     let device = runtime();

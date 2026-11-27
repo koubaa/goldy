@@ -123,34 +123,44 @@ fn gemv_f32_indexed(
     ids: &[u32],
     m: u32,
     k: u32,
-    lda: u32,
     stride: u32,
     experts: u32,
     slot: u32,
     a_base: u32,
+    count: u32,
+    x_stride: u32,
 ) {
     let mut partial = goldy::gpu::workgroup_array::<f32, 128>();
     let local = goldy::gpu::local_id().x;
     let lane = local % 32;
     let row = goldy::gpu::workgroup_id().x * 4 + local / 32;
-    let id = ids[slot];
+    let batch = goldy::gpu::workgroup_id().y;
+    let mut in_batch = 1u32;
+    if batch >= count {
+        in_batch = 0u32;
+    }
+    let id = ids[slot + batch];
     let mut ok = 1u32;
-    if id >= experts {
+    if in_batch == 0u32 || id >= experts {
         ok = 0u32;
     }
     let a_off = id * stride + a_base;
+    let mut x_off = 0u32;
+    if x_stride != 0u32 {
+        x_off = batch * x_stride;
+    }
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     if ok != 0u32 && row < m {
-        let a_row = a_off + row * lda;
+        let a_row = a_off + row * k;
         let mut j = lane;
         while j + 32 < k {
-            acc0 = acc0 + a[a_row + j] * x[j];
-            acc1 = acc1 + a[a_row + j + 32] * x[j + 32];
+            acc0 = acc0 + a[a_row + j] * x[x_off + j];
+            acc1 = acc1 + a[a_row + j + 32] * x[x_off + j + 32];
             j = j + 64;
         }
         if j < k {
-            acc0 = acc0 + a[a_row + j] * x[j];
+            acc0 = acc0 + a[a_row + j] * x[x_off + j];
         }
     }
     partial[local] = acc0 + acc1;
@@ -163,12 +173,12 @@ fn gemv_f32_indexed(
         goldy::gpu::workgroup_barrier();
         s = s / 2;
     }
-    if lane == 0 && row < m {
+    if lane == 0 && row < m && in_batch != 0u32 {
         let mut value = partial[local];
         if ok == 0u32 {
             value = 0.0;
         }
-        y[row] = value;
+        y[batch * m + row] = value;
     }
 }
 
