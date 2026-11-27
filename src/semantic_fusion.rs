@@ -19,7 +19,9 @@
 //!
 //! An authored dispatch can be stated as the operations that compute what it stores (a
 //! [`Description`]). A region takes every one of its sites or none, and does not store
-//! the buffers only the description writes.
+//! the buffers only the description writes. A description that reassociates what the
+//! dispatch computes joins a region under [`crate::ArithmeticPolicy::Relaxed`] or a
+//! reassociating [`ContractionPrecision`].
 
 use crate::backend::BufferHandle;
 use crate::fusion_plan::{KernelSite, SiteArg};
@@ -108,7 +110,8 @@ impl Description {
     /// The operations `ir` records, each with its site in `semantic`, describing
     /// `described`. `Err` names the first node without a site. Buffers `described` does
     /// not bind are private to the description. Without `exact`, the sites join a region
-    /// only under a [`ContractionPrecision`] that lets contractions reassociate.
+    /// only under [`crate::ArithmeticPolicy::Relaxed`] or a [`ContractionPrecision`] that
+    /// lets contractions reassociate.
     pub(crate) fn of(
         described: &TaskNode,
         ir: &crate::task_graph::GraphIR,

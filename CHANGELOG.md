@@ -14,8 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Automatic fusion composes the node with its neighbours as those operations, and a
   region takes all of them or none; anywhere else the authored kernel runs. Buffers
   only the description writes are not stored by a fused region. A description that
-  does not round as its kernel does (`exact = false`) joins regions only when
-  contractions may reassociate.
+  does not round as its kernel does (`exact = false`) joins regions only under
+  `ArithmeticPolicy::Relaxed` or when contractions may reassociate.
+
+- **Cyclic stores and window dots** — `TensorRecorder::cyclic_store_at` stores one
+  value per row at `position % width` of a history's last axis, and
+  `cyclic_window_dot_at` computes the causal row dot over a history that already
+  holds the current value; `cyclic_dot_at` is the two in order. Histories may carry
+  several row axes and any strides, so a permuted view can address a history whose
+  window axis is outermost.
+
+- **`min_scalar_into` / `max_scalar_into`** — the `_into` forms of the scalar bounds.
 
 - **`Scheme::keep_alive`** — ties a value, such as a buffer only the scheme's nodes
   use, to the scheme and every scheme that includes it.

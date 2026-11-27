@@ -446,6 +446,24 @@ impl<'a> TensorRecorder<'a> {
     ) -> Result<(), GoldyError> {
         self.binary_scalar_into(label, a, scalar, out, OP_DIV_SCALAR)
     }
+    pub fn min_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_MIN_SCALAR)
+    }
+    pub fn max_scalar_into(
+        &mut self,
+        label: &str,
+        a: TensorView<'_>,
+        scalar: f32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        self.binary_scalar_into(label, a, scalar, out, OP_MAX_SCALAR)
+    }
 
     pub fn add_scalar(&mut self, label: &str, a: TensorView<'_>, scalar: f32) -> Result<Tensor, GoldyError> {
         self.binary_scalar(label, a, scalar, OP_ADD_SCALAR)
@@ -581,9 +599,12 @@ impl<'a> TensorRecorder<'a> {
         Ok(())
     }
 
-    /// Store `src` in a row-major cyclic history and compute one causal row dot.
+    /// Store `src` in a row-major cyclic history and compute one causal row dot:
+    /// [`Self::cyclic_store_at`] then [`Self::cyclic_window_dot_at`], labelled
+    /// `{label}_store` and `{label}_dot`.
     ///
-    /// `state` and `weight` are `[rows, width]`; `position` is one `u32`.
+    /// `state` and `weight` are `[rows.., width]` and `src`/`out` are `[rows..]`, so a row
+    /// may carry several axes; `position` is one `u32`.
     /// The newest value uses the last weight column and positions before zero
     /// contribute zero. Recording emits ordinary generated kernels so automatic
     /// fusion may compose the store, dot, and neighboring tensor algebra.
@@ -596,46 +617,84 @@ impl<'a> TensorRecorder<'a> {
         position: TensorView<'_>,
         out: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        for (name, view) in [("src", src), ("weight", weight), ("state", state), ("out", out)] {
-            view.dtype().require_f32(&format!("cyclic_dot_at {name}"))?;
-        }
-        state.layout().require_writeable("cyclic_dot_at state")?;
-        out.layout().require_writeable("cyclic_dot_at out")?;
-        if position.dtype() != TensorDType::U32 || position.numel_u32() != 1 {
-            return Err(GoldyError::Validation("cyclic_dot_at: position must be one U32".into()));
-        }
-        let state_shape = state.shape();
-        let state_dims = state_shape.dims();
-        if state_dims.len() != 2
-            || weight.shape().dims() != state_dims
-            || src.shape().dims() != [state_dims[0]]
-            || out.shape().dims() != [state_dims[0]]
-            || state_dims[1] == 0
-        {
-            return Err(GoldyError::Validation(
-                "cyclic_dot_at: src/out must be [rows], state/weight [rows, width]".into(),
-            ));
-        }
-        let rows = state_dims[0].max(1);
-        let store = self
+        Self::cyclic_rows("cyclic_dot_at", weight, state, position, out)?;
+        self.cyclic_store_at(&format!("{label}_store"), src, state, position)?;
+        self.cyclic_window_dot_at(&format!("{label}_dot"), weight, state, position, out)
+    }
+
+    /// Store `src` (`[rows..]`) at slot `position % width` of the last axis of `state`
+    /// (`[rows.., width]`). `position` is one `u32`.
+    pub fn cyclic_store_at(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        state: TensorView<'_>,
+        position: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let rows = Self::cyclic_rows("cyclic_store_at", state, state, position, src)?;
+        state.layout().require_writeable(&format!("{label} state"))?;
+        let node = self
             .kernels
             .ops
             .cyclic_store
-            .record(self.scheme, format!("{label}_store"), src, state, position)?
+            .record(self.scheme, label, src, state, position)?
             .over_1d(rows)
             .node();
         self.scheme
-            .record_semantic_site(store, semantic::cyclic_store(src, state, position));
-        let dot = self
+            .record_semantic_site(node, semantic::cyclic_store(src, state, position));
+        Ok(())
+    }
+
+    /// The causal row dot of [`Self::cyclic_dot_at`] over a history that already holds
+    /// the value at `position`.
+    pub fn cyclic_window_dot_at(
+        &mut self,
+        label: &str,
+        weight: TensorView<'_>,
+        state: TensorView<'_>,
+        position: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let rows = Self::cyclic_rows("cyclic_window_dot_at", weight, state, position, out)?;
+        out.layout().require_writeable(&format!("{label} out"))?;
+        let node = self
             .kernels
             .ops
             .cyclic_dot
-            .record(self.scheme, format!("{label}_dot"), state, weight, position, out)?
+            .record(self.scheme, label, state, weight, position, out)?
             .over_1d(rows)
             .node();
         self.scheme
-            .record_semantic_site(dot, semantic::cyclic_dot(state, weight, position, out));
+            .record_semantic_site(node, semantic::cyclic_dot(state, weight, position, out));
         Ok(())
+    }
+
+    /// Checks a cyclic history `state` (`[rows.., width]`), a `peer` of its shape, and a
+    /// `row` view of `[rows..]`; returns the row count.
+    fn cyclic_rows(
+        op: &str,
+        peer: TensorView<'_>,
+        state: TensorView<'_>,
+        position: TensorView<'_>,
+        row: TensorView<'_>,
+    ) -> Result<u32, GoldyError> {
+        for (name, view) in [("peer", peer), ("state", state), ("row", row)] {
+            view.dtype().require_f32(&format!("{op} {name}"))?;
+        }
+        if position.dtype() != TensorDType::U32 || position.numel_u32() != 1 {
+            return Err(GoldyError::Validation(format!("{op}: position must be one U32")));
+        }
+        let state_shape = state.shape();
+        let state_dims = state_shape.dims();
+        let Some((&width, rows)) = state_dims.split_last() else {
+            return Err(GoldyError::Validation(format!("{op}: state needs a width axis")));
+        };
+        if rows.is_empty() || width == 0 || peer.shape().dims() != state_dims || row.shape().dims() != rows {
+            return Err(GoldyError::Validation(format!(
+                "{op}: rows must be [rows..] and the history [rows.., width]"
+            )));
+        }
+        Ok(row.numel_u32().max(1))
     }
 
     fn unary(&mut self, label: &str, src: TensorView<'_>, op: u32) -> Result<Tensor, GoldyError> {

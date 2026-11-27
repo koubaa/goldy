@@ -54,10 +54,8 @@ pub(crate) fn cyclic_store(
     position: TensorView<'_>,
 ) -> Option<SemanticSite> {
     let state_shape = state.shape();
-    let &[rows, width] = state_shape.dims() else {
-        return None;
-    };
-    if src.shape().dims() != [rows] || width == 0 {
+    let (&width, rows) = state_shape.dims().split_last()?;
+    if src.shape().dims() != rows || width == 0 {
         return None;
     }
     let mut s = SiteBuilder::default();
@@ -65,12 +63,12 @@ pub(crate) fn cyclic_store(
     let slot = s.index_param("slot", 0..i64::from(width), source);
     let input = operand(&mut s, "x", src)?;
     let mut target = storage(&mut s, state)?;
-    target.offset = target.offset + Affine::sym(Sym::Param(slot)) * target.strides[1];
-    target.strides = vec![target.strides[0]];
+    let along = target.strides.pop()?;
+    target.offset = target.offset + Affine::sym(Sym::Param(slot)) * along;
     s.finish(OpKind::Map(Map {
-        shape: vec![rows],
+        shape: rows.to_vec(),
         inputs: vec![input],
-        outputs: vec![(Operand::new("state", &[rows], target), Term::arg(0))],
+        outputs: vec![(Operand::new("state", rows, target), Term::arg(0))],
     }))
 }
 
@@ -81,36 +79,36 @@ pub(crate) fn cyclic_dot(
     out: TensorView<'_>,
 ) -> Option<SemanticSite> {
     let state_shape = state.shape();
-    let &[rows, width] = state_shape.dims() else {
-        return None;
-    };
-    if width == 0 || weight.shape().dims() != [rows, width] || out.shape().dims() != [rows] {
+    let (&width, rows) = state_shape.dims().split_last()?;
+    if width == 0 || weight.shape().dims() != state_shape.dims() || out.shape().dims() != rows {
         return None;
     }
     let mut s = SiteBuilder::default();
     let raw_source = index_source(&mut s, position, 0, None)?;
     let raw = s.index_param("position", 0..i64::from(i32::MAX), raw_source);
-    let state_storage = storage(&mut s, state)?;
-    let weight_storage = storage(&mut s, weight)?;
+    let mut state_storage = storage(&mut s, state)?;
+    let mut weight_storage = storage(&mut s, weight)?;
+    let state_along = state_storage.strides.pop()?;
+    let weight_along = weight_storage.strides.pop()?;
     let mut inputs = Vec::with_capacity(width as usize * 2);
     let mut acc = Term::lit(0.0);
     for lag in 0..width {
         let slot_source = index_source(&mut s, position, -i64::from(lag), Some(width))?;
         let slot = s.index_param(&format!("slot_{lag}"), 0..i64::from(width), slot_source);
         let tap = width - 1 - lag;
-        let state_at = state_storage.offset.clone() + Affine::sym(Sym::Param(slot)) * state_storage.strides[1];
-        let weight_at = weight_storage.offset.clone() + i64::from(tap) * weight_storage.strides[1];
+        let state_at = state_storage.offset.clone() + Affine::sym(Sym::Param(slot)) * state_along;
+        let weight_at = weight_storage.offset.clone() + i64::from(tap) * weight_along;
         let weight_arg = inputs.len();
         inputs.push(Operand::new(
             &format!("weight_{tap}"),
-            &[rows],
-            Storage::strided(weight_storage.parcel, weight_at, &[weight_storage.strides[0]]),
+            rows,
+            Storage::strided(weight_storage.parcel, weight_at, &weight_storage.strides),
         ));
         let state_arg = inputs.len();
         inputs.push(Operand::new(
             &format!("state_{lag}"),
-            &[rows],
-            Storage::strided(state_storage.parcel, state_at, &[state_storage.strides[0]]),
+            rows,
+            Storage::strided(state_storage.parcel, state_at, &state_storage.strides),
         ));
         let value = Term::select(
             i64::from(lag),
@@ -123,7 +121,7 @@ pub(crate) fn cyclic_dot(
     }
     let output = operand(&mut s, "out", out)?;
     s.finish(OpKind::Map(Map {
-        shape: vec![rows],
+        shape: rows.to_vec(),
         inputs,
         outputs: vec![(output, acc)],
     }))
