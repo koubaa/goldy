@@ -26,10 +26,9 @@
 //! consumers'. The remaining nodes are matched by composing kernel bodies.
 
 use crate::backend::ComputePipelineHandle;
-use crate::compute::ComputePipeline;
 use crate::fusion_cost::FusionCostModel;
 use crate::kernel::{
-    access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
+    access_kind_to_node, admit, prepare_fused_for_policy, prepare_synthesized, ArgShape, PreparedKernel, StageView,
 };
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
@@ -131,31 +130,25 @@ impl SiteDraft {
 pub(crate) struct KernelPipeline {
     pub(crate) universal: ComputePipelineHandle,
     pub(crate) provenance: Arc<ShaderProvenance>,
+    pub(crate) pipeline: Arc<crate::compute::ComputePipeline>,
 }
 
 #[derive(Clone)]
 pub(crate) struct KernelPipelines {
-    match_recorded: KernelPipeline,
-    relaxed: KernelPipeline,
+    variants: Arc<crate::kernel::KernelVariants>,
 }
 
 impl KernelPipelines {
-    pub(crate) fn new(match_recorded: &ComputePipeline, relaxed: &ComputePipeline) -> Self {
-        let of = |pipeline: &ComputePipeline| KernelPipeline {
-            universal: pipeline.handle,
-            provenance: Arc::clone(&pipeline.provenance),
-        };
-        Self {
-            match_recorded: of(match_recorded),
-            relaxed: of(relaxed),
-        }
+    pub(crate) fn new(variants: Arc<crate::kernel::KernelVariants>) -> Self {
+        Self { variants }
     }
 
-    pub(crate) fn select(&self, policy: ArithmeticPolicy) -> &KernelPipeline {
-        match policy {
-            ArithmeticPolicy::MatchRecorded => &self.match_recorded,
-            ArithmeticPolicy::Relaxed => &self.relaxed,
-        }
+    pub(crate) fn select(&self, policy: ArithmeticPolicy) -> Result<KernelPipeline, String> {
+        self.variants.get(policy).map(|pipeline| KernelPipeline {
+            universal: pipeline.handle,
+            provenance: Arc::clone(&pipeline.provenance),
+            pipeline,
+        })
     }
 }
 
@@ -435,10 +428,12 @@ impl Program {
         }
     }
 
-    fn compile(&self, device: &Runtime, id: KernelId) -> anyhow::Result<PreparedKernel> {
+    fn compile(&self, device: &Runtime, id: KernelId, policy: ArithmeticPolicy) -> anyhow::Result<PreparedKernel> {
         match self {
-            Program::Composed(definition) => prepare_fused(device, definition),
-            Program::Semantic(program) => prepare_synthesized(device, &program.def, program.scalar_origins(), id),
+            Program::Composed(definition) => prepare_fused_for_policy(device, definition, policy),
+            Program::Semantic(program) => {
+                prepare_synthesized(device, &program.def, program.scalar_origins(), id, policy)
+            }
         }
     }
 }
@@ -943,11 +938,15 @@ impl FusionPlanner {
             let program = region.program.clone();
             let compiles = Arc::clone(&self.compiles);
             let id = region.id;
+            let policy = self.arithmetic;
             let spawned = std::thread::Builder::new().name("goldy-fuse".into()).spawn(move || {
                 let outcome = if fault {
                     Err("injected fused compile failure".to_string())
                 } else {
-                    program.compile(&device, id).map(Arc::new).map_err(|e| format!("{e:#}"))
+                    program
+                        .compile(&device, id, policy)
+                        .map(Arc::new)
+                        .map_err(|e| format!("{e:#}"))
                 };
                 let mut compiles = compiles.lock().unwrap();
                 compiles.running.remove(&id);
@@ -1061,7 +1060,7 @@ fn fused_node(
     kernel: &PreparedKernel,
     arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
-    let pipeline = kernel.pipeline_for(arithmetic);
+    let pipeline = kernel.pipeline_for(arithmetic)?;
     let mut constituents = Vec::with_capacity(nodes.len());
     for i in nodes.clone() {
         let site = sites.get(&(i as u32)).ok_or("constituent lost its kernel site")?;
@@ -1173,7 +1172,7 @@ fn semantic_node(
     kernel: &PreparedKernel,
     arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
-    let pipeline = kernel.pipeline_for(arithmetic);
+    let pipeline = kernel.pipeline_for(arithmetic)?;
     let mut bindings: Vec<ResourceBinding> = Vec::new();
     for i in nodes.clone() {
         for binding in &ir.nodes[i].bindings {

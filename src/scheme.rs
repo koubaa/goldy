@@ -1229,7 +1229,15 @@ impl Scheme {
             for &node in child.desc.arithmetic_sites.keys() {
                 let node = node as usize + node_offset;
                 let site = &self.desc.arithmetic_sites[&(node as u32)];
-                let variant = site.pipelines.select(policy);
+                let pipelines = site.pipelines.clone();
+                let tensor_facts = site.tensor_facts.clone();
+                let variant = match pipelines.select(policy) {
+                    Ok(variant) => variant,
+                    Err(error) => {
+                        self.record_errors.push(error);
+                        continue;
+                    }
+                };
                 let recorded = &mut self.desc.ir.nodes[node];
                 if let NodeKind::Dispatch {
                     pipeline, user_slots, ..
@@ -1242,7 +1250,7 @@ impl Scheme {
                         &variant.provenance,
                         recorded.label.clone(),
                         user_slots,
-                        &site.tensor_facts,
+                        &tensor_facts,
                     );
                 }
             }
@@ -1255,7 +1263,14 @@ impl Scheme {
         let Some(site) = self.desc.kernel_sites.get(&(node as u32)) else {
             return;
         };
-        let pipeline = site.pipelines.select(self.fusion.arithmetic());
+        let pipelines = site.pipelines.clone();
+        let pipeline = match pipelines.select(self.fusion.arithmetic()) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                self.record_errors.push(error);
+                return;
+            }
+        };
         let facts = self
             .desc
             .arithmetic_sites
@@ -1302,17 +1317,33 @@ impl Scheme {
     fn promote_fusion_plan(&mut self, plan: crate::fusion_plan::Plan) {
         for c in plan.fused.iter().flat_map(|f| f.nodes.clone()) {
             self.specialization.remove_site(c as u32);
-            if let (Some(site), NodeKind::Dispatch { pipeline, .. }) =
-                (self.desc.kernel_sites.get(&(c as u32)), &mut self.desc.ir.nodes[c].kind)
-            {
-                *pipeline = site.pipelines.select(self.fusion.arithmetic()).universal;
+            let variant = self
+                .desc
+                .kernel_sites
+                .get(&(c as u32))
+                .map(|site| site.pipelines.clone())
+                .and_then(|pipelines| match pipelines.select(self.fusion.arithmetic()) {
+                    Ok(variant) => Some(variant),
+                    Err(error) => {
+                        self.record_errors.push(error);
+                        None
+                    }
+                });
+            if let (Some(variant), NodeKind::Dispatch { pipeline, .. }) = (variant, &mut self.desc.ir.nodes[c].kind) {
+                *pipeline = variant.universal;
             }
         }
         self.specialization.rekey(|node| plan.exec_of(node as usize));
         for f in &plan.fused {
             let node = &plan.ir.nodes[f.exec as usize];
             if let NodeKind::Dispatch { user_slots, .. } = &node.kind {
-                let pipeline = f.kernel.pipeline_for(self.fusion.arithmetic());
+                let pipeline = match f.kernel.pipeline_for(self.fusion.arithmetic()) {
+                    Ok(pipeline) => pipeline,
+                    Err(error) => {
+                        self.record_errors.push(error);
+                        continue;
+                    }
+                };
                 self.specialization.register_site(
                     f.exec,
                     pipeline.handle,
@@ -1365,16 +1396,17 @@ impl Scheme {
             .desc
             .arithmetic_sites
             .iter()
-            .map(|(&node, site)| {
-                (
-                    node as usize,
-                    site.pipelines.select(policy).clone(),
-                    site.tensor_facts.clone(),
-                )
-            })
+            .map(|(&node, site)| (node as usize, site.pipelines.select(policy), site.tensor_facts.clone()))
             .collect();
         let mut changed = false;
         for (node, variant, facts) in variants {
+            let variant = match variant {
+                Ok(variant) => variant,
+                Err(error) => {
+                    self.record_errors.push(error);
+                    continue;
+                }
+            };
             let recorded = &mut self.desc.ir.nodes[node];
             let NodeKind::Dispatch {
                 pipeline, user_slots, ..

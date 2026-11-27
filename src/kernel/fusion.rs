@@ -5,7 +5,7 @@
 //! dispatch that preserves every parcel store of the unfused sequence. Retained schemes
 //! apply the same admission to recorded dispatches (see `fusion_plan`).
 
-use super::prepare::{access_kind_to_node, prepare_kernel_as};
+use super::prepare::{access_kind_to_node, prepare_kernel_as_for_policy};
 use super::{KernelBindable, KernelDef, KernelParam, PreparedKernel, RecordedDispatch, SchemeNodeStart};
 use crate::backend::shared::{MAX_DISPATCH_RESOURCES, MAX_USER_SLOTS};
 use crate::error::GoldyError;
@@ -356,11 +356,19 @@ impl FusedKernel {
 /// Compile a fused definition under its fused-kernel identity, so its specialized
 /// variants are shared by every pipeline of that definition.
 pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> anyhow::Result<PreparedKernel> {
+    prepare_fused_for_policy(device, definition, crate::ArithmeticPolicy::MatchRecorded)
+}
+
+pub(crate) fn prepare_fused_for_policy(
+    device: &Runtime,
+    definition: &FusedDefinition,
+    policy: crate::ArithmeticPolicy,
+) -> anyhow::Result<PreparedKernel> {
     let identity = KernelIdentity {
         id: definition.id(),
         scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
     };
-    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity))?;
+    let prepared = prepare_kernel_as_for_policy(device, definition.lower(), Some(identity), policy)?;
     tracing::debug!(
         kernel = %definition.name,
         id = %definition.id(),
@@ -380,9 +388,10 @@ pub(crate) fn prepare_synthesized(
     def: &KernelDef,
     scalars: Vec<String>,
     id: KernelId,
+    policy: crate::ArithmeticPolicy,
 ) -> anyhow::Result<PreparedKernel> {
     let identity = KernelIdentity { id, scalars };
-    let prepared = prepare_kernel_as(device, def.clone(), Some(identity))?;
+    let prepared = prepare_kernel_as_for_policy(device, def.clone(), Some(identity), policy)?;
     tracing::debug!(kernel = %def.entry, id = %def.id(), params = def.params.len(), "semantic fusion prepared");
     Ok(prepared)
 }

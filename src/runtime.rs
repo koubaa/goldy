@@ -972,15 +972,15 @@ impl Runtime {
     ) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
         let index = kind as usize;
         if let Some(kernel) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
-            return Ok(kernel.select(policy));
+            return kernel.select(policy).map_err(GoldyError::Backend);
         }
-        let kernel = Arc::new(crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?);
+        let kernel = Arc::new(crate::ops::matmul::prepare_stdlib(self, kind, policy).map_err(GoldyError::Backend)?);
         let mut slots = self.inner.stdlib_matmul.lock().unwrap();
         if let Some(existing) = slots[index].as_ref() {
-            return Ok(existing.select(policy));
+            return existing.select(policy).map_err(GoldyError::Backend);
         }
         slots[index] = Some(Arc::clone(&kernel));
-        Ok(kernel.select(policy))
+        kernel.select(policy).map_err(GoldyError::Backend)
     }
 
     /// Check if the device is still valid.

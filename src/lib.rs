@@ -140,11 +140,11 @@ pub mod __private {
 }
 pub use kernel::gpu;
 pub use kernel::{
-    prepare_kernel, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType, FusedKernel, FusionError,
-    FusionRejection, Invocation, InvocationBuilder, KernelBindable, KernelDef, KernelId, KernelParam, KernelSource,
-    ParamCategory, PreparedKernel, RecordedDispatch, ScalarOrigin, ScalarType, SourceMap, TensorDimSpec,
-    TensorShapeEnv, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG, TENSOR_LAYOUT_STRIDE_BYTES,
-    TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
+    prepare_kernel, prepare_kernel_for_policy, AccessKind, BoundTensorDim, BuiltinMask, DispatchBuilder, ElementType,
+    FusedKernel, FusionError, FusionRejection, Invocation, InvocationBuilder, KernelBindable, KernelDef, KernelId,
+    KernelParam, KernelSource, ParamCategory, PreparedKernel, RecordedDispatch, ScalarOrigin, ScalarType, SourceMap,
+    TensorDimSpec, TensorShapeEnv, TensorShapeSpec, KERNEL_ABI_VERSION, TENSOR_LAYOUT_SLANG,
+    TENSOR_LAYOUT_STRIDE_BYTES, TENSOR_META_PARAM, TENSOR_SHAPE_SPEC_MAX_RANK,
 };
 pub use ops::{MatMulBuilder, MatMulDType, MatMulDesc, MatMulView};
 #[cfg(feature = "graphics")]
