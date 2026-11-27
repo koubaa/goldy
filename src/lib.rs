@@ -92,7 +92,8 @@ pub use exchange::{DepositTarget, DepositTransaction, HostSink, MemoryExchange};
 pub use frame_orchestrator::{FrameHandle, FrameOrchestrator};
 pub use fusion_cost::FusionCostModel;
 pub use fusion_plan::{
-    FusionCost, FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier, RejectedFusion,
+    FusionArithmetic, FusionCost, FusionRegion, FusionRegionStatus, FusionReport, FusionSchedule, FusionTier,
+    RejectedFusion,
 };
 pub use goldy_shader_ir::algebra::ContractionPrecision;
 pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;

@@ -372,6 +372,12 @@ fn an_operation_ending_in_a_product_rounds_it_for_its_readers() {
         "{slang}"
     );
     assert!(slang.contains("a1 = (a1 + (x5 * x6));"), "{slang}");
+    let relaxed = source(&lower_graph_relaxed(&graph, &[], &Target::default(), ContractionPrecision::Exact).unwrap());
+    assert!(!relaxed.contains("goldy_exact_"), "{relaxed}");
+    assert!(
+        relaxed.contains("((p0[((uint)c5)] * p0[((uint)c5)]) + p0[((uint)c5)])"),
+        "{relaxed}"
+    );
 }
 
 #[test]

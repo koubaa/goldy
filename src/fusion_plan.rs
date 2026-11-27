@@ -27,9 +27,7 @@
 
 use crate::backend::ComputePipelineHandle;
 use crate::fusion_cost::FusionCostModel;
-use crate::kernel::{
-    access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
-};
+use crate::kernel::{access_kind_to_node, admit, prepare_synthesized, ArgShape, PreparedKernel, StageView};
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
 use crate::semantic_fusion::{lift_kernel, synthesize, target as semantic_target, SemanticProgram, SemanticSite};
@@ -230,8 +228,29 @@ pub enum FusionTier {
     /// [`crate::kernel::FusedKernel`] admission.
     Composed,
     /// A kernel synthesized from what the constituents compute in index notation. It
-    /// may run on a grid none of them uses, and stores what they store, bit for bit.
+    /// may run on a grid none of them uses. Under
+    /// [`FusionArithmetic::MatchRecorded`] it stores what they store, bit for bit.
     Semantic,
+}
+
+/// Floating-point transformations automatic fusion may make across recorded
+/// dispatch boundaries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum FusionArithmetic {
+    /// Preserve the intermediate rounding of the recorded dispatches.
+    #[default]
+    MatchRecorded,
+    /// Permit reassociation, reciprocal transforms and contraction across boundaries.
+    Relaxed,
+}
+
+impl FusionArithmetic {
+    pub(crate) fn kernel_id(self, id: KernelId) -> KernelId {
+        id.variant(match self {
+            Self::MatchRecorded => 1,
+            Self::Relaxed => 2,
+        })
+    }
 }
 
 /// Whether a [`FusionRegion`] runs fused.
@@ -376,10 +395,14 @@ impl Program {
         }
     }
 
-    fn compile(&self, device: &Runtime) -> anyhow::Result<PreparedKernel> {
+    fn compile(&self, device: &Runtime, arithmetic: FusionArithmetic, id: KernelId) -> anyhow::Result<PreparedKernel> {
         match self {
-            Program::Composed(definition) => prepare_fused(device, definition),
-            Program::Semantic(program) => prepare_synthesized(device, &program.def, program.scalar_origins()),
+            Program::Composed(definition) => {
+                crate::kernel::prepare_fused_with_arithmetic(device, definition, arithmetic, id)
+            }
+            Program::Semantic(program) => {
+                prepare_synthesized(device, &program.def, program.scalar_origins(), arithmetic, id)
+            }
         }
     }
 }
@@ -425,6 +448,7 @@ pub(crate) struct FusionPlanner {
     plan: Option<Plan>,
     events: FusionEvents,
     precision: ContractionPrecision,
+    arithmetic: FusionArithmetic,
     cost: FusionCostModel,
     /// Resources one fused kernel may bind on this device.
     resource_limit: usize,
@@ -451,6 +475,7 @@ impl FusionPlanner {
             plan: None,
             events: FusionEvents::default(),
             precision: ContractionPrecision::Exact,
+            arithmetic: FusionArithmetic::default(),
             cost: FusionCostModel::default(),
             resource_limit,
         }
@@ -474,6 +499,15 @@ impl FusionPlanner {
     /// Admit `precision` from the next plan on; the caller replans.
     pub(crate) fn set_precision(&mut self, precision: ContractionPrecision) {
         self.precision = precision;
+    }
+
+    pub(crate) fn arithmetic(&self) -> FusionArithmetic {
+        self.arithmetic
+    }
+
+    /// Admit `arithmetic` from the next plan on; the caller replans.
+    pub(crate) fn set_arithmetic(&mut self, arithmetic: FusionArithmetic) {
+        self.arithmetic = arithmetic;
     }
 
     pub(crate) fn cost_model(&self) -> FusionCostModel {
@@ -700,7 +734,7 @@ impl FusionPlanner {
                     let definition = elide_local_temporaries(definition, start..end, sites, temporaries);
                     self.regions.push(Region {
                         nodes: start..end,
-                        id: definition.id(),
+                        id: self.arithmetic.kernel_id(definition.id()),
                         program: Program::Composed(definition),
                         cost: None,
                         status: FusionRegionStatus::Compiling,
@@ -743,7 +777,16 @@ impl FusionPlanner {
             *alone.entry(i).or_insert_with(|| {
                 let estimate = s
                     .exact
-                    .then(|| synthesize(&[s], target, ContractionPrecision::Exact, resource_limit).ok())
+                    .then(|| {
+                        synthesize(
+                            &[s],
+                            target,
+                            ContractionPrecision::Exact,
+                            FusionArithmetic::MatchRecorded,
+                            resource_limit,
+                        )
+                        .ok()
+                    })
                     .flatten()
                     .map(|p| p.lowered.estimate);
                 cost.site_ns(s, estimate.as_ref())
@@ -766,7 +809,7 @@ impl FusionPlanner {
                 let Some(next) = site(end) else { break };
                 run.push(next);
                 unfused_ns += alone_ns(end, next);
-                match synthesize(&run, target, self.precision, self.resource_limit) {
+                match synthesize(&run, target, self.precision, self.arithmetic, self.resource_limit) {
                     Ok(program) => {
                         end += 1;
                         if !recorded(start..end) {
@@ -800,7 +843,7 @@ impl FusionPlanner {
                     taken[start..end].fill(true);
                     self.regions.push(Region {
                         nodes: start..end,
-                        id: program.id(),
+                        id: self.arithmetic.kernel_id(program.id()),
                         program: Program::Semantic(Arc::new(program)),
                         cost: Some(priced),
                         status: FusionRegionStatus::Compiling,
@@ -860,11 +903,15 @@ impl FusionPlanner {
             let program = region.program.clone();
             let compiles = Arc::clone(&self.compiles);
             let id = region.id;
+            let arithmetic = self.arithmetic;
             let spawned = std::thread::Builder::new().name("goldy-fuse".into()).spawn(move || {
                 let outcome = if fault {
                     Err("injected fused compile failure".to_string())
                 } else {
-                    program.compile(&device).map(Arc::new).map_err(|e| format!("{e:#}"))
+                    program
+                        .compile(&device, arithmetic, id)
+                        .map(Arc::new)
+                        .map_err(|e| format!("{e:#}"))
                 };
                 let mut compiles = compiles.lock().unwrap();
                 compiles.running.remove(&id);

@@ -256,7 +256,7 @@ pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAc
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
 pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
-    prepare_kernel_as(device, def, None)
+    prepare_kernel_as(device, def, None, false)
 }
 
 /// [`prepare_kernel`] for a program whose variants are shared by every module of `identity`.
@@ -264,6 +264,7 @@ pub(super) fn prepare_kernel_as(
     device: &Runtime,
     def: KernelDef,
     identity: Option<KernelIdentity>,
+    precise_arithmetic: bool,
 ) -> Result<PreparedKernel> {
     if def.abi_version != goldy_shader_ir::KERNEL_ABI_VERSION {
         anyhow::bail!(
@@ -285,7 +286,7 @@ pub(super) fn prepare_kernel_as(
     }
     dump_kernel_artifacts(&def, None)?;
 
-    let mut shader = ShaderModule::from_slang(device, &def.source.canonical_slang)
+    let mut shader = ShaderModule::from_slang_with_arithmetic(device, &def.source.canonical_slang, precise_arithmetic)
         .with_context(|| format!("compiling rust kernel `{}`", def.entry))?;
     if let Some(identity) = identity {
         shader = shader.with_kernel_identity(identity);

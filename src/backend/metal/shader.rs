@@ -444,10 +444,15 @@ fn compile_stage_with_reflection(
     }
 
     let options = mtl::CompileOptions::new();
-    // Fast math lets the compiler reassociate sums and turn a division by a literal
-    // into a multiply, so a fused or specialized kernel would not round as the
-    // dispatches it replaces do. The other backends do not license either rewrite.
-    if desc.stage == SlangStage::Compute {
+    // A generated fused kernel carries this marker only when recorded dispatch
+    // boundaries remain observable rounding points. Other compute and graphics
+    // shaders keep Metal's fast default.
+    let precise_math = desc.stage == SlangStage::Compute
+        && desc
+            .extra_defines
+            .iter()
+            .any(|(name, _)| *name == crate::shader::PRECISE_MATH_DEFINE);
+    if precise_math {
         options.set_fast_math_enabled(false);
     }
     let library = device

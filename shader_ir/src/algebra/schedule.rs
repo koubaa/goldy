@@ -223,7 +223,20 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
 /// one element per thread.
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
-    let prepared = Prepared::rounded(region)?;
+    lower_on_with_rounding(region, sources, target, true)
+}
+
+fn lower_on_with_rounding(
+    region: &Region,
+    sources: &[IndexSource],
+    target: &Target,
+    round_results: bool,
+) -> Result<Lowered, LowerError> {
+    let prepared = if round_results {
+        Prepared::rounded(region)?
+    } else {
+        Prepared::new(region)?
+    };
     let mut lanes = None;
     for (_, body) in &prepared.bodies {
         for r in top_reductions(body) {
@@ -275,6 +288,23 @@ pub fn lower_graph(
         }
     }
     lower_on(graph.region(), sources, target)
+}
+
+/// [`lower_graph`] while allowing the compiler to combine arithmetic across the
+/// operations `graph` composes. Reduction association and `precision` are unchanged,
+/// but intermediate results need not round where the recorded dispatches stored them.
+pub fn lower_graph_relaxed(
+    graph: &Graph,
+    sources: &[IndexSource],
+    target: &Target,
+    precision: ContractionPrecision,
+) -> Result<Lowered, LowerError> {
+    if let (ContractionPrecision::F16Factors, true, Some(subgroup)) = (precision, target.matrix, target.subgroup) {
+        if let Some(lowered) = super::matrix::lower(graph, sources, subgroup) {
+            return Ok(lowered);
+        }
+    }
+    lower_on_with_rounding(graph.region(), sources, target, false)
 }
 
 /// Lowers `region` with `schedule`. [`Schedule::Matrix`] needs the contractions of a

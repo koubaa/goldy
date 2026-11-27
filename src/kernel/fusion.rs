@@ -356,11 +356,26 @@ impl FusedKernel {
 /// Compile a fused definition under its fused-kernel identity, so its specialized
 /// variants are shared by every pipeline of that definition.
 pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> anyhow::Result<PreparedKernel> {
+    let id = crate::FusionArithmetic::MatchRecorded.kernel_id(definition.id());
+    prepare_fused_with_arithmetic(device, definition, crate::FusionArithmetic::MatchRecorded, id)
+}
+
+pub(crate) fn prepare_fused_with_arithmetic(
+    device: &Runtime,
+    definition: &FusedDefinition,
+    arithmetic: crate::FusionArithmetic,
+    id: KernelId,
+) -> anyhow::Result<PreparedKernel> {
     let identity = KernelIdentity {
-        id: definition.id(),
+        id,
         scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
     };
-    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity))?;
+    let prepared = prepare_kernel_as(
+        device,
+        definition.lower(),
+        Some(identity),
+        arithmetic == crate::FusionArithmetic::MatchRecorded,
+    )?;
     tracing::debug!(
         kernel = %definition.name,
         id = %definition.id(),
@@ -379,9 +394,16 @@ pub(crate) fn prepare_synthesized(
     device: &Runtime,
     def: &KernelDef,
     scalars: Vec<String>,
+    arithmetic: crate::FusionArithmetic,
+    id: KernelId,
 ) -> anyhow::Result<PreparedKernel> {
-    let identity = KernelIdentity { id: def.id(), scalars };
-    let prepared = prepare_kernel_as(device, def.clone(), Some(identity))?;
+    let identity = KernelIdentity { id, scalars };
+    let prepared = prepare_kernel_as(
+        device,
+        def.clone(),
+        Some(identity),
+        arithmetic == crate::FusionArithmetic::MatchRecorded,
+    )?;
     tracing::debug!(kernel = %def.entry, id = %def.id(), params = def.params.len(), "semantic fusion prepared");
     Ok(prepared)
 }

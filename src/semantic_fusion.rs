@@ -10,7 +10,8 @@
 //! the schedules the device's [`Target`] offers. Each lifted reduction names the
 //! association its recorded kernel uses and lowering reproduces it, so the synthesized
 //! kernel stores what the recorded sequence stores, bit for bit, unless the scheme
-//! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units.
+//! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units,
+//! or selects [`crate::FusionArithmetic::Relaxed`].
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -609,6 +610,7 @@ pub(crate) fn synthesize(
     sites: &[&SemanticSite],
     target: &Target,
     precision: ContractionPrecision,
+    arithmetic: crate::FusionArithmetic,
     resource_limit: usize,
 ) -> Result<SemanticProgram, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
@@ -654,7 +656,11 @@ pub(crate) fn synthesize(
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
     }
-    let lowered = algebra::lower_graph(&graph, &sources, target, precision).map_err(|e| FusionRejection::Semantic {
+    let lowered = match arithmetic {
+        crate::FusionArithmetic::MatchRecorded => algebra::lower_graph(&graph, &sources, target, precision),
+        crate::FusionArithmetic::Relaxed => algebra::lower_graph_relaxed(&graph, &sources, target, precision),
+    }
+    .map_err(|e| FusionRejection::Semantic {
         stage: sites.len() - 1,
         reason: e.to_string(),
     })?;

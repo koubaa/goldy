@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fusion arithmetic is explicit** — `Scheme::set_fusion_arithmetic` selects
+  `FusionArithmetic::MatchRecorded` (the default) or `Relaxed`. The former carries a
+  precise-arithmetic marker through fused compilation and specialization; Metal disables
+  fast math only for those generated compute kernels. Other compute and graphics shaders
+  retain Metal's fast default.
+
 - **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
   packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each
   stacked slab, say) is a weight without a copy. BF16 weights stay contiguous.
@@ -243,8 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x + (a + b)`. A semantic region now rounds every sum, difference, product, quotient and
   reciprocal an operation ends in (`goldy_exact_add` / `goldy_exact_sub` join
   `goldy_exact_mul` / `goldy_exact_div`; `BuiltinFn` gains `ExactAdd` and `ExactSub`), and
-  `Region::round_products` is deprecated for `Region::round_results`. Metal compute
-  libraries compile without fast math, which licensed the same rewrites.
+  `Region::round_products` is deprecated for `Region::round_results`. Metal honors these
+  boundaries by compiling only marked fused kernels without fast math.
 - **Gathered reads at another batch position** — a sum over the rows of a gathered batch
   inlined the contraction at each row while the thread held only its own slab index, and
   read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).

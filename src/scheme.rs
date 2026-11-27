@@ -2358,10 +2358,12 @@ impl Scheme {
     /// The rounding automatic fusion may add to matrix products and other contractions.
     ///
     /// [`ContractionPrecision::Exact`] (the default) keeps fused results bit-identical to
-    /// the recorded dispatches. [`ContractionPrecision::F16Factors`] lets a semantic
-    /// region run its two-dimensional contractions on matrix units where the device
-    /// has them ([`crate::RuntimeCapabilities::matrix_multiply`]): each factor rounded to
-    /// f16, the products summed in f32 in the hardware's order. A change replans.
+    /// the recorded dispatches when [`Self::fusion_arithmetic`] is
+    /// [`crate::FusionArithmetic::MatchRecorded`]. [`ContractionPrecision::F16Factors`] lets a
+    /// semantic region run its two-dimensional contractions on matrix units where the
+    /// device has them ([`crate::RuntimeCapabilities::matrix_multiply`]): each factor
+    /// rounded to f16, the products summed in f32 in the hardware's order. A change
+    /// replans.
     ///
     /// [`ContractionPrecision::Exact`]: crate::ContractionPrecision::Exact
     /// [`ContractionPrecision::F16Factors`]: crate::ContractionPrecision::F16Factors
@@ -2375,6 +2377,31 @@ impl Scheme {
     /// See [`Self::set_contraction_precision`].
     pub fn contraction_precision(&self) -> crate::ContractionPrecision {
         self.fusion.precision()
+    }
+
+    /// Floating-point transformations automatic fusion may make across the
+    /// dispatch boundaries it removes.
+    ///
+    /// [`FusionArithmetic::MatchRecorded`] (the default) keeps those boundaries as
+    /// observable rounding points. [`FusionArithmetic::Relaxed`] lets the compiler
+    /// reassociate, contract and replace division with reciprocal multiplication across
+    /// them. Changing this policy drops and replans the promoted fusion plan.
+    ///
+    /// This is separate from deterministic algorithm selection: either policy can
+    /// produce repeatable results, but `Relaxed` need not match the recorded dispatches.
+    ///
+    /// [`FusionArithmetic::MatchRecorded`]: crate::FusionArithmetic::MatchRecorded
+    /// [`FusionArithmetic::Relaxed`]: crate::FusionArithmetic::Relaxed
+    pub fn set_fusion_arithmetic(&mut self, arithmetic: crate::FusionArithmetic) {
+        if self.fusion.arithmetic() != arithmetic {
+            self.fusion.set_arithmetic(arithmetic);
+            self.replan_fusion();
+        }
+    }
+
+    /// See [`Self::set_fusion_arithmetic`].
+    pub fn fusion_arithmetic(&self) -> crate::FusionArithmetic {
+        self.fusion.arithmetic()
     }
 
     /// How automatic fusion prices a semantic region against the dispatches it

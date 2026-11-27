@@ -9,9 +9,9 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, ContractionPrecision, FusionRegionStatus, FusionRejection, FusionSchedule, FusionTier,
-    GoldyError, NodeId, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorKernels,
-    TensorRecorder, TensorShape,
+    compute, BackendType, ContractionPrecision, FusionArithmetic, FusionRegionStatus, FusionRejection, FusionSchedule,
+    FusionTier, GoldyError, NodeId, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
+    TensorKernels, TensorRecorder, TensorShape,
 };
 use std::sync::Mutex;
 
@@ -972,9 +972,10 @@ fn turning_fusion_off_after_promotion_resubmits() {
     assert!(scheme.replay_stats().fusion_fallbacks >= 1);
 }
 
-/// Two schemes that record the same fused program compile it once.
+/// Arithmetic policy is part of fused-program identity: exact schemes share a
+/// compile, while a relaxed scheme gets its own source and pipeline.
 #[test]
-fn fused_program_compiles_once_per_runtime() {
+fn fused_program_cache_is_keyed_by_arithmetic_policy() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
@@ -982,9 +983,20 @@ fn fused_program_compiles_once_per_runtime() {
     let n = 64u32;
     let shape = TensorShape::vector(n);
     let mut schemes = Vec::new();
-    for _ in 0..2 {
+    for arithmetic in [
+        FusionArithmetic::MatchRecorded,
+        FusionArithmetic::MatchRecorded,
+        FusionArithmetic::Relaxed,
+    ] {
         let mut scheme = Scheme::new(&ctx);
+        assert_eq!(
+            scheme.fusion_arithmetic(),
+            FusionArithmetic::MatchRecorded,
+            "recorded arithmetic is the default"
+        );
         scheme.set_automatic_fusion(true);
+        scheme.set_fusion_arithmetic(arithmetic);
+        assert_eq!(scheme.fusion_arithmetic(), arithmetic);
         let a = Tensor::from_f32(&device, shape, &data(1, n)).unwrap();
         let b = Tensor::from_f32(&device, shape, &data(2, n)).unwrap();
         let out = Tensor::zeros(&device, shape, goldy::TensorDType::F32).unwrap();
@@ -1018,9 +1030,15 @@ fn fused_program_compiles_once_per_runtime() {
                 .iter()
                 .any(|region| region.status == FusionRegionStatus::Promoted)
         }),
-        "both schemes should promote"
+        "every scheme should promote"
     );
-    assert_eq!(goldy::test_support::fusion_compiles_started(&device), 1);
+    let ids: Vec<_> = schemes
+        .iter()
+        .map(|(scheme, _, _, _, _)| scheme.fusion_report().regions[0].kernel)
+        .collect();
+    assert_eq!(ids[0], ids[1], "exact schemes share one program");
+    assert_ne!(ids[0], ids[2], "relaxed arithmetic is a distinct program");
+    assert_eq!(goldy::test_support::fusion_compiles_started(&device), 2);
 }
 
 fn indexed_record(
