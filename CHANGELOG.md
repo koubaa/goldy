@@ -127,6 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
+  packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each
+  stacked slab, say) is a weight without a copy. BF16 weights stay contiguous.
+
 - **Less host work per retained resubmit** — cross-submit planning reads each parcel's
   sync state under its lock instead of cloning it into a ledger snapshot (twice per key),
   the Vulkan bindless slot table uses Fx hashing with inline per-context entries (as DX12

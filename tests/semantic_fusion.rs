@@ -1242,6 +1242,41 @@ fn gathered_batch_honors_strided_inputs() {
     assert_one_semantic_region(&scheme, 2);
 }
 
+/// Gathered products over the two halves of each slab of a stacked weight, and their
+/// elementwise product, are one kernel that matches the three dispatches.
+#[test]
+fn gathered_halves_and_their_product_match_unfused() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (n_slabs, rows, k, batch) = (4u32, 6u32, 40u32, 3u32);
+    let out = || Init::F32(TensorShape::vector(batch * rows), vec![0.0; (batch * rows) as usize]);
+    let init = [
+        Init::F32(
+            TensorShape::from_dims(&[n_slabs, 2 * rows, k]).unwrap(),
+            data(13, n_slabs * 2 * rows * k),
+        ),
+        Init::F32(TensorShape::vector(k), data(14, k)),
+        Init::U32(TensorShape::vector(batch), vec![3, 0, 2]),
+        out(),
+        out(),
+        out(),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        move |rec, t| {
+            let half = |h: u32| t[0].view().narrow(1, h * rows, rows);
+            rec.matmul_indexed_batch_into("first", half(0)?, t[1].view(), t[2].view(), 0, batch, 0, t[3].view())?;
+            rec.matmul_indexed_batch_into("second", half(1)?, t[1].view(), t[2].view(), 0, batch, 0, t[4].view())?;
+            let rows_of = |i: usize| t[i].view().reshape(&[batch, rows]);
+            rec.mul_into("product", rows_of(3)?, rows_of(4)?, rows_of(5)?)?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 3);
+}
+
 /// Adding the rows of a gathered batch reads every slab at each output coordinate,
 /// while a thread holds only its own slab index. The adds must not inline the
 /// contraction at another batch position, and fused matches unfused.
