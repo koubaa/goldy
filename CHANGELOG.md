@@ -251,7 +251,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reciprocal an operation ends in (`goldy_exact_add` / `goldy_exact_sub` join
   `goldy_exact_mul` / `goldy_exact_div`; `BuiltinFn` gains `ExactAdd` and `ExactSub`), and
   `Region::round_products` is deprecated for `Region::round_results`. Metal honors these
-  boundaries by compiling only marked fused kernels without fast math.
+  boundaries by compiling structured generated kernels and exact fused variants with safe
+  arithmetic transformations while retaining fast floating-point functions. Authored compute
+  and graphics shaders stay fully fast, and relaxed fused variants opt back into fast arithmetic.
 - **Gathered reads at another batch position** — a sum over the rows of a gathered batch
   inlined the contraction at each row while the thread held only its own slab index, and
   read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).

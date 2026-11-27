@@ -6,7 +6,9 @@ use super::types::{MetalState, ShaderState};
 use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use foreign_types::ForeignType;
 use mtl::{Device as MTLDevice, Library};
+use objc::{msg_send, sel, sel_impl};
 use std::collections::HashMap;
 
 /// Patch compute-shader MSL to fix Slang codegen bug that surfaces on Metal:
@@ -50,13 +52,6 @@ use std::collections::HashMap;
 pub(super) fn patch_compute_msl(msl: &str) -> String {
     let s = patch_compute_msl_entry_point_params(msl);
     patch_msl_threadgroup_copies(&s)
-}
-
-/// Preserve operation boundaries while leaving each operation under Metal's fast
-/// arithmetic rules. Without this attribute the compiler inlines the tiny helpers
-/// and folds constants or reassociates across their calls.
-fn patch_exact_helpers_noinline(msl: &str) -> String {
-    msl.replace("float goldy_exact_", "__attribute__((noinline)) float goldy_exact_")
 }
 
 /// Fix Bug A: restore the `constant*` qualifier and `[[buffer(1)]]` attribute for
@@ -422,11 +417,6 @@ fn compile_stage_with_reflection(
     } else if desc.stage == SlangStage::Compute {
         // Fix cross-module [ForceInline] + groupshared bugs (slang #10641; see patch_compute_msl).
         let patched = patch_compute_msl(&raw_msl);
-        let patched = if precise_math {
-            patch_exact_helpers_noinline(&patched)
-        } else {
-            patched
-        };
         if patched != raw_msl {
             tracing::debug!(
                 "Applied compute MSL patches (EntryPointParams / threadgroup copy) for {}",
@@ -461,6 +451,25 @@ fn compile_stage_with_reflection(
     }
 
     let options = mtl::CompileOptions::new();
+    if precise_math {
+        // New Metal splits arithmetic transformations from math-function choice.
+        // Generated structured kernels need stable operation boundaries, but retain
+        // the fast transcendental implementations used by their relaxed variants.
+        const MTL_MATH_MODE_SAFE: isize = 0;
+        const MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST: isize = 0;
+        let raw = options.as_ptr();
+        unsafe {
+            let supports_split: objc::runtime::BOOL =
+                msg_send![raw, respondsToSelector: sel!(setMathFloatingPointFunctions:)];
+            if supports_split == objc::runtime::YES {
+                let (): () = msg_send![raw, setMathMode: MTL_MATH_MODE_SAFE];
+                let (): () = msg_send![raw, setMathFloatingPointFunctions: MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST];
+            } else {
+                // Older SDKs expose only the coupled switch.
+                options.set_fast_math_enabled(false);
+            }
+        }
+    }
     let library = device
         .new_library_with_source(&msl_source, &options)
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
@@ -717,9 +726,8 @@ pub(super) fn destroy(
 #[cfg(test)]
 mod tests {
     use super::{
-        patch_compute_msl, patch_compute_msl_entry_point_params, patch_exact_helpers_noinline,
-        patch_mesh_msl_user_semantics, patch_msl_threadgroup_copies, patch_vertex_msl_entry_point_params,
-        patch_vertex_stage_in_pointer,
+        patch_compute_msl, patch_compute_msl_entry_point_params, patch_mesh_msl_user_semantics,
+        patch_msl_threadgroup_copies, patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
     };
 
     // ── patch_vertex_stage_in_pointer ────────────────────────────────────────
@@ -1122,19 +1130,5 @@ mod tests {
 
         let out = patch_compute_msl(msl);
         assert_eq!(out, msl, "clean MSL must pass through the orchestrator unchanged");
-    }
-
-    #[test]
-    fn exact_helpers_are_noinline_without_changing_other_math() {
-        let msl = concat!(
-            "float goldy_exact_add_0(float a, float b) { return a + b; }\n",
-            "float ordinary(float a, float b) { return a + b; }\n",
-            "float use_it() { return goldy_exact_add_0(1.0f, 2.0f); }\n",
-        );
-        let out = patch_exact_helpers_noinline(msl);
-        assert!(out.contains("__attribute__((noinline)) float goldy_exact_add_0(float a, float b)"));
-        assert!(out.contains("float ordinary(float a, float b)"));
-        assert!(!out.contains("__attribute__((noinline)) float ordinary"));
-        assert_eq!(out.matches("__attribute__((noinline))").count(), 1);
     }
 }

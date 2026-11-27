@@ -256,7 +256,10 @@ pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAc
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
 pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
-    prepare_kernel_as(device, def, None, false)
+    // Structured generated kernels may become constituents of a semantic region.
+    // Their standalone arithmetic is therefore the reference that exact fusion
+    // reproduces; carry the same arithmetic policy through both compilations.
+    prepare_kernel_as(device, def, None, true)
 }
 
 /// [`prepare_kernel`] for a program whose variants are shared by every module of `identity`.

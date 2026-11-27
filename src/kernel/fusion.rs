@@ -360,7 +360,7 @@ pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> a
         id: definition.id(),
         scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
     };
-    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity), false)?;
+    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity), true)?;
     tracing::debug!(
         kernel = %definition.name,
         id = %definition.id(),
