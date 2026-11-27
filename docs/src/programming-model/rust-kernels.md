@@ -54,7 +54,7 @@ dispatches. `Relaxed` permits reassociation, contraction, and reciprocal transfo
 within generated kernels and across boundaries fusion removes. It is suitable when the
 application accepts ordinary floating-point noise, as inference commonly does. This is
 not a determinism switch: either policy can be repeatable, and numerically sensitive
-decisions such as near-tied top-k or sampling can still amplify small differences.
+decisions such as near-tied selections can still amplify small differences.
 Hand-authored compute and graphics shaders keep their existing backend defaults.
 
 ## Signature mapping
