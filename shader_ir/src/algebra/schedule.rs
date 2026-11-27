@@ -847,9 +847,18 @@ impl Prepared {
             .collect())
     }
 
-    /// Whether output `n` reads a value whose storage offset mentions parameter `p`.
-    fn output_reads_param(&self, n: usize, p: IndexParam) -> bool {
+    /// Whether output `n` addresses parameter `p`: a read whose storage offset
+    /// mentions it, or the output's own storage.
+    fn output_mentions_param(&self, n: usize, p: IndexParam) -> bool {
         let sym = Sym::Param(p);
+        let stored = self
+            .region
+            .value(self.bodies[n].0)
+            .and_then(|v| v.storage.as_ref())
+            .is_some_and(|s| s.offset.mentions(sym));
+        if stored {
+            return true;
+        }
         let mut used = false;
         self.bodies[n].1.for_each_read(&mut |value, _| {
             let mentions = self
@@ -898,7 +907,7 @@ impl Prepared {
                 .outputs
                 .iter()
                 .copied()
-                .filter(|&n| self.output_reads_param(n, param))
+                .filter(|&n| self.output_mentions_param(n, param))
                 .collect();
             loaded.push(!readers.is_empty());
             if readers.is_empty() {
