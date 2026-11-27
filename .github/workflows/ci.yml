@@ -54,6 +54,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Frame tokens and lexer tokens are not model vocabulary, so `token` is not in this list.
+      - name: No model vocabulary
+        run: |
+          set -euo pipefail
+          if git grep -n -I -E -i \
+            -e '\bexperts?\b' \
+            -e '\bmoe\b' \
+            -e '\brouter\b' \
+            -e '\btop[-_ ]?k\b' \
+            -e '\bswiglu\b' \
+            -e '\battention\b' \
+            -- src shader_ir tests docs; then
+            echo "model vocabulary is not allowed in goldy"
+            exit 1
+          fi
+
       - name: Clippy (no features)
         run: cargo clippy --no-default-features -- -D warnings
 

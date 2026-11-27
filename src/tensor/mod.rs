@@ -3,7 +3,7 @@
 //! This feature owns concrete shapes, dtypes, strides, views, broadcasting, and
 //! general tensor operations. It records into the existing [`crate::Scheme`] —
 //! there is no second scheduler. Autograd, modules, optimizers, model formats,
-//! RMSNorm, RoPE, attention, and KV-cache policy are **out of scope**.
+//! RMSNorm, RoPE, sequence mix, and cache policy are **out of scope**.
 //!
 //! Views are metadata lenses: they never mint a new ownership identity. Binding a
 //! view claims a conservative buffer-range envelope (or the parent buffer) so

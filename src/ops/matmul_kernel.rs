@@ -111,56 +111,59 @@ fn gemv_f32(
     }
 }
 
-/// `gemv_f32` with `a_off = ids[slot] * stride` read on the device.
+/// Gather `batch` slabs and multiply each by its right-hand side.
 ///
-/// `experts == 0` is not used; an id past `experts` writes zeros and does not
-/// read `a`. Every thread takes the same barriers as [`gemv_f32`].
+/// Sizes and bases live in `params` so the push block stays eight user words:
+/// `m, k, lda, slab_stride, slabs, first, batch, x_stride, a_base, x_base, y_base, index_base, x_elem, y_elem`.
+/// A slab index `>= slabs` writes a zero row and does not read `a` (masked gather).
+/// `x_stride == 0` reuses one vector. Every thread takes the same barriers as [`gemv_f32`].
 #[goldy::compute(workgroup_size = [128, 1, 1])]
-fn gemv_f32_indexed(
-    a: &[f32],
-    x: &[f32],
-    y: goldy::gpu::Scattered<f32>,
-    ids: &[u32],
-    m: u32,
-    k: u32,
-    stride: u32,
-    experts: u32,
-    slot: u32,
-    a_base: u32,
-    count: u32,
-    x_stride: u32,
-) {
+fn gemv_f32_indexed(a: &[f32], x: &[f32], y: goldy::gpu::Scattered<f32>, indices: &[u32], params: &[u32]) {
+    let m = params[0];
+    let k = params[1];
+    let lda = params[2];
+    let slab_stride = params[3];
+    let slabs = params[4];
+    let first = params[5];
+    let batch_n = params[6];
+    let x_stride = params[7];
+    let a_base = params[8];
+    let x_base = params[9];
+    let y_base = params[10];
+    let index_base = params[11];
+    let x_elem = params[12];
+    let y_elem = params[13];
     let mut partial = goldy::gpu::workgroup_array::<f32, 128>();
     let local = goldy::gpu::local_id().x;
     let lane = local % 32;
     let row = goldy::gpu::workgroup_id().x * 4 + local / 32;
     let batch = goldy::gpu::workgroup_id().y;
     let mut in_batch = 1u32;
-    if batch >= count {
+    if batch >= batch_n {
         in_batch = 0u32;
     }
-    let id = ids[slot + batch];
+    let slab = indices[index_base + first + batch];
     let mut ok = 1u32;
-    if in_batch == 0u32 || id >= experts {
+    if in_batch == 0u32 || slab >= slabs {
         ok = 0u32;
     }
-    let a_off = id * stride + a_base;
-    let mut x_off = 0u32;
+    let a_off = slab * slab_stride + a_base;
+    let mut x_off = x_base;
     if x_stride != 0u32 {
-        x_off = batch * x_stride;
+        x_off = x_base + batch * x_stride;
     }
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     if ok != 0u32 && row < m {
-        let a_row = a_off + row * k;
+        let a_row = a_off + row * lda;
         let mut j = lane;
         while j + 32 < k {
-            acc0 = acc0 + a[a_row + j] * x[x_off + j];
-            acc1 = acc1 + a[a_row + j + 32] * x[x_off + j + 32];
+            acc0 = acc0 + a[a_row + j] * x[x_off + j * x_elem];
+            acc1 = acc1 + a[a_row + j + 32] * x[x_off + (j + 32) * x_elem];
             j = j + 64;
         }
         if j < k {
-            acc0 = acc0 + a[a_row + j] * x[x_off + j];
+            acc0 = acc0 + a[a_row + j] * x[x_off + j * x_elem];
         }
     }
     partial[local] = acc0 + acc1;
@@ -178,7 +181,7 @@ fn gemv_f32_indexed(
         if ok == 0u32 {
             value = 0.0;
         }
-        y[batch * m + row] = value;
+        y[y_base + (batch * m + row) * y_elem] = value;
     }
 }
 
@@ -188,13 +191,13 @@ fn gemv_bf16(
     bits: &[u32],
     x: &[f32],
     y: goldy::gpu::Scattered<f32>,
-    ids: &[u32],
+    indices: &[u32],
     m: u32,
     k: u32,
     a_off: u32,
     stride: u32,
-    experts: u32,
-    slot: u32,
+    slabs: u32,
+    first: u32,
 ) {
     let mut partial = goldy::gpu::workgroup_array::<f32, 128>();
     let local = goldy::gpu::local_id().x;
@@ -202,12 +205,12 @@ fn gemv_bf16(
     let row = goldy::gpu::workgroup_id().x * 4 + local / 32;
     let mut ok = 1u32;
     let mut base = a_off;
-    if experts != 0u32 {
-        let id = ids[slot];
-        if id >= experts {
+    if slabs != 0u32 {
+        let slab_index = indices[first];
+        if slab_index >= slabs {
             ok = 0u32;
         }
-        base = id * stride;
+        base = slab_index * stride;
     }
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
@@ -266,14 +269,14 @@ fn gemm_bf16(
     bits: &[u32],
     b: &[f32],
     c: goldy::gpu::Scattered<f32>,
-    ids: &[u32],
+    indices: &[u32],
     m: u32,
     n: u32,
     k: u32,
     a_off: u32,
     stride: u32,
-    experts: u32,
-    slot: u32,
+    slabs: u32,
+    first: u32,
 ) {
     let idx = goldy::gpu::global_id().x;
     let total = m * n;
@@ -282,12 +285,12 @@ fn gemm_bf16(
     }
     let mut ok = 1u32;
     let mut base = a_off;
-    if experts != 0u32 {
-        let id = ids[slot];
-        if id >= experts {
+    if slabs != 0u32 {
+        let slab_index = indices[first];
+        if slab_index >= slabs {
             ok = 0u32;
         }
-        base = id * stride;
+        base = slab_index * stride;
     }
     let i = idx / n;
     let j = idx - i * n;
@@ -310,7 +313,7 @@ fn gemm_bf16(
 
 /// Block-scaled GEMV. `elem_kind` 0 is E2M1 (even column in the low nibble),
 /// 1 is one E4M3 byte per column. `scale_kind` 0 is E4M3, 1 is E8M0.
-/// `experts == 0` reads slab 0 at the start of `codes`.
+/// `slabs == 0` reads slab 0 at the start of `codes`.
 #[goldy::compute(workgroup_size = [128, 1, 1])]
 fn gemv_block(
     codes: &[u32],
@@ -318,13 +321,13 @@ fn gemv_block(
     y: goldy::gpu::Scattered<f32>,
     scales: &[u32],
     global: &[f32],
-    ids: &[u32],
+    indices: &[u32],
     m: u32,
     k: u32,
     kind: u32,
     block_cols: u32,
-    experts: u32,
-    slot: u32,
+    slabs: u32,
+    first: u32,
     rows: u32,
     global_per_slab: u32,
 ) {
@@ -360,12 +363,12 @@ fn gemv_block(
     goldy::gpu::workgroup_barrier();
     let mut ok = 1u32;
     let mut slab = 0u32;
-    if experts != 0u32 {
-        let id = ids[slot];
-        if id >= experts {
+    if slabs != 0u32 {
+        let slab_index = indices[first];
+        if slab_index >= slabs {
             ok = 0u32;
         } else {
-            slab = id;
+            slab = slab_index;
         }
     }
     let mut factor = global[0];

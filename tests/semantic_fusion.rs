@@ -962,24 +962,24 @@ fn indexed_record(
     slot: u32,
 ) -> impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
     move |rec, t| {
-        rec.matmul_indexed_into("expert", t[0].view(), t[1].view(), t[2].view(), slot, t[3].view())?;
+        rec.matmul_indexed_into("gather", t[0].view(), t[1].view(), t[2].view(), slot, t[3].view())?;
         rec.mul_scalar_into("scale", t[3].view(), 2.0, t[4].view())?;
         Ok((Vec::new(), Vec::new()))
     }
 }
 
 /// Indexed GEMV plus a scale matches the unfused kernel byte for byte, including
-/// an id past `experts` and a `k` that is not a multiple of 64.
+/// an index past the slab count and a `k` that is not a multiple of 64.
 #[test]
 fn indexed_gemv_scale_matches_unfused() {
     let _gpu = gpu_lock();
     let device = runtime();
-    let (experts, rows, k, slot) = (3u32, 5u32, 40u32, 1u32);
+    let (slabs, rows, k, slot) = (3u32, 5u32, 40u32, 1u32);
     let mut ids = [0u32, 3, 2];
     let init = [
         Init::F32(
-            TensorShape::from_dims(&[experts, rows, k]).unwrap(),
-            data(1, experts * rows * k),
+            TensorShape::from_dims(&[slabs, rows, k]).unwrap(),
+            data(1, slabs * rows * k),
         ),
         Init::F32(TensorShape::vector(k), data(2, k)),
         Init::U32(TensorShape::vector(3), ids.to_vec()),
@@ -1009,12 +1009,12 @@ fn indexed_gemv_scale_matches_unfused() {
 fn indexed_gemv_honors_a_weight_offset() {
     let _gpu = gpu_lock();
     let device = runtime();
-    let (experts, rows, k, slot, pad) = (2u32, 6u32, 20u32, 0u32, 7u32);
-    let slabs = data(4, experts * rows * k);
+    let (n_slabs, rows, k, slot, pad) = (2u32, 6u32, 20u32, 0u32, 7u32);
+    let slab_bytes = data(4, n_slabs * rows * k);
     let mut weight = vec![0.0; pad as usize];
-    weight.extend_from_slice(&slabs);
+    weight.extend_from_slice(&slab_bytes);
     let init = [
-        Init::F32(TensorShape::vector(pad + experts * rows * k), weight),
+        Init::F32(TensorShape::vector(pad + n_slabs * rows * k), weight),
         Init::F32(TensorShape::vector(k), data(5, k)),
         Init::U32(TensorShape::vector(1), vec![1]),
         Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
@@ -1026,15 +1026,15 @@ fn indexed_gemv_honors_a_weight_offset() {
         move |rec, t| {
             let mut desc = goldy::MatMulDesc::gemv(rows, k);
             desc.index = Some(goldy::ops::MatMulIndex {
-                count: 1,
+                batch: 1,
                 x_stride: 0,
-                slot,
-                experts,
-                stride_elems: rows * k,
+                first: slot,
+                slabs: n_slabs,
+                slab_stride: rows * k,
                 global_per_slab: false,
             });
             rec.scheme()
-                .matmul("expert", desc)
+                .matmul("gather", desc)
                 .a(t[0].buffer(), goldy::MatMulView::offset(u64::from(pad)))
                 .b(t[1].buffer(), goldy::MatMulView::packed())
                 .out(t[3].buffer(), goldy::MatMulView::packed())

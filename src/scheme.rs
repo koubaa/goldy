@@ -951,6 +951,8 @@ pub struct Scheme {
     yield_stats: HashMap<u32, Arc<Mutex<crate::petition::YieldStats>>>,
     /// Pool buffers the executed IR's temporaries are lowered onto.
     temporary_storage: TemporaryStorage,
+    /// Parameter buffers for gathered GEMVs. The node only stores the resource id.
+    matmul_param_buffers: Vec<crate::Buffer>,
 }
 
 /// The IR a scheme submits: its promoted fusion plan, else what was recorded.
@@ -1008,6 +1010,7 @@ impl Scheme {
             record_errors: Vec::new(),
             yield_stats: HashMap::new(),
             temporary_storage: TemporaryStorage::default(),
+            matmul_param_buffers: Vec::new(),
         }
     }
 
@@ -2109,6 +2112,17 @@ impl Scheme {
         desc: crate::ops::MatMulDesc,
     ) -> crate::ops::MatMulBuilder<'a> {
         crate::ops::MatMulBuilder::new(self, label.into(), desc)
+    }
+
+    pub(crate) fn alloc_matmul_params(&self, words: &[u32]) -> Result<crate::Buffer, GoldyError> {
+        self.ctx
+            .runtime()
+            .acquire_buffer_with_data(words, crate::types::BufferKind::Scattered)
+            .map_err(GoldyError::Backend)
+    }
+
+    pub(crate) fn retain_matmul_params(&mut self, buf: crate::Buffer) {
+        self.matmul_param_buffers.push(buf);
     }
 
     pub(crate) fn push_record_error(&mut self, msg: String) {

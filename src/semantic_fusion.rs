@@ -175,24 +175,24 @@ pub(crate) fn matmul(
                 order: GEMV_ORDER,
             }
         }
-        // y[i] = sum{s}(A[id * stride + offset + i, s] * x[s]). `id` is one u32.
-        // An id past `experts` stores zeros, the same as `gemv_f32_indexed`.
+        // y[i] = sum{s}(A[index * stride + offset + i, s] * x[s]). One slab index.
+        // An index past `slabs` yields a zero row, the same as `gemv_f32_indexed`.
         MatMulFallback::GemvIndexed if desc.dtype == MatMulDType::F32 && desc.n == 1 => {
             let index = desc.index?;
-            // A run of ids is the stdlib kernel. The contraction below is one id.
-            if index.experts == 0 || index.count != 1 || index.x_stride != 0 {
+            // A run of indices stays on the stdlib kernel. This contraction is one index.
+            if index.slabs == 0 || index.batch != 1 || index.x_stride != 0 {
                 return None;
             }
-            let ids = ids?;
-            let id_parcel = s.parcel(ids);
-            let id = s.index_param(
-                "id",
-                0..i64::from(index.experts),
+            let indices = ids?;
+            let index_parcel = s.parcel(indices);
+            let slab = s.index_param(
+                "slab",
+                0..i64::from(index.slabs),
                 IndexSource {
-                    parcel: id_parcel,
-                    element: index.slot,
+                    parcel: index_parcel,
+                    element: index.first,
                     element_type: ElementType::U32,
-                    // The stdlib kernel writes zeros when `id >= experts`.
+                    // The stdlib kernel writes a zero row when the index is past `slabs`.
                     zero_if_outside: true,
                 },
             );
@@ -202,7 +202,7 @@ pub(crate) fn matmul(
                 return None;
             }
             let row = i64::from(a.leading_dim);
-            let base = Affine::sym(Sym::Param(id)) * i64::from(index.stride_elems)
+            let base = Affine::sym(Sym::Param(slab)) * i64::from(index.slab_stride)
                 + Affine::constant(i64::try_from(a.offset_elements).ok()?);
             let ld = |o: &MatMulOperand| i64::from(o.leading_dim);
             Contraction {
