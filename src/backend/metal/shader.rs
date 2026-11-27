@@ -443,8 +443,15 @@ fn compile_stage_with_reflection(
         }
     }
 
+    let options = mtl::CompileOptions::new();
+    // Fast math lets the compiler reassociate sums and turn a division by a literal
+    // into a multiply, so a fused or specialized kernel would not round as the
+    // dispatches it replaces do. The other backends do not license either rewrite.
+    if desc.stage == SlangStage::Compute {
+        options.set_fast_math_enabled(false);
+    }
     let library = device
-        .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
+        .new_library_with_source(&msl_source, &options)
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
 
     if matches!(desc.stage, SlangStage::Mesh | SlangStage::Amplification) {
