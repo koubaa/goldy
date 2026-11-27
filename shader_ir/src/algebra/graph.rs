@@ -4,7 +4,7 @@
 use super::affine::{Affine, IndexVar};
 use super::compose::ComposeError;
 use super::op::{Factor, Op, OpError, OpKind};
-use super::region::{Region, Role};
+use super::region::{ParcelId, Region, Role};
 use super::term::{BinaryOp, ReduceOrder, Term, ValueId};
 use std::collections::HashMap;
 use std::fmt;
@@ -90,6 +90,19 @@ impl Graph {
         self.values.push((inputs, outputs));
         self.ops.push(op);
         Ok(k)
+    }
+
+    /// Makes every output stored to `parcel` a temporary: the composition no longer
+    /// stores it, and the operations that read it read the value. Returns how many
+    /// outputs it demoted.
+    pub fn demote(&mut self, parcel: ParcelId) -> usize {
+        let stored: Vec<ValueId> = self
+            .region
+            .values()
+            .filter(|(_, v)| v.role == Role::Output && v.storage.as_ref().is_some_and(|s| s.parcel == parcel))
+            .map(|(id, _)| id)
+            .collect();
+        stored.into_iter().filter(|&id| self.region.demote(id)).count()
     }
 
     pub fn ops(&self) -> &[Op] {

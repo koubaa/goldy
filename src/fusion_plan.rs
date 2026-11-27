@@ -32,7 +32,9 @@ use crate::kernel::{
 };
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
-use crate::semantic_fusion::{lift_kernel, synthesize, target as semantic_target, SemanticProgram, SemanticSite};
+use crate::semantic_fusion::{
+    lift_kernel, synthesize, target as semantic_target, Description, SemanticProgram, SemanticSite, SiteScalar,
+};
 use crate::shader::ShaderProvenance;
 use crate::task_graph::{
     DispatchDim, GraphIR, GroupInfo, NodeAccess, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId,
@@ -593,7 +595,7 @@ impl FusionPlanner {
             r.nodes.contains(&node)
                 && match &r.program {
                     Program::Composed(_) => false,
-                    Program::Semantic(p) => !p.scalars.contains(&(node - r.nodes.start, slot)),
+                    Program::Semantic(p) => !p.scalars.contains(&(node - r.nodes.start, SiteScalar::Slot(slot))),
                 }
         })
     }
@@ -625,11 +627,12 @@ impl FusionPlanner {
         ir: &GraphIR,
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
+        described: &HashMap<u32, Description>,
         temporaries: &[TemporaryUse],
     ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
             let target = semantic_target(&device.capabilities());
-            self.match_regions(ir, sites, semantic, temporaries, &target);
+            self.match_regions(ir, sites, semantic, described, temporaries, &target);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;
                 return None;
@@ -666,7 +669,7 @@ impl FusionPlanner {
                         fused_node(ir, sites, region.nodes.clone(), definition, &kernel, self.arithmetic)
                     }
                     Program::Semantic(program) => {
-                        semantic_node(ir, region.nodes.clone(), program, &kernel, self.arithmetic)
+                        semantic_node(ir, described, region.nodes.clone(), program, &kernel, self.arithmetic)
                     }
                 };
                 node.map(|node| (node, kernel))
@@ -709,13 +712,14 @@ impl FusionPlanner {
         ir: &GraphIR,
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
+        described: &HashMap<u32, Description>,
         temporaries: &[TemporaryUse],
         target: &Target,
     ) {
         self.regions.clear();
         self.rejected.clear();
         self.faulted.clear();
-        let taken = self.match_semantic(ir, sites, semantic, target);
+        let taken = self.match_semantic(ir, sites, semantic, described, target);
         let view = |i: usize| -> Option<StageView<'_>> {
             if taken[i] {
                 return None;
@@ -792,29 +796,43 @@ impl FusionPlanner {
         ir: &GraphIR,
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
+        described: &HashMap<u32, Description>,
         target: &Target,
     ) -> Vec<bool> {
         let n = ir.nodes.len();
         let lifted: HashMap<usize, SemanticSite> = sites
             .iter()
-            .filter(|(i, _)| !semantic.contains_key(i))
+            .filter(|(i, _)| !semantic.contains_key(i) && !described.contains_key(i))
             .filter_map(|(&i, site)| Some((i as usize, lift_kernel(site, ir.nodes.get(i as usize)?)?)))
             .collect();
         let reassociates = self.precision != ContractionPrecision::Exact;
-        let semantic = |i: usize| semantic.get(&(i as u32)).filter(|s| s.exact || reassociates);
-        let site = |i: usize| semantic(i).or_else(|| lifted.get(&i));
+        let admitted = |s: &SemanticSite| s.exact || reassociates;
+        let semantic = |i: usize| -> Option<Vec<&SemanticSite>> {
+            if let Some(site) = semantic.get(&(i as u32)) {
+                return admitted(site).then(|| vec![site]);
+            }
+            let description = described.get(&(i as u32))?;
+            description
+                .sites
+                .iter()
+                .all(admitted)
+                .then(|| description.sites.iter().collect())
+        };
+        let site = |i: usize| semantic(i).or_else(|| lifted.get(&i).map(|s| vec![s]));
         let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic(i).is_some());
-        // Each site as recorded, priced once.
+        // Each node as recorded, priced once.
         let mut alone: HashMap<usize, f64> = HashMap::new();
         let cost = self.cost;
         let resource_limit = self.resource_limit;
-        let mut alone_ns = |i: usize, s: &SemanticSite| {
+        let mut alone_ns = |i: usize, s: &[&SemanticSite]| {
             *alone.entry(i).or_insert_with(|| {
                 let estimate = s
-                    .exact
+                    .iter()
+                    .all(|s| s.exact)
                     .then(|| {
+                        let run: Vec<(usize, &SemanticSite)> = s.iter().map(|&s| (0, s)).collect();
                         synthesize(
-                            &[s],
+                            &run,
                             target,
                             ContractionPrecision::Exact,
                             ArithmeticPolicy::MatchRecorded,
@@ -824,7 +842,11 @@ impl FusionPlanner {
                     })
                     .flatten()
                     .map(|p| p.lowered.estimate);
-                cost.site_ns(s, estimate.as_ref())
+                match s {
+                    [s] => cost.site_ns(s, estimate.as_ref()),
+                    // An authored kernel runs the whole description as one dispatch.
+                    _ => estimate.map_or(cost.dispatch_ns, |e| cost.kernel_ns(&e)),
+                }
             })
         };
         let mut taken = vec![false; n];
@@ -834,16 +856,16 @@ impl FusionPlanner {
                 start += 1;
                 continue;
             };
-            let mut run = vec![first];
-            let mut unfused_ns = alone_ns(start, first);
+            let mut unfused_ns = alone_ns(start, &first);
+            let mut run: Vec<(usize, &SemanticSite)> = first.into_iter().map(|s| (0, s)).collect();
             // The prefix that saves the most, and the longest one, with their costs.
             let mut best: Option<(SemanticProgram, usize, FusionCost)> = None;
             let mut longest: Option<(usize, FusionCost)> = None;
             let mut end = start + 1;
             while end < n && ir.nodes[end].group == ir.nodes[start].group {
                 let Some(next) = site(end) else { break };
-                run.push(next);
-                unfused_ns += alone_ns(end, next);
+                unfused_ns += alone_ns(end, &next);
+                run.extend(next.into_iter().map(|s| (end - start, s)));
                 match synthesize(&run, target, self.precision, self.arithmetic, self.resource_limit) {
                     Ok(program) => {
                         end += 1;
@@ -1167,6 +1189,7 @@ fn joined_label(ir: &GraphIR, nodes: Range<usize>) -> String {
 /// operands the synthesized kernel does not read are dropped.
 fn semantic_node(
     ir: &GraphIR,
+    described: &HashMap<u32, Description>,
     nodes: Range<usize>,
     program: &SemanticProgram,
     kernel: &PreparedKernel,
@@ -1175,7 +1198,8 @@ fn semantic_node(
     let pipeline = kernel.pipeline_for(arithmetic)?;
     let mut bindings: Vec<ResourceBinding> = Vec::new();
     for i in nodes.clone() {
-        for binding in &ir.nodes[i].bindings {
+        let describing = described.get(&(i as u32)).map_or(&[][..], |d| d.bindings.as_slice());
+        for binding in ir.nodes[i].bindings.iter().chain(describing) {
             let parent = match binding.resource {
                 ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
                 _ => continue,
@@ -1211,7 +1235,13 @@ fn semantic_node(
         .collect();
     let mut user_slots = Vec::with_capacity(program.lowered.scalars.len());
     for s in &program.lowered.scalars {
-        let (k, slot) = program.scalars[s.index()];
+        let (k, slot) = match program.scalars[s.index()] {
+            (_, SiteScalar::Bits(bits)) => {
+                user_slots.push(bits);
+                continue;
+            }
+            (k, SiteScalar::Slot(slot)) => (k, slot),
+        };
         let NodeKind::Dispatch {
             user_slots: recorded, ..
         } = &ir.nodes[nodes.start + k].kind

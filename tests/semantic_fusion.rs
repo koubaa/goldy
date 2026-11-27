@@ -923,6 +923,131 @@ fn contraction_with_a_generated_epilogue() {
     assert_eq!(twin.fused().replay_stats().fusion_fallbacks, fallbacks + 1);
 }
 
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn shifted_product(
+    #[tensor(shape = [n])] x: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] w: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] y: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < y.len() {
+        let shifted = x[i] + 1.5;
+        y[i] = shifted * w[i];
+    }
+}
+
+/// `shifted_product`'s tensors after `sum` (`a + b`) and before `halve`: `a, b, w,
+/// x, y, z, scratch`.
+fn described_init() -> [Init; 7] {
+    let vector = TensorShape::vector(ROWS);
+    let zeros = || Init::F32(vector, vec![0.0; ROWS as usize]);
+    [
+        Init::F32(vector, data(1, ROWS)),
+        Init::F32(vector, data(2, ROWS)),
+        Init::F32(vector, data(3, ROWS)),
+        zeros(),
+        zeros(),
+        zeros(),
+        zeros(),
+    ]
+}
+
+/// `x = a + b`, then `shifted_product` described through `scratch` as `exact` says,
+/// then `z = y * 0.5`.
+fn record_described(rec: &mut TensorRecorder<'_>, t: &[Tensor], exact: bool) -> Recorded {
+    rec.add_into("sum", t[0].view(), t[1].view(), t[3].view())?;
+    let device = rec.scheme().context().runtime().clone();
+    let kernel = shifted_product::Kernel::prepare(&device)?;
+    let node = kernel
+        .record(rec.scheme(), "shifted_product", t[3].view(), t[2].view(), t[4].view())?
+        .over_1d(ROWS)
+        .node();
+    rec.describe(node, exact, |d| {
+        d.add_scalar_into("shift", t[3].view(), 1.5, t[6].view())?;
+        d.mul_into("product", t[6].view(), t[2].view(), t[4].view())
+    })?;
+    rec.mul_scalar_into("halve", t[4].view(), 0.5, t[5].view())?;
+    Ok((Vec::new(), vec![node]))
+}
+
+/// A described kernel fuses with its neighbours as the operations that describe it,
+/// and the region does not store what only the description writes.
+#[test]
+fn described_dispatch_fuses_as_its_description() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let scheme = fused_matches_unfused(&device, &described_init(), |rec, t| record_described(rec, t, true), 5);
+    assert_one_semantic_region(&scheme, 3);
+    let labels = &scheme.fusion_report().regions[0].labels;
+    assert!(labels.iter().any(|l| l.to_string() == "shifted_product"), "{labels:?}");
+}
+
+/// A description that does not round as its kernel does stays out of regions unless
+/// contractions may reassociate; its kernel runs as recorded.
+#[test]
+fn inexact_description_needs_reassociation() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let scheme = fused_matches_unfused(&device, &described_init(), |rec, t| record_described(rec, t, false), 5);
+    let report = scheme.fusion_report();
+    assert!(
+        report
+            .regions
+            .iter()
+            .all(|r| r.labels.iter().all(|l| l.to_string() != "shifted_product")),
+        "{report:?}"
+    );
+    assert_eq!(scheme.executed_node_count(), 3);
+}
+
+#[test]
+fn describe_needs_composable_operations() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let mut scheme = Scheme::new(&ctx);
+    let t = tensors(&device, &described_init());
+    let flags = Tensor::from_u32(&device, TensorShape::vector(4), &[0; 4]).expect("tensor");
+    let kernel = shifted_product::Kernel::prepare(&device).expect("kernel");
+    let node = kernel
+        .record(&mut scheme, "shifted_product", t[3].view(), t[2].view(), t[4].view())
+        .expect("record")
+        .over_1d(ROWS)
+        .node();
+    let mut rec = kernels.recorder(&mut scheme);
+    let err = rec
+        .describe(node, true, |d| {
+            d.fill("flags", flags.view(), goldy::TensorScalar::U32(1))?;
+            d.mul_into("product", t[3].view(), t[2].view(), t[4].view())
+        })
+        .expect_err("a fill of integers has no site");
+    assert!(err.to_string().contains("flags"), "{err}");
+}
+
+/// What a scheme keeps alive lives as long as it and every scheme that includes it.
+#[test]
+fn kept_values_live_as_long_as_their_schemes() {
+    struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut parent = Scheme::new(&ctx);
+    let mut child = Scheme::new(&ctx);
+    child.keep_alive(Flag(dropped.clone()));
+    parent.include("child", &child).expect("include").finish();
+    drop(child);
+    assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+    drop(parent);
+    assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 /// Turning fusion off after a plan has promoted must re-record, not resubmit a
 /// command buffer whose elided temporaries were just released.
 #[test]
