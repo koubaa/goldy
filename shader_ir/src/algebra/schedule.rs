@@ -171,6 +171,11 @@ pub enum LowerError {
     IndexSource {
         param: String,
     },
+    /// A read of a gathered operand addresses another element of an index parameter's
+    /// source than the one its thread loads.
+    GatheredRead {
+        param: String,
+    },
 }
 
 impl fmt::Display for LowerError {
@@ -188,6 +193,12 @@ impl fmt::Display for LowerError {
             LowerError::IndexRange => f.write_str("an index expression can leave the 32-bit range"),
             LowerError::IndexSource { param } => {
                 write!(f, "the source of index parameter `{param}` is also data or written")
+            }
+            LowerError::GatheredRead { param } => {
+                write!(
+                    f,
+                    "a read needs another element of index parameter `{param}` than its thread loads"
+                )
             }
         }
     }
@@ -824,6 +835,19 @@ impl Prepared {
     /// Rewrites each source element from the region's index variables to the
     /// coordinates [`Self::new`] assigned to the output axes that bind them.
     fn resolve_index_sources(&self, sources: &[IndexSource]) -> Result<Vec<IndexSource>, LowerError> {
+        let map = self.bound_coordinates()?;
+        self.check_gathered_reads(sources, &map)?;
+        Ok(sources
+            .iter()
+            .map(|source| IndexSource {
+                element: source.element.substitute(&|v| map.get(&v).cloned()),
+                ..source.clone()
+            })
+            .collect())
+    }
+
+    /// Each output's domain variables, as the coordinates [`Self::new`] assigned to them.
+    fn bound_coordinates(&self) -> Result<HashMap<IndexVar, Affine>, LowerError> {
         let mut map: HashMap<IndexVar, Affine> = HashMap::new();
         for (n, &(id, _)) in self.bodies.iter().enumerate() {
             let value = self.region.value(id).expect("an output is live");
@@ -838,13 +862,49 @@ impl Prepared {
                 }
             }
         }
-        Ok(sources
-            .iter()
-            .map(|source| IndexSource {
-                element: source.element.substitute(&|v| map.get(&v).cloned()),
-                ..source.clone()
-            })
-            .collect())
+        Ok(map)
+    }
+
+    /// Declines a read the thread's index parameters do not address.
+    ///
+    /// A parameter whose source element depends on an index variable gathers along the
+    /// one stride-zero axis of each storage that mentions it, and each thread loads it
+    /// once, at the coordinate that variable is bound to. Substituting a gathered value
+    /// into a reader can leave a read on that axis elsewhere, such as at a constant
+    /// slot; that read needs a different element of the source than the thread holds.
+    fn check_gathered_reads(&self, sources: &[IndexSource], map: &HashMap<IndexVar, Affine>) -> Result<(), LowerError> {
+        for (p, source) in sources.iter().enumerate() {
+            let vars: Vec<IndexVar> = source.element.indices().collect();
+            if vars.is_empty() {
+                continue;
+            }
+            let param = IndexParam(p as u32);
+            let declined = || LowerError::GatheredRead {
+                param: self.region.param_name(param).to_string(),
+            };
+            let bound = match vars.as_slice() {
+                [v] => map.get(v).ok_or_else(declined)?,
+                _ => return Err(declined()),
+            };
+            let mut addressed = true;
+            for (_, body) in &self.bodies {
+                body.for_each_read(&mut |value, index| {
+                    let storage = self.storage(value);
+                    if !storage.offset.mentions(Sym::Param(param)) {
+                        return;
+                    }
+                    let mut gathered = (0..storage.strides.len()).filter(|&a| storage.strides[a] == 0);
+                    addressed &= match (gathered.next(), gathered.next()) {
+                        (Some(axis), None) => index.get(axis) == Some(bound),
+                        _ => false,
+                    };
+                });
+            }
+            if !addressed {
+                return Err(declined());
+            }
+        }
+        Ok(())
     }
 
     /// Whether output `n` addresses parameter `p`: a read whose storage offset

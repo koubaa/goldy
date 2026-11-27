@@ -1177,6 +1177,60 @@ fn gathered_batch_honors_strided_inputs() {
     assert_one_semantic_region(&scheme, 2);
 }
 
+/// Adding the rows of a gathered batch reads every slab at each output coordinate,
+/// while a thread holds only its own slab index. The adds must not inline the
+/// contraction at another batch position, and fused matches unfused.
+#[test]
+fn gathered_rows_summed_match_unfused() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (n_slabs, rows, k, batch) = (4u32, 6u32, 40u32, 3u32);
+    let init = [
+        Init::F32(
+            TensorShape::from_dims(&[n_slabs, rows, k]).unwrap(),
+            data(8, n_slabs * rows * k),
+        ),
+        Init::F32(TensorShape::vector(k), data(9, k)),
+        Init::U32(TensorShape::vector(batch), vec![2, 0, 3]),
+        Init::F32(
+            TensorShape::from_dims(&[batch, rows]).unwrap(),
+            vec![0.0; (batch * rows) as usize],
+        ),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+    ];
+    let record = move |rec: &mut TensorRecorder<'_>, t: &[Tensor]| {
+        let mut desc = goldy::MatMulDesc::gemv(rows, k);
+        desc.index = Some(goldy::ops::MatMulIndex {
+            first: 0,
+            slabs: n_slabs,
+            slab_stride: rows * k,
+            global_per_slab: false,
+            batch,
+            x_stride: 0,
+        });
+        rec.scheme()
+            .matmul("gather", desc)
+            .a(t[0].buffer(), goldy::MatMulView::packed())
+            .b(t[1].buffer(), goldy::MatMulView::packed())
+            .out(t[3].buffer(), goldy::MatMulView::packed())
+            .extra(t[2].buffer(), goldy::MatMulView::packed())
+            .record();
+        rec.fill("clear", t[4].view(), goldy::TensorScalar::F32(0.0))?;
+        for b in 0..batch {
+            let row = t[3].view().narrow(0, b, 1)?.reshape(&[rows])?;
+            rec.add_into("sum", t[4].view(), row, t[4].view())?;
+        }
+        Ok((Vec::new(), Vec::new()))
+    };
+    let mut twin = Twin::new(&device, &init, record);
+    twin.frames(3, "summed rows");
+    let (scheme, tensors, _) = &mut twin.runs[0];
+    let mut sub = scheme.submit().expect("submit");
+    let got = (&mut sub >> tensors[4].buffer()).take::<f32>().expect("take").to_vec();
+    drop(sub);
+    assert!(got.iter().any(|v| *v != 0.0), "{got:?}");
+}
+
 fn sum_inputs(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
     let last = t.len() - 1;
     rec.add_into("sum", t[0].view(), t[1].view(), t[last].view())?;
