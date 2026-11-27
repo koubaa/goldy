@@ -98,6 +98,7 @@ impl<'a> TensorRecorder<'a> {
     ///
     /// `x_stride == 0` uses one `x` of length `k` for every id. Otherwise `x`
     /// holds `count` vectors and id `i` reads at `i * x_stride`.
+    #[allow(clippy::too_many_arguments)]
     pub fn matmul_indexed_batch_into(
         &mut self,
         label: &str,
