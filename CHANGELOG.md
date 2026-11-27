@@ -233,6 +233,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Specialized semantic regions match their unfused dispatches** — specialization bakes a
+  fused kernel's scalars as literals, and the device then combined constants across the
+  operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into
+  `x + (a + b)`. A semantic region now rounds every sum, difference, product, quotient and
+  reciprocal an operation ends in (`goldy_exact_add` / `goldy_exact_sub` join
+  `goldy_exact_mul` / `goldy_exact_div`; `BuiltinFn` gains `ExactAdd` and `ExactSub`), and
+  `Region::round_products` is now `Region::round_results`.
+- **Gathered reads at another batch position** — a sum over the rows of a gathered batch
+  inlined the contraction at each row while the thread held only its own slab index, and
+  read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).
 - **`GOLDY_GPU_PROFILE` with batched dispatches** — Vulkan advanced the timestamp index
   once per dispatch inside a `DispatchBatch` while the query pool holds one pair per batch,
   so every later dispatch wrote past the pool (lavapipe segfaults on its queue thread).
