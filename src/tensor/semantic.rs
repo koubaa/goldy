@@ -13,7 +13,8 @@ use super::kernels::{
 use super::view::TensorView;
 use crate::semantic_fusion::{SemanticSite, SiteBuilder, SiteParcel};
 use goldy_shader_ir::algebra::{
-    Affine, BinaryOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Term, UnaryOp,
+    Affine, BinaryOp, CmpOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Sym, Term,
+    UnaryOp,
 };
 use goldy_shader_ir::ElementType;
 
@@ -34,6 +35,98 @@ fn dims(view: TensorView<'_>) -> Option<Vec<u32>> {
 fn operand(s: &mut SiteBuilder, name: &str, view: TensorView<'_>) -> Option<Operand> {
     let shape = dims(view)?;
     Some(Operand::new(name, &shape, storage(s, view)?))
+}
+
+fn index_source(s: &mut SiteBuilder, view: TensorView<'_>, add: i64, modulus: Option<u32>) -> Option<IndexSource> {
+    (view.dtype() == TensorDType::U32 && view.numel_u32() == 1).then_some(IndexSource {
+        parcel: s.parcel(SiteParcel::of(view.buffer().whole())?),
+        element: Affine::constant(i64::try_from(view.storage_offset()).ok()?),
+        element_type: ElementType::U32,
+        add,
+        modulus,
+        zero_if_outside: false,
+    })
+}
+
+pub(crate) fn cyclic_store(
+    src: TensorView<'_>,
+    state: TensorView<'_>,
+    position: TensorView<'_>,
+) -> Option<SemanticSite> {
+    let state_shape = state.shape();
+    let &[rows, width] = state_shape.dims() else {
+        return None;
+    };
+    if src.shape().dims() != [rows] || width == 0 {
+        return None;
+    }
+    let mut s = SiteBuilder::default();
+    let source = index_source(&mut s, position, 0, Some(width))?;
+    let slot = s.index_param("slot", 0..i64::from(width), source);
+    let input = operand(&mut s, "x", src)?;
+    let mut target = storage(&mut s, state)?;
+    target.offset = target.offset + Affine::sym(Sym::Param(slot)) * target.strides[1];
+    target.strides = vec![target.strides[0]];
+    s.finish(OpKind::Map(Map {
+        shape: vec![rows],
+        inputs: vec![input],
+        outputs: vec![(Operand::new("state", &[rows], target), Term::arg(0))],
+    }))
+}
+
+pub(crate) fn cyclic_dot(
+    state: TensorView<'_>,
+    weight: TensorView<'_>,
+    position: TensorView<'_>,
+    out: TensorView<'_>,
+) -> Option<SemanticSite> {
+    let state_shape = state.shape();
+    let &[rows, width] = state_shape.dims() else {
+        return None;
+    };
+    if width == 0 || weight.shape().dims() != [rows, width] || out.shape().dims() != [rows] {
+        return None;
+    }
+    let mut s = SiteBuilder::default();
+    let raw_source = index_source(&mut s, position, 0, None)?;
+    let raw = s.index_param("position", 0..i64::from(i32::MAX), raw_source);
+    let state_storage = storage(&mut s, state)?;
+    let weight_storage = storage(&mut s, weight)?;
+    let mut inputs = Vec::with_capacity(width as usize * 2);
+    let mut acc = Term::lit(0.0);
+    for lag in 0..width {
+        let slot_source = index_source(&mut s, position, -i64::from(lag), Some(width))?;
+        let slot = s.index_param(&format!("slot_{lag}"), 0..i64::from(width), slot_source);
+        let tap = width - 1 - lag;
+        let state_at = state_storage.offset.clone() + Affine::sym(Sym::Param(slot)) * state_storage.strides[1];
+        let weight_at = weight_storage.offset.clone() + i64::from(tap) * weight_storage.strides[1];
+        let weight_arg = inputs.len();
+        inputs.push(Operand::new(
+            &format!("weight_{tap}"),
+            &[rows],
+            Storage::strided(weight_storage.parcel, weight_at, &[weight_storage.strides[0]]),
+        ));
+        let state_arg = inputs.len();
+        inputs.push(Operand::new(
+            &format!("state_{lag}"),
+            &[rows],
+            Storage::strided(state_storage.parcel, state_at, &[state_storage.strides[0]]),
+        ));
+        let value = Term::select(
+            i64::from(lag),
+            CmpOp::Le,
+            Affine::sym(Sym::Param(raw)),
+            Term::arg(state_arg),
+            Term::lit(0.0),
+        );
+        acc = acc + Term::arg(weight_arg) * value;
+    }
+    let output = operand(&mut s, "out", out)?;
+    s.finish(OpKind::Map(Map {
+        shape: vec![rows],
+        inputs,
+        outputs: vec![(output, acc)],
+    }))
 }
 
 /// `out = body(inputs..)` element-wise over `out`'s shape; `inputs` already have that
@@ -172,6 +265,8 @@ pub(crate) fn scatter_slice(
         element: Affine::constant(i64::try_from(index.storage_offset()).ok()?),
         // The kernel binds every index parcel as i32.
         element_type: ElementType::I32,
+        add: 0,
+        modulus: None,
         zero_if_outside: false,
     };
     let position = s.index_param("position", 0..i64::from(target[axis]), source);

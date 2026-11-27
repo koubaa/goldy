@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cyclic row dots** — `TensorRecorder::cyclic_dot_at` records a position-addressed
+  row history update and causal dot as generic tensor algebra. Automatic fusion can
+  absorb the update, dot, and neighboring elementwise operations; transformed index
+  sources provide backend-neutral cyclic addressing.
+
 - **`tanh` and `sigmoid`** — unary tensor ops (`TensorRecorder::tanh` / `sigmoid` and
   the `_into` forms) and shader-dialect intrinsics `goldy::gpu::tanh` /
   `goldy::gpu::sigmoid`. For `|x| < 0.5` both use the odd Taylor series through
@@ -126,6 +131,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Runtime::acquire_texture(..., init)`.
 
 ### Changed
+
+- `goldy_shader_ir::algebra::IndexSource` literals now specify `add` and
+  `modulus` (`0` and `None` preserve the previous behavior).
 
 - **Generated-kernel arithmetic is explicit** — `Scheme::set_arithmetic_policy` selects
   `ArithmeticPolicy::MatchRecorded` (the default) or `Relaxed`. The policy selects

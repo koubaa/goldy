@@ -390,7 +390,20 @@ fn element_wise(body: &Term, arg: &dyn Fn(usize) -> Option<Term>, scalars: usize
             Term::Read { index, .. } => index.is_empty(),
             Term::Unary { arg, .. } => check(arg, scalars),
             Term::Binary { lhs, rhs, .. } => check(lhs, scalars) && check(rhs, scalars),
-            Term::IndexValue(_) | Term::Select { .. } | Term::Reduce { .. } => false,
+            Term::IndexValue(index) => index.indices().next().is_none(),
+            Term::Select {
+                lhs,
+                rhs,
+                then,
+                otherwise,
+                ..
+            } => {
+                lhs.indices().next().is_none()
+                    && rhs.indices().next().is_none()
+                    && check(then, scalars)
+                    && check(otherwise, scalars)
+            }
+            Term::Reduce { .. } => false,
         }
     }
     if !check(body, scalars) {
