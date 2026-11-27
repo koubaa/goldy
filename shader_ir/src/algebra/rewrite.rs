@@ -166,6 +166,12 @@ impl Region {
         rounded
     }
 
+    /// [`Self::round_results`], under its former name.
+    #[deprecated(note = "rounds every result now; use `round_results`")]
+    pub fn round_products(&mut self) -> usize {
+        self.round_results()
+    }
+
     /// Applies `law` throughout `value`'s definition, and returns how many times it
     /// applied.
     pub fn apply(&mut self, value: ValueId, law: Law) -> Result<usize, RewriteError> {

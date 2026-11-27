@@ -239,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x + (a + b)`. A semantic region now rounds every sum, difference, product, quotient and
   reciprocal an operation ends in (`goldy_exact_add` / `goldy_exact_sub` join
   `goldy_exact_mul` / `goldy_exact_div`; `BuiltinFn` gains `ExactAdd` and `ExactSub`), and
-  `Region::round_products` is now `Region::round_results`.
+  `Region::round_products` is deprecated for `Region::round_results`.
 - **Gathered reads at another batch position** — a sum over the rows of a gathered batch
   inlined the contraction at each row while the thread held only its own slab index, and
   read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).
