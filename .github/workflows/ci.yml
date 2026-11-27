@@ -255,12 +255,6 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test
 
-      - name: Run integration tests
-        env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo test --test '*'
-
       - name: Run goldy-ffi integration tests
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
@@ -276,13 +270,6 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
           GOLDY_METAL_PLACEMENT: discrete
         run: cargo test
-
-      - name: Run integration tests (discrete placement)
-        env:
-          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
-          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-          GOLDY_METAL_PLACEMENT: discrete
-        run: cargo test --test '*'
 
       - name: Run goldy-ffi integration tests (discrete placement)
         env:
