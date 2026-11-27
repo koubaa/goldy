@@ -102,10 +102,16 @@ const CHAIN_VECTOR_MAX: u32 = 256;
 
 /// Where the runtime value of an index parameter comes from: one integer element of
 /// a parcel, read once per thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `element` is an affine of the composed region's index variables. Lowering rewrites
+/// each variable to the coordinate of the output axis that binds it. A partial
+/// workgroup clamps those coordinates into the part's extents, so the read stays
+/// inside the vector the caller sized. A variable no live output binds declines the
+/// kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSource {
     pub parcel: ParcelId,
-    pub element: u32,
+    pub element: Affine,
     /// [`ElementType::I32`] or [`ElementType::U32`].
     pub element_type: ElementType,
     /// When the loaded value is outside the parameter's declared range, stores that
@@ -806,38 +812,159 @@ impl Prepared {
 
     /// `q{p}`: the value of each index parameter, read from its source and clamped
     /// into the range the region declared. `in{p}` is whether the raw value was
-    /// already inside that range.
+    /// already inside that range. Every source's element must be a constant; a
+    /// coordinate-dependent element uses [`Self::load_index_params`].
     pub(super) fn index_params(&self, sources: &[IndexSource], body: &mut Vec<Stmt>) -> Result<(), LowerError> {
         for (p, source) in sources.iter().enumerate() {
-            let at = Expr::Index {
-                base: Box::new(var(&parcel_name(source.parcel))),
-                index: Box::new(Expr::LitU32(source.element)),
-            };
-            let q = format!("q{p}");
-            let inn = format!("in{p}");
-            body.push(let_int(&q, cast(at, "int")));
-            let range = self.region.param_range(IndexParam(p as u32));
-            let lo = int(range.start)?;
-            let hi = int(range.end.saturating_sub(1))?;
-            body.push(Stmt::Let {
-                name: inn.clone(),
-                mutable: false,
-                ty: Some("bool".into()),
-                init: bin(
-                    BinOp::And,
-                    bin(BinOp::Ge, var(&q), lo.clone()),
-                    bin(BinOp::Le, var(&q), hi),
-                ),
-            });
-            body.push(Stmt::If {
-                cond: Expr::Unary {
-                    op: IrUnaryOp::Not,
-                    expr: Box::new(var(&inn)),
-                },
-                then_body: vec![assign(&q, lo)],
-                else_body: None,
-            });
+            self.load_one(p, source, &HashMap::new(), &HashMap::new(), body)?;
         }
+        Ok(())
+    }
+
+    /// Rewrites each source element from the region's index variables to the
+    /// coordinates [`Self::new`] assigned to the output axes that bind them.
+    fn resolve_index_sources(&self, sources: &[IndexSource]) -> Result<Vec<IndexSource>, LowerError> {
+        let mut map: HashMap<IndexVar, Affine> = HashMap::new();
+        for (n, &(id, _)) in self.bodies.iter().enumerate() {
+            let value = self.region.value(id).expect("an output is live");
+            let domain = &value.definition.as_ref().expect("an output is defined").domain;
+            for (&var, affine) in domain.iter().zip(&self.at[n]) {
+                if let Some(prev) = map.get(&var) {
+                    if prev != affine {
+                        return Err(LowerError::IndexRange);
+                    }
+                } else {
+                    map.insert(var, affine.clone());
+                }
+            }
+        }
+        Ok(sources
+            .iter()
+            .map(|source| IndexSource {
+                element: source.element.substitute(&|v| map.get(&v).cloned()),
+                ..source.clone()
+            })
+            .collect())
+    }
+
+    /// Whether output `n` addresses parameter `p`: a read whose storage offset
+    /// mentions it, or the output's own storage.
+    fn output_mentions_param(&self, n: usize, p: IndexParam) -> bool {
+        let sym = Sym::Param(p);
+        let stored = self
+            .region
+            .value(self.bodies[n].0)
+            .and_then(|v| v.storage.as_ref())
+            .is_some_and(|s| s.offset.mentions(sym));
+        if stored {
+            return true;
+        }
+        let mut used = false;
+        self.bodies[n].1.for_each_read(&mut |value, _| {
+            let mentions = self
+                .region
+                .value(value)
+                .and_then(|v| v.storage.as_ref())
+                .is_some_and(|s| s.offset.mentions(sym));
+            used |= mentions;
+        });
+        used
+    }
+
+    /// Inclusive upper bound of coordinate `c` on output `n`, from that output's own
+    /// extent rather than a widened part.
+    fn coord_limit(&self, n: usize, c: IndexVar) -> Option<i64> {
+        let id = self.bodies[n].0;
+        let shape = &self.region.value(id)?.shape;
+        self.at[n].iter().zip(shape).find_map(|(affine, &extent)| {
+            let one_coord =
+                affine.terms().len() == 1 && affine.coefficient(Sym::Index(c)) == 1 && affine.constant_term() == 0;
+            one_coord.then_some(i64::from(extent) - 1)
+        })
+    }
+
+    /// Loads the index parameters part `k` reads, after its coordinates are bound.
+    /// `loaded[p]` is whether `q{p}` and `in{p}` now exist.
+    ///
+    /// A coordinate is clamped to the tightest extent of an output in this part that
+    /// reads the parameter. A widened part must not address past the vector that
+    /// output's batch sized.
+    fn load_index_params(
+        &self,
+        k: usize,
+        sources: &[IndexSource],
+        body: &mut Vec<Stmt>,
+    ) -> Result<Vec<bool>, LowerError> {
+        let part = &self.parts[k];
+        let mut names = HashMap::new();
+        for &c in &part.coords {
+            names.insert(c, coord_name(c));
+        }
+        let mut loaded = Vec::with_capacity(sources.len());
+        for (p, source) in sources.iter().enumerate() {
+            let param = IndexParam(p as u32);
+            let readers: Vec<usize> = part
+                .outputs
+                .iter()
+                .copied()
+                .filter(|&n| self.output_mentions_param(n, param))
+                .collect();
+            loaded.push(!readers.is_empty());
+            if readers.is_empty() {
+                continue;
+            }
+            let mut ranges = HashMap::new();
+            for (&c, &e) in part.coords.iter().zip(&part.extents) {
+                let mut hi = i64::from(e) - 1;
+                for &n in &readers {
+                    if let Some(limit) = self.coord_limit(n, c) {
+                        hi = hi.min(limit);
+                    }
+                }
+                ranges.insert(c, (0i64, hi));
+            }
+            self.load_one(p, source, &names, &ranges, body)?;
+        }
+        Ok(loaded)
+    }
+
+    fn load_one(
+        &self,
+        p: usize,
+        source: &IndexSource,
+        names: &HashMap<IndexVar, String>,
+        ranges: &HashMap<IndexVar, (i64, i64)>,
+        body: &mut Vec<Stmt>,
+    ) -> Result<(), LowerError> {
+        let index = element_address(&source.element, names, ranges, body)?;
+        let at = Expr::Index {
+            base: Box::new(var(&parcel_name(source.parcel))),
+            index: Box::new(index),
+        };
+        let q = format!("q{p}");
+        let inn = format!("in{p}");
+        body.push(let_int(&q, cast(at, "int")));
+        let range = self.region.param_range(IndexParam(p as u32));
+        let lo = int(range.start)?;
+        let hi = int(range.end.saturating_sub(1))?;
+        body.push(Stmt::Let {
+            name: inn.clone(),
+            mutable: false,
+            ty: Some("bool".into()),
+            init: bin(
+                BinOp::And,
+                bin(BinOp::Ge, var(&q), lo.clone()),
+                bin(BinOp::Le, var(&q), hi),
+            ),
+        });
+        body.push(Stmt::If {
+            cond: Expr::Unary {
+                op: IrUnaryOp::Not,
+                expr: Box::new(var(&inn)),
+            },
+            then_body: vec![assign(&q, lo)],
+            else_body: None,
+        });
         Ok(())
     }
 
@@ -847,6 +974,7 @@ impl Prepared {
             parcels,
             scalars,
         } = self.resources(sources)?;
+        let sources = self.resolve_index_sources(sources)?;
         let threads = match schedule {
             Schedule::Threads { workgroup } => workgroup,
             Schedule::Lanes { lanes, elements, .. } => lanes * elements,
@@ -929,7 +1057,6 @@ impl Prepared {
                     ));
                 }
             }
-            self.index_params(sources, &mut work)?;
             work.push(Stmt::Let {
                 name: "valid".into(),
                 mutable: false,
@@ -947,6 +1074,7 @@ impl Prepared {
                     rest = var(&format!("rest{a}"));
                 }
             }
+            let loaded = self.load_index_params(k, &sources, &mut work)?;
             let hoisted = self.hoist(k, &mut emit, &mut work)?;
 
             if let Some((lanes, row_elems, exchange)) = lanes {
@@ -975,7 +1103,7 @@ impl Prepared {
                 decl_dest.extend(part_decls);
                 work.extend(reductions);
             }
-            let values = self.outputs(k, &mut emit, sources)?;
+            let values = self.outputs(k, &mut emit, &sources, &loaded)?;
             let cond = match lanes {
                 Some(_) => bin(BinOp::And, var("valid"), bin(BinOp::Eq, var("lane"), int(0)?)),
                 None => var("valid"),
@@ -1065,7 +1193,13 @@ impl Prepared {
     /// Computes every output of part `k` at element `c{n}` into a local and stores them
     /// all, the stores after every computation. Sequential sibling reductions of the
     /// outputs that span the whole domain share loops.
-    pub(super) fn outputs(&self, k: usize, emit: &mut Emit, sources: &[IndexSource]) -> Result<Vec<Stmt>, LowerError> {
+    pub(super) fn outputs(
+        &self,
+        k: usize,
+        emit: &mut Emit,
+        sources: &[IndexSource],
+        loaded: &[bool],
+    ) -> Result<Vec<Stmt>, LowerError> {
         let mut values = Vec::new();
         let sequential = self.top_reductions(k, true, |r| {
             matches!(
@@ -1101,7 +1235,7 @@ impl Prepared {
             else {
                 let x = emit.term(term, &mut values)?;
                 values.push(let_float(&name, x));
-                stores.extend(zero_outside(sources, &name));
+                stores.extend(zero_outside(sources, loaded, &name));
                 stores.push(store);
                 continue;
             };
@@ -1118,7 +1252,7 @@ impl Prepared {
                 then_body: guarded,
                 else_body: None,
             });
-            let mut guarded_store = zero_outside(sources, &name);
+            let mut guarded_store = zero_outside(sources, loaded, &name);
             guarded_store.push(store);
             stores.push(Stmt::If {
                 cond: within,
@@ -1896,12 +2030,70 @@ impl Term {
     }
 }
 
+/// The parent-buffer element `element` names. A coordinate is clamped into the
+/// range `ranges` gives it, so a thread past the domain still reads an element
+/// the caller allocated.
+fn element_address(
+    element: &Affine,
+    names: &HashMap<IndexVar, String>,
+    ranges: &HashMap<IndexVar, (i64, i64)>,
+    body: &mut Vec<Stmt>,
+) -> Result<Expr, LowerError> {
+    if let Some(c) = element.as_constant() {
+        let c = u32::try_from(c).map_err(|_| LowerError::IndexRange)?;
+        return Ok(Expr::LitU32(c));
+    }
+    let mut lo = element.constant_term();
+    let mut hi = element.constant_term();
+    let mut var_part: Option<Expr> = None;
+    for &(sym, coefficient) in element.terms() {
+        let Sym::Index(v) = sym else {
+            return Err(LowerError::IndexRange);
+        };
+        if coefficient <= 0 {
+            return Err(LowerError::IndexRange);
+        }
+        let (start, end) = ranges.get(&v).copied().ok_or(LowerError::IndexRange)?;
+        if start != 0 {
+            return Err(LowerError::IndexRange);
+        }
+        lo += coefficient.saturating_mul(start);
+        hi += coefficient.saturating_mul(end);
+        let name = names.get(&v).ok_or(LowerError::IndexRange)?;
+        let clamped = format!("{name}_ix{coefficient}");
+        body.push(let_int(&clamped, call(BuiltinFn::Min, vec![var(name), int(end)?])));
+        let term = if coefficient == 1 {
+            var(&clamped)
+        } else {
+            bin(BinOp::Mul, var(&clamped), int(coefficient)?)
+        };
+        var_part = Some(match var_part {
+            None => term,
+            Some(e) => bin(BinOp::Add, e, term),
+        });
+    }
+    if lo < 0 || hi > i64::from(u32::MAX) {
+        return Err(LowerError::IndexRange);
+    }
+    let c = element.constant_term();
+    let c = u32::try_from(c).map_err(|_| LowerError::IndexRange)?;
+    let Some(var_part) = var_part else {
+        return Ok(Expr::LitU32(c));
+    };
+    let sum = cast(var_part, "uint");
+    Ok(match c {
+        0 => sum,
+        _ => bin(BinOp::Add, sum, Expr::LitU32(c)),
+    })
+}
+
 /// Stores that depend on an out-of-range index parameter write zero.
-fn zero_outside(sources: &[IndexSource], name: &str) -> Vec<Stmt> {
+/// `loaded[p]` is whether this part read parameter `p`.
+fn zero_outside(sources: &[IndexSource], loaded: &[bool], name: &str) -> Vec<Stmt> {
     sources
         .iter()
         .enumerate()
-        .filter(|(_, source)| source.zero_if_outside)
+        .filter(|(p, source)| source.zero_if_outside && loaded.get(*p).copied().unwrap_or(false))
         .map(|(p, _)| Stmt::If {
             cond: Expr::Unary {
                 op: IrUnaryOp::Not,

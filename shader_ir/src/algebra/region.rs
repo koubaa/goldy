@@ -259,6 +259,11 @@ impl Region {
         &self.index_names[v.0 as usize]
     }
 
+    /// How many index variables the region has created.
+    pub fn index_count(&self) -> u32 {
+        self.index_names.len() as u32
+    }
+
     pub fn param_name(&self, p: IndexParam) -> &str {
         &self.index_params[p.0 as usize].0
     }

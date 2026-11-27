@@ -177,7 +177,7 @@ fn composition_relocates_into_a_selected_row() {
 
     let source = IndexSource {
         parcel: ParcelId(4),
-        element: 0,
+        element: Affine::constant(0),
         element_type: crate::ElementType::I32,
         zero_if_outside: false,
     };

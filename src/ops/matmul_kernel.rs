@@ -2,9 +2,11 @@
 
 #![allow(clippy::too_many_arguments)]
 
-/// Packed flags: bit 0 = transpose A, bit 1 = transpose B.
+/// Packed flags: bit 0 = transpose A, bit 1 = transpose B, bit 2 = add the product
+/// onto the existing `C` (`beta = 1`).
 pub const FLAG_TRANSPOSE_A: u32 = 1;
 pub const FLAG_TRANSPOSE_B: u32 = 2;
+pub const FLAG_ACCUMULATE: u32 = 4;
 
 /// Row-major `C[m, n] = op(A)[m, k] @ op(B)[k, n]` with optional static element offsets.
 ///
@@ -43,6 +45,9 @@ fn matmul_f32(
                 bv = b[b_off + p * n + j];
             }
             acc = acc + av * bv;
+        }
+        if (flags & 4) == 4 {
+            acc = acc + c[c_off + i * n + j];
         }
         c[c_off + i * n + j] = acc;
     }

@@ -2,7 +2,7 @@
 
 use super::matmul_kernel::{
     GemmBf16Kernel, GemvBf16Kernel, GemvBlockKernel, GemvF32IndexedKernel, GemvF32Kernel, MatMulF32Kernel,
-    FLAG_TRANSPOSE_A, FLAG_TRANSPOSE_B, GEMV_ROWS_PER_GROUP,
+    FLAG_ACCUMULATE, FLAG_TRANSPOSE_A, FLAG_TRANSPOSE_B, GEMV_ROWS_PER_GROUP,
 };
 use crate::backend::{BufferHandle, ComputePipelineHandle};
 use crate::compute::ComputePipeline;
@@ -117,8 +117,8 @@ pub struct MatMulDesc {
     /// Scale on the product. Native libraries honor this; the stdlib fallback
     /// currently requires `1.0`.
     pub alpha: f32,
-    /// Scale on the existing `C` contents. `0.0` means `C` is overwritten.
-    /// The stdlib fallback currently requires `0.0`.
+    /// Scale on the existing `C` contents. `0.0` overwrites `C`. The stdlib
+    /// product adds onto `C` when this is `1` and `alpha` is `1`.
     pub beta: f32,
 }
 
@@ -182,6 +182,9 @@ impl MatMulDesc {
         }
         if self.transpose_b {
             flags |= FLAG_TRANSPOSE_B;
+        }
+        if self.alpha == 1.0 && self.beta == 1.0 {
+            flags |= FLAG_ACCUMULATE;
         }
         flags
     }
@@ -740,9 +743,12 @@ impl<'a> MatMulBuilder<'a> {
             fallback,
             stdlib_gemm_ok,
         );
-        if !native && !self.desc.requires_stdlib_identity_epilogue() {
+        let stdlib_epilogue = self.desc.alpha == 1.0
+            && (self.desc.beta == 0.0
+                || (self.desc.beta == 1.0 && self.desc.dtype == MatMulDType::F32 && self.desc.index.is_none()));
+        if !native && !stdlib_epilogue {
             self.scheme.push_record_error(format!(
-                "matmul `{}`: stdlib fallback requires alpha=1 and beta=0",
+                "matmul `{}`: stdlib fallback requires alpha=1 and beta=0, or beta=1 on an f32 product",
                 self.label
             ));
             return;
@@ -799,7 +805,10 @@ impl<'a> MatMulBuilder<'a> {
                 (&c.operand, c.parcel?),
             ];
             let ids = match fallback {
-                MatMulFallback::GemvIndexed => self.extras.first().and_then(|extra| extra.parcel),
+                MatMulFallback::GemvIndexed => self
+                    .extras
+                    .first()
+                    .and_then(|extra| extra.parcel.map(|parcel| (&extra.operand, parcel))),
                 _ => None,
             };
             match native {

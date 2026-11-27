@@ -34,6 +34,11 @@ struct Tile {
 /// threads, if its domain is two-dimensional and it has a contraction the schedule
 /// applies to.
 pub(super) fn lower(graph: &Graph, sources: &[IndexSource], subgroup: u32) -> Option<Lowered> {
+    // Tile coordinates are not the contraction's index variables, so a source whose
+    // element depends on one of those variables stays on the lane or thread schedule.
+    if sources.iter().any(|s| s.element.as_constant().is_none()) {
+        return None;
+    }
     let prepared = Prepared::new(graph.region()).ok()?;
     let &[m, n] = prepared.single()?.extents.as_slice() else {
         return None;
@@ -256,7 +261,8 @@ fn emit(
         ));
         emit.cache.push((tile.term.clone(), v));
     }
-    values.extend(prepared.outputs(0, &mut emit, sources)?);
+    let loaded = vec![true; sources.len()];
+    values.extend(prepared.outputs(0, &mut emit, sources, &loaded)?);
     element.push(Stmt::If {
         cond: bin(
             BinOp::And,
