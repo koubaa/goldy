@@ -27,7 +27,9 @@
 
 use crate::backend::ComputePipelineHandle;
 use crate::fusion_cost::FusionCostModel;
-use crate::kernel::{access_kind_to_node, admit, prepare_synthesized, ArgShape, PreparedKernel, StageView};
+use crate::kernel::{
+    access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
+};
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
 use crate::semantic_fusion::{lift_kernel, synthesize, target as semantic_target, SemanticProgram, SemanticSite};
@@ -233,8 +235,8 @@ pub enum FusionTier {
     Semantic,
 }
 
-/// Floating-point transformations automatic fusion may make across recorded
-/// dispatch boundaries.
+/// Floating-point transformations semantic fusion may make across recorded
+/// operation boundaries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum FusionArithmetic {
     /// Preserve the intermediate rounding of the recorded dispatches.
@@ -397,9 +399,7 @@ impl Program {
 
     fn compile(&self, device: &Runtime, arithmetic: FusionArithmetic, id: KernelId) -> anyhow::Result<PreparedKernel> {
         match self {
-            Program::Composed(definition) => {
-                crate::kernel::prepare_fused_with_arithmetic(device, definition, arithmetic, id)
-            }
+            Program::Composed(definition) => prepare_fused(device, definition),
             Program::Semantic(program) => {
                 prepare_synthesized(device, &program.def, program.scalar_origins(), arithmetic, id)
             }
@@ -734,7 +734,7 @@ impl FusionPlanner {
                     let definition = elide_local_temporaries(definition, start..end, sites, temporaries);
                     self.regions.push(Region {
                         nodes: start..end,
-                        id: self.arithmetic.kernel_id(definition.id()),
+                        id: definition.id(),
                         program: Program::Composed(definition),
                         cost: None,
                         status: FusionRegionStatus::Compiling,

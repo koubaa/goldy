@@ -356,26 +356,11 @@ impl FusedKernel {
 /// Compile a fused definition under its fused-kernel identity, so its specialized
 /// variants are shared by every pipeline of that definition.
 pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> anyhow::Result<PreparedKernel> {
-    let id = crate::FusionArithmetic::MatchRecorded.kernel_id(definition.id());
-    prepare_fused_with_arithmetic(device, definition, crate::FusionArithmetic::MatchRecorded, id)
-}
-
-pub(crate) fn prepare_fused_with_arithmetic(
-    device: &Runtime,
-    definition: &FusedDefinition,
-    arithmetic: crate::FusionArithmetic,
-    id: KernelId,
-) -> anyhow::Result<PreparedKernel> {
     let identity = KernelIdentity {
-        id,
+        id: definition.id(),
         scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
     };
-    let prepared = prepare_kernel_as(
-        device,
-        definition.lower(),
-        Some(identity),
-        arithmetic == crate::FusionArithmetic::MatchRecorded,
-    )?;
+    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity), false)?;
     tracing::debug!(
         kernel = %definition.name,
         id = %definition.id(),

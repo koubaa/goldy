@@ -52,6 +52,25 @@ pub(super) fn patch_compute_msl(msl: &str) -> String {
     patch_msl_threadgroup_copies(&s)
 }
 
+/// Keep only the arithmetic helpers that represent recorded dispatch boundaries
+/// from inheriting Metal's file-wide fast math. Other arithmetic, including math
+/// intrinsics in the same fused kernel, retains the compiler default.
+fn patch_precise_math_msl(msl: &str) -> String {
+    const PRAGMAS: &str = "\n#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)";
+    let mut out = msl.to_string();
+    let mut search_from = 0;
+    while let Some(rel) = out[search_from..].find("float goldy_exact_") {
+        let start = search_from + rel;
+        let Some(brace_rel) = out[start..].find('{') else {
+            break;
+        };
+        let brace = start + brace_rel;
+        out.insert_str(brace + 1, PRAGMAS);
+        search_from = brace + 1 + PRAGMAS.len();
+    }
+    out
+}
+
 /// Fix Bug A: restore the `constant*` qualifier and `[[buffer(1)]]` attribute for
 /// `EntryPointParams_0` when Slang omits them in compute-shader kernels.
 fn patch_compute_msl_entry_point_params(msl: &str) -> String {
@@ -389,6 +408,11 @@ fn compile_stage_with_reflection(
     }
 
     let raw_msl = result.shader.as_str().context("Failed to get MSL source")?.to_string();
+    let precise_math = desc.stage == SlangStage::Compute
+        && desc
+            .extra_defines
+            .iter()
+            .any(|(name, _)| *name == crate::shader::PRECISE_MATH_DEFINE);
 
     // Apply stage-specific MSL patches for known Slang codegen bugs.
     let msl_source = if desc.stage == SlangStage::Vertex {
@@ -410,6 +434,11 @@ fn compile_stage_with_reflection(
     } else if desc.stage == SlangStage::Compute {
         // Fix cross-module [ForceInline] + groupshared bugs (slang #10641; see patch_compute_msl).
         let patched = patch_compute_msl(&raw_msl);
+        let patched = if precise_math {
+            patch_precise_math_msl(&patched)
+        } else {
+            patched
+        };
         if patched != raw_msl {
             tracing::debug!(
                 "Applied compute MSL patches (EntryPointParams / threadgroup copy) for {}",
@@ -444,17 +473,6 @@ fn compile_stage_with_reflection(
     }
 
     let options = mtl::CompileOptions::new();
-    // A generated fused kernel carries this marker only when recorded dispatch
-    // boundaries remain observable rounding points. Other compute and graphics
-    // shaders keep Metal's fast default.
-    let precise_math = desc.stage == SlangStage::Compute
-        && desc
-            .extra_defines
-            .iter()
-            .any(|(name, _)| *name == crate::shader::PRECISE_MATH_DEFINE);
-    if precise_math {
-        options.set_fast_math_enabled(false);
-    }
     let library = device
         .new_library_with_source(&msl_source, &options)
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
@@ -712,7 +730,8 @@ pub(super) fn destroy(
 mod tests {
     use super::{
         patch_compute_msl, patch_compute_msl_entry_point_params, patch_mesh_msl_user_semantics,
-        patch_msl_threadgroup_copies, patch_vertex_msl_entry_point_params, patch_vertex_stage_in_pointer,
+        patch_msl_threadgroup_copies, patch_precise_math_msl, patch_vertex_msl_entry_point_params,
+        patch_vertex_stage_in_pointer,
     };
 
     // ── patch_vertex_stage_in_pointer ────────────────────────────────────────
@@ -1115,5 +1134,23 @@ mod tests {
 
         let out = patch_compute_msl(msl);
         assert_eq!(out, msl, "clean MSL must pass through the orchestrator unchanged");
+    }
+
+    #[test]
+    fn precise_math_patch_scopes_safe_arithmetic_to_exact_helpers() {
+        let msl = concat!(
+            "float goldy_exact_add_0(float a, float b)\n{\n    return a + b;\n}\n",
+            "float ordinary(float a, float b)\n{\n    return a + b;\n}\n",
+            "[[kernel]] void cs_main()\n{\n",
+            "    float x = goldy_exact_add_0(1.0f, 2.0f);\n}\n",
+        );
+        let out = patch_precise_math_msl(msl);
+        assert_eq!(out.matches("#pragma METAL fp math_mode(safe)").count(), 1);
+        assert_eq!(out.matches("#pragma METAL fp contract(off)").count(), 1);
+        assert!(out.contains(
+            "float goldy_exact_add_0(float a, float b)\n{\n#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)"
+        ));
+        assert!(!out.contains("float ordinary(float a, float b)\n{\n#pragma"));
+        assert!(!out.contains("[[kernel]] void cs_main()\n{\n#pragma"));
     }
 }

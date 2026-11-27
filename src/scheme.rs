@@ -2379,8 +2379,8 @@ impl Scheme {
         self.fusion.precision()
     }
 
-    /// Floating-point transformations automatic fusion may make across the
-    /// dispatch boundaries it removes.
+    /// Floating-point transformations semantic fusion may make across the
+    /// operation boundaries it removes.
     ///
     /// [`FusionArithmetic::MatchRecorded`] (the default) keeps those boundaries as
     /// observable rounding points. [`FusionArithmetic::Relaxed`] lets the compiler
