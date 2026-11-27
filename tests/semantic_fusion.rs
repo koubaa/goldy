@@ -63,19 +63,40 @@ type Recorded = Result<(Vec<Tensor>, Vec<NodeId>), GoldyError>;
 
 /// The same recording in a fusing scheme and an unfused one.
 struct Twin {
-    _specialization: goldy::test_support::SpecializationOverride,
+    _specialization: Option<goldy::test_support::SpecializationOverride>,
     /// Fusing first: each scheme, its tensors and the nodes `record` returned.
     runs: Vec<(Scheme, Vec<Tensor>, Vec<NodeId>)>,
+    /// Whether each run specializes its kernels.
+    specializes: Vec<bool>,
 }
 
 impl Twin {
     fn new(device: &Runtime, init: &[Init], record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded) -> Self {
-        let specialization = goldy::test_support::SpecializationOverride::force_disabled();
+        Self::build(device, init, record, &[(true, false), (false, false)])
+    }
+
+    /// Both schemes specialize their kernels, and a third unfused scheme keeps every
+    /// generic kernel; [`Self::settle`] waits for the variants.
+    fn specialized(
+        device: &Runtime,
+        init: &[Init],
+        record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded,
+    ) -> Self {
+        Self::build(device, init, record, &[(true, true), (false, true), (false, false)])
+    }
+
+    /// One run per `(fusing, specializing)`.
+    fn build(
+        device: &Runtime,
+        init: &[Init],
+        record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded,
+        modes: &[(bool, bool)],
+    ) -> Self {
         let ctx = submission::submission_context(device);
         let kernels = TensorKernels::new(device).expect("tensor kernels");
-        let runs = [true, false]
-            .into_iter()
-            .map(|fusing| {
+        let runs = modes
+            .iter()
+            .map(|&(fusing, _)| {
                 let mut scheme = Scheme::new(&ctx);
                 scheme.set_automatic_fusion(fusing);
                 let mut t = tensors(device, init);
@@ -84,10 +105,23 @@ impl Twin {
                 (scheme, t, nodes)
             })
             .collect();
-        Self {
-            _specialization: specialization,
+        let mut twin = Self {
+            _specialization: None,
             runs,
-        }
+            specializes: modes.iter().map(|&(_, s)| s).collect(),
+        };
+        twin.pin(0);
+        twin
+    }
+
+    /// Pin specialization as run `run` wants it.
+    fn pin(&mut self, run: usize) {
+        self._specialization = None;
+        self._specialization = Some(if self.specializes[run] {
+            goldy::test_support::SpecializationOverride::force_enabled()
+        } else {
+            goldy::test_support::SpecializationOverride::force_disabled()
+        });
     }
 
     fn fused(&self) -> &Scheme {
@@ -97,22 +131,27 @@ impl Twin {
     /// Submit `frames` frames, comparing the initial and the allocated tensors.
     fn frames(&mut self, frames: usize, what: &str) {
         for frame in 1..=frames {
-            let parcels: Vec<Vec<Vec<u8>>> = self
-                .runs
-                .iter_mut()
-                .map(|(scheme, t, _)| {
-                    let mut sub = scheme.submit().expect("submit");
-                    let got = t
-                        .iter()
-                        .map(|t| (&mut sub >> t.buffer()).take::<u8>().expect("take").to_vec())
-                        .collect();
-                    drop(sub);
-                    goldy::test_support::wait_for_fusion_compiles(scheme);
-                    got
-                })
-                .collect();
-            for (j, (fused, unfused)) in parcels[0].iter().zip(&parcels[1]).enumerate() {
-                assert!(fused == unfused, "{what}, frame {frame}: tensor {j} differs");
+            let mut parcels: Vec<Vec<Vec<u8>>> = Vec::new();
+            for run in 0..self.runs.len() {
+                self.pin(run);
+                let (scheme, t, _) = &mut self.runs[run];
+                let mut sub = scheme.submit().expect("submit");
+                let got = t
+                    .iter()
+                    .map(|t| (&mut sub >> t.buffer()).take::<u8>().expect("take").to_vec())
+                    .collect();
+                drop(sub);
+                goldy::test_support::wait_for_fusion_compiles(scheme);
+                parcels.push(got);
+            }
+            self.pin(0);
+            for (run, other) in parcels.iter().enumerate().skip(1) {
+                for (j, (fused, unfused)) in parcels[0].iter().zip(other).enumerate() {
+                    assert!(
+                        fused == unfused,
+                        "{what}, frame {frame}: tensor {j} differs in run {run}"
+                    );
+                }
             }
         }
     }
@@ -120,9 +159,35 @@ impl Twin {
     /// Submit `frames` frames without comparing.
     fn submit(&mut self, frames: usize) {
         for _ in 0..frames {
-            for (scheme, _, _) in &mut self.runs {
+            for run in 0..self.runs.len() {
+                self.pin(run);
+                let scheme = &mut self.runs[run].0;
                 drop(scheme.submit().expect("submit"));
                 goldy::test_support::wait_for_fusion_compiles(scheme);
+            }
+        }
+        self.pin(0);
+    }
+
+    /// Submit until every specializing scheme runs its variants and nothing is left
+    /// compiling.
+    fn settle(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            self.submit(1);
+            let settled = self
+                .runs
+                .iter()
+                .zip(&self.specializes)
+                .all(|((scheme, _, _), &specializes)| {
+                    !scheme.compiles_pending() && (!specializes || scheme.replay_stats().specialization_promotions > 0)
+                });
+            if settled {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "specialization did not settle");
+            for (scheme, _, _) in &mut self.runs {
+                goldy::test_support::wait_for_specialization_compiles(scheme);
             }
         }
     }
@@ -1229,6 +1294,79 @@ fn gathered_rows_summed_match_unfused() {
     let got = (&mut sub >> tensors[4].buffer()).take::<f32>().expect("take").to_vec();
     drop(sub);
     assert!(got.iter().any(|v| *v != 0.0), "{got:?}");
+}
+
+/// Run `record` with specialization on until every scheme runs its variants, then
+/// compare `frames` frames; returns the fusing scheme.
+fn specialized_matches_unfused(
+    device: &Runtime,
+    init: &[Init],
+    record: impl Fn(&mut TensorRecorder<'_>, &[Tensor]) -> Recorded,
+    frames: usize,
+) -> Scheme {
+    let mut twin = Twin::specialized(device, init, record);
+    twin.settle();
+    twin.frames(frames, "specialized");
+    twin.runs.swap_remove(0).0
+}
+
+/// Specialization bakes a fused kernel's scalars as literals. A divisor that becomes
+/// a constant still divides on its own instead of folding into the function that
+/// reads the quotient.
+#[test]
+fn specialized_scalar_divisor_matches_unfused() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let n = 256u32;
+    let x: Vec<f32> = data(11, n).into_iter().map(|v| v * 40.0).collect();
+    let init = [
+        Init::F32(TensorShape::vector(n), x),
+        Init::F32(TensorShape::vector(n), vec![0.0; n as usize]),
+        Init::F32(TensorShape::vector(n), vec![0.0; n as usize]),
+        Init::F32(TensorShape::vector(n), vec![0.0; n as usize]),
+    ];
+    let scheme = specialized_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            rec.div_scalar_into("divide", t[0].view(), 25.0, t[1].view())?;
+            rec.tanh_into("tanh", t[1].view(), t[2].view())?;
+            rec.mul_scalar_into("scale", t[2].view(), 25.0, t[3].view())?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 3);
+}
+
+/// Scalar offsets, divisors and factors in a row, each baked as a literal: no two
+/// constants combine across the operations.
+#[test]
+fn specialized_scalar_chain_matches_unfused() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let n = 256u32;
+    let x: Vec<f32> = data(12, n).into_iter().map(|v| v * 3.0).collect();
+    let mut init = vec![Init::F32(TensorShape::vector(n), x)];
+    for _ in 0..7 {
+        init.push(Init::F32(TensorShape::vector(n), vec![0.0; n as usize]));
+    }
+    let scheme = specialized_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            rec.add_scalar_into("offset", t[0].view(), 0.1, t[1].view())?;
+            rec.add_scalar_into("offset", t[1].view(), 0.7, t[2].view())?;
+            rec.sub_scalar_into("offset", t[2].view(), 0.3, t[3].view())?;
+            rec.div_scalar_into("divide", t[3].view(), 3.0, t[4].view())?;
+            rec.div_scalar_into("divide", t[4].view(), 7.0, t[5].view())?;
+            rec.mul_scalar_into("scale", t[5].view(), 0.1, t[6].view())?;
+            rec.mul_scalar_into("scale", t[6].view(), 0.3, t[7].view())?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 7);
 }
 
 fn sum_inputs(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {

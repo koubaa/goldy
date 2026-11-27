@@ -398,11 +398,11 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
-    /// [`Self::new`] after [`Region::round_products`], so the kernel rounds every
+    /// [`Self::new`] after [`Region::round_results`], so the kernel rounds every
     /// operation's result as the separate dispatches would.
     fn rounded(region: &Region) -> Result<Self, LowerError> {
         let mut region = region.clone();
-        region.round_products();
+        region.round_results();
         Self::new(&region)
     }
 
@@ -1670,22 +1670,26 @@ impl Emit<'_> {
                 arg,
             } => match &**arg {
                 Term::Binary {
-                    op: BinaryOp::Mul,
+                    op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div),
                     lhs,
                     rhs,
                 } => {
                     let a = self.term(lhs, out)?;
                     let b = self.term(rhs, out)?;
-                    call(BuiltinFn::ExactMul, vec![a, b])
+                    let exact = match op {
+                        BinaryOp::Add => BuiltinFn::ExactAdd,
+                        BinaryOp::Sub => BuiltinFn::ExactSub,
+                        BinaryOp::Mul => BuiltinFn::ExactMul,
+                        _ => BuiltinFn::ExactDiv,
+                    };
+                    call(exact, vec![a, b])
                 }
-                Term::Binary {
-                    op: BinaryOp::Div,
-                    lhs,
-                    rhs,
+                Term::Unary {
+                    op: UnaryOp::Recip,
+                    arg,
                 } => {
-                    let a = self.term(lhs, out)?;
-                    let b = self.term(rhs, out)?;
-                    call(BuiltinFn::ExactDiv, vec![a, b])
+                    let x = self.term(arg, out)?;
+                    call(BuiltinFn::ExactDiv, vec![float(1.0), x])
                 }
                 other => self.term(other, out)?,
             },

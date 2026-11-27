@@ -370,6 +370,8 @@ fn builtin_fn(func: BuiltinFn) -> TokenStream {
         BuiltinFn::WorkgroupBarrier => quote! { WorkgroupBarrier },
         BuiltinFn::SubgroupLane => quote! { SubgroupLane },
         BuiltinFn::SubgroupRead => quote! { SubgroupRead },
+        BuiltinFn::ExactAdd => quote! { ExactAdd },
+        BuiltinFn::ExactSub => quote! { ExactSub },
         BuiltinFn::ExactMul => quote! { ExactMul },
         BuiltinFn::ExactDiv => quote! { ExactDiv },
         BuiltinFn::AsFloat => quote! { AsFloat },
