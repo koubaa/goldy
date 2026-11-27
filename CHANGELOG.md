@@ -243,6 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gathered reads at another batch position** — a sum over the rows of a gathered batch
   inlined the contraction at each row while the thread held only its own slab index, and
   read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).
+- **Two gathered contractions in one fused part** — each clamped its index parameter to
+  its own readers' extents under the same name, so the generated Slang declared it twice
+  and did not compile. The name now carries the parameter.
 - **`GOLDY_GPU_PROFILE` with batched dispatches** — Vulkan advanced the timestamp index
   once per dispatch inside a `DispatchBatch` while the query pool holds one pair per batch,
   so every later dispatch wrote past the pool (lavapipe segfaults on its queue thread).

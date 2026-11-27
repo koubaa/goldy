@@ -996,7 +996,7 @@ impl Prepared {
         ranges: &HashMap<IndexVar, (i64, i64)>,
         body: &mut Vec<Stmt>,
     ) -> Result<(), LowerError> {
-        let index = element_address(&source.element, names, ranges, body)?;
+        let index = element_address(&source.element, &format!("q{p}"), names, ranges, body)?;
         let at = Expr::Index {
             base: Box::new(var(&parcel_name(source.parcel))),
             index: Box::new(index),
@@ -2099,6 +2099,7 @@ impl Term {
 /// the caller allocated.
 fn element_address(
     element: &Affine,
+    tag: &str,
     names: &HashMap<IndexVar, String>,
     ranges: &HashMap<IndexVar, (i64, i64)>,
     body: &mut Vec<Stmt>,
@@ -2124,7 +2125,8 @@ fn element_address(
         lo += coefficient.saturating_mul(start);
         hi += coefficient.saturating_mul(end);
         let name = names.get(&v).ok_or(LowerError::IndexRange)?;
-        let clamped = format!("{name}_ix{coefficient}");
+        // Each parameter clamps to its own readers' extents, so the name carries `tag`.
+        let clamped = format!("{name}_{tag}_ix{coefficient}");
         body.push(let_int(&clamped, call(BuiltinFn::Min, vec![var(name), int(end)?])));
         let term = if coefficient == 1 {
             var(&clamped)
