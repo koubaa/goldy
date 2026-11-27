@@ -160,12 +160,12 @@ fn matmul_gemv_matches_semantic_node() {
 }
 
 #[test]
-fn matmul_indexed_reads_the_u32_expert_and_replays() {
+fn matmul_indexed_reads_a_device_slab_index_and_replays() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
     let kernels = TensorKernels::new(&device).unwrap();
-    // expert 0 is identity, expert 1 scales the two rows by 2 and 3.
+    // slab 0 is identity, slab 1 scales the two rows by 2 and 3.
     let weight = Tensor::from_f32(
         &device,
         TensorShape::from_dims(&[2, 2, 2]).unwrap(),
@@ -178,7 +178,7 @@ fn matmul_indexed_reads_the_u32_expert_and_replays() {
     let mut scheme = Scheme::new(&ctx);
     let _slab = kernels
         .recorder(&mut scheme)
-        .matmul_indexed_into("expert", weight.view(), x.view(), ids.view(), 0, out.view())
+        .matmul_indexed_into("gather", weight.view(), x.view(), ids.view(), 0, out.view())
         .unwrap();
     assert_eq!(read_f32(&mut scheme, out.buffer()), vec![6.0, 12.0]);
 
@@ -187,6 +187,170 @@ fn matmul_indexed_reads_the_u32_expert_and_replays() {
 
     ids.buffer().write(0, bytemuck::cast_slice(&[9u32, 0u32])).unwrap();
     assert_eq!(read_f32(&mut scheme, out.buffer()), vec![0.0, 0.0]);
+}
+
+#[test]
+fn matmul_indexed_batch_runs_a_row_of_ids() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    // slabs: identity, scale 2/3, scale 4/5.
+    let weight = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[3, 2, 2]).unwrap(),
+        &[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 5.0],
+    )
+    .unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(3), &[2, 0, 9]).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(6), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_batch_into("gather", weight.view(), x.view(), ids.view(), 0, 3, 0, out.view())
+        .unwrap();
+    // slab 2, slab 0, and an index past the table.
+    assert_eq!(
+        read_f32(&mut scheme, out.buffer()),
+        vec![12.0, 20.0, 3.0, 4.0, 0.0, 0.0]
+    );
+
+    let xs = Tensor::from_f32(&device, TensorShape::vector(4), &[1.0, 1.0, 3.0, 4.0]).unwrap();
+    let pair = Tensor::from_u32(&device, TensorShape::vector(2), &[0, 1]).unwrap();
+    let down = Tensor::zeros(&device, TensorShape::vector(4), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_batch_into("strided-x", weight.view(), xs.view(), pair.view(), 0, 2, 2, down.view())
+        .unwrap();
+    // index 0 with [1, 1] is [1, 1]; index 1 with [3, 4] is [6, 12].
+    assert_eq!(read_f32(&mut scheme, down.buffer()), vec![1.0, 1.0, 6.0, 12.0]);
+}
+
+#[test]
+fn matmul_indexed_batch_matches_single_dispatches_and_honors_views() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let rows = 5u32;
+    let k = 80u32;
+    let n_slabs = 3u32;
+    let mut weight_data = vec![0.0; (n_slabs * rows * k) as usize];
+    for s in 0..n_slabs {
+        for r in 0..rows {
+            weight_data[((s * rows + r) * k) as usize] = (s + 1) as f32;
+            weight_data[((s * rows + r) * k + 70) as usize] = 0.5;
+        }
+    }
+    let weight = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[n_slabs, rows, k]).unwrap(),
+        &weight_data,
+    )
+    .unwrap();
+    let mut x_data = vec![0.0; k as usize];
+    x_data[0] = 2.0;
+    x_data[70] = 4.0;
+    let x = Tensor::from_f32(&device, TensorShape::vector(k), &x_data).unwrap();
+    let indices = Tensor::from_u32(&device, TensorShape::vector(4), &[2, 0, 1, 9]).unwrap();
+    let batched = Tensor::zeros(&device, TensorShape::vector(rows * 2), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut scheme)
+        .matmul_indexed_batch_into(
+            "gather",
+            weight.view(),
+            x.view(),
+            indices.view(),
+            1,
+            2,
+            0,
+            batched.view(),
+        )
+        .unwrap();
+    let got = read_f32(&mut scheme, batched.buffer());
+    // first = 1 selects slabs 0 then 1. Row value = (slab + 1) * x[0] + 0.5 * x[70].
+    let row = |slab: u32| (slab as f32 + 1.0) * 2.0 + 0.5 * 4.0;
+    let mut expect = Vec::new();
+    for slab in [0u32, 1] {
+        expect.extend(std::iter::repeat(row(slab)).take(rows as usize));
+    }
+    assert_eq!(got, expect);
+
+    let left = Tensor::zeros(&device, TensorShape::vector(rows), TensorDType::F32).unwrap();
+    let right = Tensor::zeros(&device, TensorShape::vector(rows), TensorDType::F32).unwrap();
+    let mut singles = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut singles)
+        .matmul_indexed_into("gather", weight.view(), x.view(), indices.view(), 1, left.view())
+        .unwrap();
+    kernels
+        .recorder(&mut singles)
+        .matmul_indexed_into("gather", weight.view(), x.view(), indices.view(), 2, right.view())
+        .unwrap();
+    let mut byte = read_f32(&mut singles, left.buffer());
+    byte.extend(read_f32(&mut singles, right.buffer()));
+    assert_eq!(byte, got);
+
+    indices
+        .buffer()
+        .write(0, bytemuck::cast_slice(&[2u32, 1, 0, 9]))
+        .unwrap();
+    assert_eq!(read_f32(&mut scheme, batched.buffer()), {
+        let mut next = Vec::new();
+        for slab in [1u32, 0] {
+            next.extend(std::iter::repeat(row(slab)).take(rows as usize));
+        }
+        next
+    });
+
+    // A narrowed output must be written at the view, not at element 0 of the parent.
+    let parent = Tensor::from_f32(&device, TensorShape::vector(8), &[-1.0; 8]).unwrap();
+    let window = parent.view().narrow(0, 2, 4).unwrap();
+    let small_w = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[2, 2, 2]).unwrap(),
+        &[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0],
+    )
+    .unwrap();
+    let small_x = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let small_i = Tensor::from_u32(&device, TensorShape::vector(2), &[0, 1]).unwrap();
+    let mut narrow = Scheme::new(&ctx);
+    kernels
+        .recorder(&mut narrow)
+        .matmul_indexed_batch_into(
+            "gather",
+            small_w.view(),
+            small_x.view(),
+            small_i.view(),
+            0,
+            2,
+            0,
+            window,
+        )
+        .unwrap();
+    assert_eq!(
+        read_f32(&mut narrow, parent.buffer()),
+        vec![-1.0, -1.0, 3.0, 4.0, 6.0, 12.0, -1.0, -1.0]
+    );
+
+    // x shorter than (batch - 1) * x_stride + k is rejected.
+    let short = Tensor::from_f32(&device, TensorShape::vector(2), &[3.0, 4.0]).unwrap();
+    let err = kernels.recorder(&mut narrow).matmul_indexed_batch_into(
+        "gather",
+        small_w.view(),
+        short.view(),
+        small_i.view(),
+        0,
+        2,
+        1,
+        Tensor::zeros(&device, TensorShape::vector(4), TensorDType::F32)
+            .unwrap()
+            .view(),
+    );
+    assert!(err.is_err());
 }
 
 #[test]
@@ -842,7 +1006,7 @@ fn block_scaled_matvec_distinguishes_nibble_order() {
     let device = runtime();
     let ctx = submission::submission_context(&device);
     let kernels = TensorKernels::new(&device).unwrap();
-    // Expert 0, one row, k = 16. First byte is nibbles (1.0, 2.0). Scale is 2.0.
+    // Slab 0, one row, k = 16. First byte is nibbles (1.0, 2.0). Scale is 2.0.
     // A swapped nibble order changes the dot because x[0] != x[1].
     let mut codes = vec![0u8; 2 * 8];
     codes[0] = 2 | (4 << 4);
@@ -903,7 +1067,7 @@ fn block_scaled_matvec_distinguishes_nibble_order() {
         let nib = if col % 2 == 0 { byte & 0xF } else { byte >> 4 };
         expect += e2m1(nib) * f8_e4m3(scales[0]) * 1.5 * x_vals[col];
     }
-    assert!((got - expect).abs() < 1e-5, "expert 0 {got} want {expect}");
+    assert!((got - expect).abs() < 1e-5, "slab 0 {got} want {expect}");
     let swapped = e2m1(4) * f8_e4m3(scales[0]) * 1.5 * x_vals[0] + e2m1(2) * f8_e4m3(scales[0]) * 1.5 * x_vals[1];
     assert!((swapped - expect).abs() > 1e-3, "nibble swap must change the reference");
 
@@ -913,7 +1077,7 @@ fn block_scaled_matvec_distinguishes_nibble_order() {
     for col in 0..16 {
         expect += e2m1(0xA) * f8_e4m3(scales[1]) * -2.0 * x_vals[col];
     }
-    assert!((got - expect).abs() < 1e-4, "expert 1 {got} want {expect}");
+    assert!((got - expect).abs() < 1e-4, "slab 1 {got} want {expect}");
 
     let mut scheme = Scheme::new(&ctx);
     let got = run(&mut scheme, 9);

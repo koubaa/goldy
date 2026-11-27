@@ -175,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread no longer stalls submits for the length of the compile.
 
 - The child `Scheme::group` records onto reports its parent's `automatic_fusion`, so a
-  recorder that picks a composable form for fusing schemes (such as Ammon's SwiGLU) sees
+  recorder that picks a composable form for fusing schemes (such as a gated product) sees
   `set_automatic_fusion`, not only `GOLDY_FUSION`.
 
 - CUDA GPU API validation no longer sets `CUDA_LAUNCH_BLOCKING=1` for the process. A

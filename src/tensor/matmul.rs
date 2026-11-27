@@ -66,10 +66,10 @@ impl<'a> TensorRecorder<'a> {
 
     /// `out = weight[ids[slot]] @ x`.
     ///
-    /// `weight` is a packed `[experts, rows, k]` tensor of F32 or BF16. `ids` is
-    /// a rank-1 `u32` buffer. The GEMV reads the slab in place (`id * rows * k`);
-    /// it does not copy a tile. An id `>= experts` writes zeros. `x` is `[k]`
-    /// and `out` is `[rows]`.
+    /// `weight` is a packed `[slabs, rows, k]` tensor of F32 or BF16. `indices` is
+    /// a rank-1 `u32` buffer. The GEMV reads the slab in place (`index * rows * k`);
+    /// it does not copy a tile. An index `>= slabs` yields a zero row (masked gather).
+    /// `x` is `[k]` and `out` is `[rows]`. View offsets are part of the address.
     pub fn matmul_indexed_into(
         &mut self,
         label: &str,
@@ -83,28 +83,73 @@ impl<'a> TensorRecorder<'a> {
         out.dtype().require_f32("matmul_indexed")?;
         if weight.shape().rank() != 3 || !weight.is_contiguous() {
             return Err(GoldyError::Validation(
-                "matmul_indexed: weight must be a packed [experts, rows, k] tensor".into(),
+                "matmul_indexed: weight must be a packed [slabs, rows, k] tensor".into(),
             ));
         }
         if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
             return Err(GoldyError::Validation(
-                "matmul_indexed: ids must be a rank-1 U32 tensor".into(),
+                "matmul_indexed: indices must be a rank-1 U32 tensor".into(),
             ));
         }
-        if slot >= ids.shape().dim(0)? {
+        self.matmul_indexed_batch_into(label, weight, x, ids, slot, 1, 0, out)
+    }
+
+    /// `count` ids starting at `slot`. `out` is `[count * rows]`.
+    ///
+    /// `x_stride == 0` uses one `x` of length `k` for every id. Otherwise `x`
+    /// holds `count` vectors and id `i` reads at `i * x_stride`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matmul_indexed_batch_into(
+        &mut self,
+        label: &str,
+        weight: TensorView<'_>,
+        x: TensorView<'_>,
+        ids: TensorView<'_>,
+        slot: u32,
+        count: u32,
+        x_stride: u32,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        x.dtype().require_f32("matmul_indexed")?;
+        out.dtype().require_f32("matmul_indexed")?;
+        if count == 0 {
+            return Err(GoldyError::Validation("matmul_indexed: count is 0".into()));
+        }
+        if weight.shape().rank() != 3 || !weight.is_contiguous() {
             return Err(GoldyError::Validation(
-                "matmul_indexed: slot is past the id buffer".into(),
+                "matmul_indexed: weight must be a packed [slabs, rows, k] tensor".into(),
             ));
         }
-        let experts = weight.shape().dim(0)?;
+        if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: indices must be a rank-1 U32 tensor".into(),
+            ));
+        }
+        let index_len = ids.shape().dim(0)?;
+        let end = slot
+            .checked_add(count)
+            .ok_or_else(|| GoldyError::Validation("matmul_indexed: first index plus batch overflows u32".into()))?;
+        if slot >= index_len || end > index_len {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: first index and batch run past the index vector".into(),
+            ));
+        }
+        let slabs = weight.shape().dim(0)?;
         let rows = weight.shape().dim(1)?;
         let k = weight.shape().dim(2)?;
-        if x.shape().dims() != [k] || out.shape().dims() != [rows] {
+        let x_need = if x_stride == 0 {
+            u64::from(k)
+        } else {
+            u64::from(count - 1) * u64::from(x_stride) + u64::from(k)
+        };
+        let x_ok = x.shape().rank() == 1 && u64::from(x.shape().dim(0)?) >= x_need;
+        let out_len = rows.saturating_mul(count);
+        if !x_ok || out.shape().dims() != [out_len] {
             return Err(GoldyError::Validation(
-                "matmul_indexed: x is [k] and out is [rows]".into(),
+                "matmul_indexed: x matches the stride and out is [count * rows]".into(),
             ));
         }
-        let elems = (experts as u64).saturating_mul(rows as u64).saturating_mul(k as u64);
+        let elems = (slabs as u64).saturating_mul(rows as u64).saturating_mul(k as u64);
         if elems > u64::from(u32::MAX) {
             return Err(GoldyError::Validation(
                 "matmul_indexed: weight does not fit a u32 element index".into(),
@@ -112,7 +157,12 @@ impl<'a> TensorRecorder<'a> {
         }
         let dtype = match weight.dtype() {
             TensorDType::F32 => MatMulDType::F32,
-            TensorDType::BF16 => MatMulDType::BF16,
+            TensorDType::BF16 if count == 1 && x_stride == 0 => MatMulDType::BF16,
+            TensorDType::BF16 => {
+                return Err(GoldyError::Validation(
+                    "matmul_indexed: a run of slab indices is an f32 weight".into(),
+                ))
+            }
             _ => {
                 return Err(GoldyError::Validation(
                     "matmul_indexed: weight must be F32 or BF16".into(),
@@ -122,22 +172,25 @@ impl<'a> TensorRecorder<'a> {
         let mut desc = MatMulDesc::gemv(rows, k);
         desc.dtype = dtype;
         desc.index = Some(MatMulIndex {
-            slot,
-            experts,
-            stride_elems: rows.saturating_mul(k),
+            first: slot,
+            slabs,
+            slab_stride: rows.saturating_mul(k),
             global_per_slab: false,
+            batch: count,
+            x_stride,
         });
         let a_buf = if dtype == MatMulDType::BF16 {
             weight.packed_u32_words()?.buffer()
         } else {
             weight.buffer()
         };
+        let a_view = MatMulView::strided(weight.storage_offset(), k);
         self.scheme
             .matmul(label, desc)
-            .a(a_buf, MatMulView::packed())
-            .b(x.buffer(), MatMulView::packed())
-            .out(out.buffer(), MatMulView::packed())
-            .extra(ids.buffer(), MatMulView::packed())
+            .a(a_buf, a_view)
+            .b(x.buffer(), vector_matmul_view(x)?)
+            .out(out.buffer(), vector_matmul_view(out)?)
+            .extra(ids.buffer(), vector_matmul_view(ids)?)
             .record();
         Ok(())
     }
@@ -229,7 +282,7 @@ impl<'a> TensorRecorder<'a> {
                 "matmul_block: codes are [rows, packed] or [slabs, rows, packed]".into(),
             ));
         }
-        let (experts, rows, packed) = if rank == 2 {
+        let (slabs, rows, packed) = if rank == 2 {
             (1, codes.shape().dim(0)?, codes.shape().dim(1)?)
         } else {
             (codes.shape().dim(0)?, codes.shape().dim(1)?, codes.shape().dim(2)?)
@@ -249,7 +302,7 @@ impl<'a> TensorRecorder<'a> {
         let expect_scale = if rank == 2 {
             vec![scale_rows, scale_cols]
         } else {
-            vec![experts, scale_rows, scale_cols]
+            vec![slabs, scale_rows, scale_cols]
         };
         if scales.dtype()
             != match weight.scale {
@@ -274,19 +327,21 @@ impl<'a> TensorRecorder<'a> {
         let ids_buf = if let Some((ids, slot)) = ids {
             if rank != 3 {
                 return Err(GoldyError::Validation(
-                    "matmul_block: an id selects a rank-3 code tensor".into(),
+                    "matmul_block: an index selects a rank-3 code tensor".into(),
                 ));
             }
             if ids.dtype() != TensorDType::U32 || slot >= ids.shape().dim(0)? {
                 return Err(GoldyError::Validation(
-                    "matmul_block: ids is a rank-1 U32 tensor and slot is in range".into(),
+                    "matmul_block: indices are a rank-1 U32 tensor and the first index is in range".into(),
                 ));
             }
             index = Some(MatMulIndex {
-                slot,
-                experts,
-                stride_elems: rows,
+                first: slot,
+                slabs,
+                slab_stride: rows,
                 global_per_slab: weight.global.is_some_and(|g| g.shape().dim(0).unwrap_or(1) != 1),
+                batch: 1,
+                x_stride: 0,
             });
             ids.buffer()
         } else {
@@ -491,6 +546,16 @@ fn matrix_operand(v: TensorView<'_>, is_a: bool) -> Result<(u32, u32, MatMulView
         }
         _ => Err(GoldyError::Validation("tensor matmul: expected rank 1 or 2".into())),
     }
+}
+
+fn vector_matmul_view(v: TensorView<'_>) -> Result<MatMulView, GoldyError> {
+    let stride = v.layout().strides().first().copied().unwrap_or(1);
+    if stride == 1 {
+        return Ok(MatMulView::offset(v.storage_offset()));
+    }
+    let ld = u32::try_from(stride.max(1))
+        .map_err(|_| GoldyError::Validation("matmul_indexed: view stride does not fit u32".into()))?;
+    Ok(MatMulView::strided(v.storage_offset(), ld))
 }
 
 fn packed_or_strided(v: TensorView<'_>, _as_row: bool) -> Result<MatMulView, GoldyError> {

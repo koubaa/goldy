@@ -56,15 +56,40 @@ pub struct MatMulBlock {
     pub block_cols: u32,
 }
 
-/// Device-selected slab. `a_off = ids[slot] * stride_elems` when `id < experts`.
+/// Device-selected slab. Slab `i` is `indices[first + i]`.
+///
+/// An index `>= slabs` yields a zero row and does not read `A` (masked gather).
+/// `batch` rows start at `first`. `x_stride == 0` reuses one right-hand side;
+/// otherwise row `i` reads `x` at `i * x_stride`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatMulIndex {
-    pub slot: u32,
-    pub experts: u32,
-    pub stride_elems: u32,
-    /// When set, the f32 global-scale vector is indexed by the slab id.
+    /// Number of slabs in `A`.
+    pub slabs: u32,
+    /// Elements from the start of one slab to the next.
+    pub slab_stride: u32,
+    /// When set, the f32 global-scale vector is indexed by the slab index.
     /// Otherwise element 0 is the multiplier for every slab.
     pub global_per_slab: bool,
+    /// First element read from the index vector.
+    pub first: u32,
+    /// How many consecutive indices to gather. `1` is a single slab.
+    pub batch: u32,
+    /// Element stride between right-hand sides. `0` broadcasts one vector.
+    pub x_stride: u32,
+}
+
+impl MatMulIndex {
+    /// One index at `first`, one shared right-hand side.
+    pub const fn single(first: u32, slabs: u32, slab_stride: u32) -> Self {
+        Self {
+            first,
+            slabs,
+            slab_stride,
+            global_per_slab: false,
+            batch: 1,
+            x_stride: 0,
+        }
+    }
 }
 
 /// Row-major `C[m, n] = alpha * op(A)[m, k] @ op(B)[k, n] + beta * C[m, n]`.
@@ -210,6 +235,28 @@ impl MatMulDesc {
             return Err(GoldyError::Validation(
                 "matmul: block-scaled stdlib kernel is a GEMV (n = 1)".into(),
             ));
+        }
+        if let Some(index) = self.index {
+            if index.batch == 0 {
+                return Err(GoldyError::Validation("matmul: gather batch is 0".into()));
+            }
+            if index.batch > 65535 {
+                return Err(GoldyError::Validation(
+                    "matmul: gather batch exceeds the 65535 workgroup limit".into(),
+                ));
+            }
+            if index.first.checked_add(index.batch).is_none() {
+                return Err(GoldyError::Validation(
+                    "matmul: first index plus batch overflows u32".into(),
+                ));
+            }
+            let gathered = index.batch != 1 || index.x_stride != 0;
+            let f32_gemv = self.dtype == MatMulDType::F32 && self.n == 1 && !self.transpose_a && !self.transpose_b;
+            if gathered && !f32_gemv {
+                return Err(GoldyError::Validation(
+                    "matmul: a run of slab indices or a strided right-hand side is only an f32 GEMV".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -475,8 +522,12 @@ pub(crate) fn fallback_workgroups(desc: &MatMulDesc, fallback: MatMulFallback) -
             let threads = desc.m.saturating_mul(desc.n);
             (threads.div_ceil(256).max(1), 1, 1)
         }
-        MatMulFallback::Gemv | MatMulFallback::GemvBf16 | MatMulFallback::GemvIndexed | MatMulFallback::GemvBlock => {
+        MatMulFallback::Gemv | MatMulFallback::GemvBf16 | MatMulFallback::GemvBlock => {
             (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), 1, 1)
+        }
+        MatMulFallback::GemvIndexed => {
+            let batch = desc.index.map(|i| i.batch.max(1)).unwrap_or(1);
+            (desc.m.div_ceil(GEMV_ROWS_PER_GROUP).max(1), batch, 1)
         }
     }
 }
@@ -654,7 +705,7 @@ impl<'a> MatMulBuilder<'a> {
     }
 
     /// Append the MatMul node. Realization (cuBLAS / MPS / stdlib) happens on first submit.
-    pub fn record(self) {
+    pub fn record(mut self) {
         if let Err(msg) = self.desc.validate() {
             self.scheme.push_record_error(msg.to_string());
             return;
@@ -695,6 +746,35 @@ impl<'a> MatMulBuilder<'a> {
                 self.label
             ));
             return;
+        }
+        if fallback == MatMulFallback::GemvIndexed && self.desc.dtype == MatMulDType::F32 {
+            let index_off = self
+                .extras
+                .first()
+                .map(|extra| extra.operand.offset_elements)
+                .unwrap_or(0);
+            let words = match indexed_gather_words(&self.desc, &a.operand, &b.operand, &c.operand, index_off) {
+                Ok(words) => words,
+                Err(err) => {
+                    self.scheme.push_record_error(err.to_string());
+                    return;
+                }
+            };
+            let params = match self.scheme.alloc_matmul_params(&words) {
+                Ok(buf) => buf,
+                Err(err) => {
+                    self.scheme.push_record_error(err.to_string());
+                    return;
+                }
+            };
+            match bind_operand(self.scheme, &params, NodeAccess::Read, MatMulView::packed(), 1) {
+                Ok(bound) => self.extras.push(bound),
+                Err(msg) => {
+                    self.scheme.push_record_error(msg);
+                    return;
+                }
+            }
+            self.scheme.retain_matmul_params(params);
         }
         if !native && fallback == MatMulFallback::Gemm {
             for (name, op, packed) in operands {
@@ -821,31 +901,51 @@ fn bf16_user_slots(
     _b: &MatMulOperand,
     _c: &MatMulOperand,
 ) -> Result<Vec<u32>, GoldyError> {
-    let (experts, slot, stride, a_off) = index_slots(desc, a)?;
+    let (slabs, first, stride, a_off) = index_slots(desc, a)?;
     if desc.n == 1 {
-        Ok(vec![desc.m, desc.k, a_off, stride, experts, slot])
+        Ok(vec![desc.m, desc.k, a_off, stride, slabs, first])
     } else {
-        Ok(vec![desc.m, desc.n, desc.k, a_off, stride, experts, slot])
+        Ok(vec![desc.m, desc.n, desc.k, a_off, stride, slabs, first])
     }
 }
 
 fn indexed_f32_user_slots(
     desc: &MatMulDesc,
     a: &MatMulOperand,
-    _b: &MatMulOperand,
-    _c: &MatMulOperand,
+    b: &MatMulOperand,
+    c: &MatMulOperand,
 ) -> Result<Vec<u32>, GoldyError> {
+    // Sizes travel in a parameter buffer. Confirm they fit, then leave the push block empty.
+    indexed_gather_words(desc, a, b, c, 0)?;
+    Ok(vec![])
+}
+
+/// `m, k, lda, slab_stride, slabs, first, batch, x_stride, a_base, x_base, y_base, index_base, x_elem, y_elem`.
+pub(crate) fn indexed_gather_words(
+    desc: &MatMulDesc,
+    a: &MatMulOperand,
+    b: &MatMulOperand,
+    c: &MatMulOperand,
+    index_off: u64,
+) -> Result<[u32; 14], GoldyError> {
     let index = desc
         .index
-        .ok_or_else(|| GoldyError::Validation("matmul: indexed GEMV is missing its id".into()))?;
-    Ok(vec![
+        .ok_or_else(|| GoldyError::Validation("matmul: indexed GEMV is missing its index".into()))?;
+    Ok([
         desc.m,
         desc.k,
         a.leading_dim,
-        index.stride_elems,
-        index.experts,
-        index.slot,
+        index.slab_stride,
+        index.slabs,
+        index.first,
+        index.batch,
+        index.x_stride,
         fit_offset("A", a.offset_elements)?,
+        fit_offset("x", b.offset_elements)?,
+        fit_offset("out", c.offset_elements)?,
+        fit_offset("indices", index_off)?,
+        b.leading_dim.max(1),
+        c.leading_dim.max(1),
     ])
 }
 
@@ -858,7 +958,7 @@ fn block_user_slots(
     let block = desc
         .block
         .ok_or_else(|| GoldyError::Validation("matmul: missing block descriptor".into()))?;
-    let (experts, slot, _stride, _off) = index_slots(desc, a)?;
+    let (slabs, first, _stride, _off) = index_slots(desc, a)?;
     let elem = match block.elems {
         PackedElem::E2M1 => 0,
         PackedElem::E4M3 => 1,
@@ -868,14 +968,14 @@ fn block_user_slots(
         PackedScale::E8M0 => 1,
     };
     let per_slab = u32::from(desc.index.is_some_and(|i| i.global_per_slab));
-    let rows = desc.index.map(|i| i.stride_elems).unwrap_or(desc.m);
+    let rows = desc.index.map(|i| i.slab_stride).unwrap_or(desc.m);
     Ok(vec![
         desc.m,
         desc.k,
         elem | (scale << 1),
         block.block_cols,
-        experts,
-        slot,
+        slabs,
+        first,
         rows,
         per_slab,
     ])
@@ -883,7 +983,7 @@ fn block_user_slots(
 
 fn index_slots(desc: &MatMulDesc, a: &MatMulOperand) -> Result<(u32, u32, u32, u32), GoldyError> {
     match desc.index {
-        Some(index) => Ok((index.experts, index.slot, index.stride_elems, 0)),
+        Some(index) => Ok((index.slabs, index.first, index.slab_stride, 0)),
         None => Ok((0, 0, 0, fit_offset("A", a.offset_elements)?)),
     }
 }
@@ -904,6 +1004,29 @@ pub(crate) struct MatMulNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gathered_batch_is_only_an_f32_gemv() {
+        let mut desc = MatMulDesc::gemv(4, 8);
+        desc.dtype = MatMulDType::BF16;
+        desc.index = Some(MatMulIndex {
+            first: 0,
+            slabs: 4,
+            slab_stride: 32,
+            global_per_slab: false,
+            batch: 3,
+            x_stride: 0,
+        });
+        assert!(desc.validate().is_err());
+        desc.dtype = MatMulDType::F32;
+        desc.index.as_mut().unwrap().batch = 65536;
+        assert!(desc.validate().is_err());
+        desc.index.as_mut().unwrap().batch = 2;
+        desc.index.as_mut().unwrap().first = u32::MAX;
+        assert!(desc.validate().is_err());
+        desc.index.as_mut().unwrap().first = 0;
+        assert!(desc.validate().is_ok());
+    }
 
     fn operand(offset_elements: u64, leading_dim: u32) -> MatMulOperand {
         MatMulOperand {

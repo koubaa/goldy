@@ -31,7 +31,7 @@ goldy = { version = "0.3", features = ["tensor"] }
 
 ## What it does not own
 
-Autograd, parameters, optimizers, model formats, RMSNorm, RoPE, attention, activations
+Autograd, parameters, optimizers, model formats, RMSNorm, RoPE, sequence mix, activations
 as NN layers, KV-cache policy, tokenization, symbolic shapes, or negative strides.
 
 Low-level `Scheme`, `Buffer`, `Parcel`, and `MatMulView` APIs remain escape hatches.
@@ -127,7 +127,7 @@ single boundary that translates foreign offsets into validated `TensorView`s.
 | Reductions | `sum`, `max_reduce`, `min_reduce`, `mean` | One axis; squeezed by default |
 | Gather / scatter | `gather`; `scatter` with [`ScatterMode`] | Modes are explicit: `UniqueWrite`, `Add`, `Min`, `Max` |
 | Matmul | rank-1/2 and batched rank-3 | Rank-2 packed cases lower to `Scheme::matmul` (cuBLAS / MPS / stdlib) |
-| Softmax | composition of max / sub / exp / sum / div | Convenience only; not fused attention |
+| Softmax | composition of max / sub / exp / sum / div | Convenience only; not a fused sequence mix |
 
 Scatter `Add` / `Min` / `Max` are defined (a single thread walks colliding indices). They are
 **not** idempotent on scheme replay if the destination is the accumulator; unique-write and
@@ -146,6 +146,6 @@ arbitrary zero-copy host view of GPU storage.
 [`llama3.goldy`](https://github.com/koubaa/llama3.goldy) is the proving consumer: activations
 and checkpoint weights are tensors. Static GEMVs and residuals go through Ammon's
 `TensorKernels` (Goldy semantic matmul / portable add). Custom RMSNorm / RoPE /
-attention / SwiGLU kernels bind tensor views with rank and symbolic-extent
-contracts; the host reshapes Q, KV cache, and attention scores at recording
+Sequence-mix kernels bind tensor views with rank and symbolic-extent
+contracts; the host reshapes the factors at recording
 boundaries. Dynamic decode state stays a `DecodeStep` deposit.
