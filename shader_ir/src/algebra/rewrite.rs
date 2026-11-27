@@ -128,16 +128,23 @@ impl Region {
         replaced
     }
 
-    /// Rounds the product each definition ends in, through selects, and returns how
-    /// many it rounded. [`Exactness::Exact`].
+    /// Rounds the arithmetic each definition ends in, through selects, and returns how
+    /// many results it rounded. [`Exactness::Exact`].
     ///
     /// Run separately, an operation stores its result before the next reads it, so a
-    /// device cannot contract one operation's final product into the operation that
-    /// reads it. Rounding keeps that true once [`Self::substitute`] joins them.
-    pub fn round_products(&mut self) -> usize {
+    /// device can neither contract one operation's final product into the operation
+    /// that reads it nor combine their constants: `(x + a) + b` into `x + (a + b)`, or
+    /// a constant divisor into the multiply that follows. A scalar baked as a literal
+    /// makes such constants. Rounding keeps that true once [`Self::substitute`] joins
+    /// the operations.
+    pub fn round_results(&mut self) -> usize {
         fn round(term: Term, rounded: &mut usize) -> Term {
             match term {
-                Term::Binary { op: BinaryOp::Mul, .. } => {
+                Term::Binary {
+                    op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div,
+                    ..
+                }
+                | Term::Unary { op: UnaryOp::Recip, .. } => {
                     *rounded += 1;
                     Term::unary(UnaryOp::Round, term)
                 }
@@ -157,6 +164,12 @@ impl Region {
             def.body = round(body, &mut rounded);
         }
         rounded
+    }
+
+    /// [`Self::round_results`], under its former name.
+    #[deprecated(note = "rounds every result now; use `round_results`")]
+    pub fn round_products(&mut self) -> usize {
+        self.round_results()
     }
 
     /// Applies `law` throughout `value`'s definition, and returns how many times it

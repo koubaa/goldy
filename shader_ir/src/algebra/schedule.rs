@@ -171,6 +171,11 @@ pub enum LowerError {
     IndexSource {
         param: String,
     },
+    /// A read of a gathered operand addresses another element of an index parameter's
+    /// source than the one its thread loads.
+    GatheredRead {
+        param: String,
+    },
 }
 
 impl fmt::Display for LowerError {
@@ -188,6 +193,12 @@ impl fmt::Display for LowerError {
             LowerError::IndexRange => f.write_str("an index expression can leave the 32-bit range"),
             LowerError::IndexSource { param } => {
                 write!(f, "the source of index parameter `{param}` is also data or written")
+            }
+            LowerError::GatheredRead { param } => {
+                write!(
+                    f,
+                    "a read needs another element of index parameter `{param}` than its thread loads"
+                )
             }
         }
     }
@@ -212,7 +223,20 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
 /// one element per thread.
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
-    let prepared = Prepared::rounded(region)?;
+    lower_on_with_rounding(region, sources, target, true)
+}
+
+fn lower_on_with_rounding(
+    region: &Region,
+    sources: &[IndexSource],
+    target: &Target,
+    round_results: bool,
+) -> Result<Lowered, LowerError> {
+    let prepared = if round_results {
+        Prepared::rounded(region)?
+    } else {
+        Prepared::new(region)?
+    };
     let mut lanes = None;
     for (_, body) in &prepared.bodies {
         for r in top_reductions(body) {
@@ -264,6 +288,23 @@ pub fn lower_graph(
         }
     }
     lower_on(graph.region(), sources, target)
+}
+
+/// [`lower_graph`] while allowing the compiler to combine arithmetic across the
+/// operations `graph` composes. Reduction association and `precision` are unchanged,
+/// but intermediate results need not round where the recorded dispatches stored them.
+pub fn lower_graph_relaxed(
+    graph: &Graph,
+    sources: &[IndexSource],
+    target: &Target,
+    precision: ContractionPrecision,
+) -> Result<Lowered, LowerError> {
+    if let (ContractionPrecision::F16Factors, true, Some(subgroup)) = (precision, target.matrix, target.subgroup) {
+        if let Some(lowered) = super::matrix::lower(graph, sources, subgroup) {
+            return Ok(lowered);
+        }
+    }
+    lower_on_with_rounding(graph.region(), sources, target, false)
 }
 
 /// Lowers `region` with `schedule`. [`Schedule::Matrix`] needs the contractions of a
@@ -387,11 +428,11 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
-    /// [`Self::new`] after [`Region::round_products`], so the kernel rounds every
+    /// [`Self::new`] after [`Region::round_results`], so the kernel rounds every
     /// operation's result as the separate dispatches would.
     fn rounded(region: &Region) -> Result<Self, LowerError> {
         let mut region = region.clone();
-        region.round_products();
+        region.round_results();
         Self::new(&region)
     }
 
@@ -824,6 +865,19 @@ impl Prepared {
     /// Rewrites each source element from the region's index variables to the
     /// coordinates [`Self::new`] assigned to the output axes that bind them.
     fn resolve_index_sources(&self, sources: &[IndexSource]) -> Result<Vec<IndexSource>, LowerError> {
+        let map = self.bound_coordinates()?;
+        self.check_gathered_reads(sources, &map)?;
+        Ok(sources
+            .iter()
+            .map(|source| IndexSource {
+                element: source.element.substitute(&|v| map.get(&v).cloned()),
+                ..source.clone()
+            })
+            .collect())
+    }
+
+    /// Each output's domain variables, as the coordinates [`Self::new`] assigned to them.
+    fn bound_coordinates(&self) -> Result<HashMap<IndexVar, Affine>, LowerError> {
         let mut map: HashMap<IndexVar, Affine> = HashMap::new();
         for (n, &(id, _)) in self.bodies.iter().enumerate() {
             let value = self.region.value(id).expect("an output is live");
@@ -838,13 +892,49 @@ impl Prepared {
                 }
             }
         }
-        Ok(sources
-            .iter()
-            .map(|source| IndexSource {
-                element: source.element.substitute(&|v| map.get(&v).cloned()),
-                ..source.clone()
-            })
-            .collect())
+        Ok(map)
+    }
+
+    /// Declines a read the thread's index parameters do not address.
+    ///
+    /// A parameter whose source element depends on an index variable gathers along the
+    /// one stride-zero axis of each storage that mentions it, and each thread loads it
+    /// once, at the coordinate that variable is bound to. Substituting a gathered value
+    /// into a reader can leave a read on that axis elsewhere, such as at a constant
+    /// slot; that read needs a different element of the source than the thread holds.
+    fn check_gathered_reads(&self, sources: &[IndexSource], map: &HashMap<IndexVar, Affine>) -> Result<(), LowerError> {
+        for (p, source) in sources.iter().enumerate() {
+            let vars: Vec<IndexVar> = source.element.indices().collect();
+            if vars.is_empty() {
+                continue;
+            }
+            let param = IndexParam(p as u32);
+            let declined = || LowerError::GatheredRead {
+                param: self.region.param_name(param).to_string(),
+            };
+            let bound = match vars.as_slice() {
+                [v] => map.get(v).ok_or_else(declined)?,
+                _ => return Err(declined()),
+            };
+            let mut addressed = true;
+            for (_, body) in &self.bodies {
+                body.for_each_read(&mut |value, index| {
+                    let storage = self.storage(value);
+                    if !storage.offset.mentions(Sym::Param(param)) {
+                        return;
+                    }
+                    let mut gathered = (0..storage.strides.len()).filter(|&a| storage.strides[a] == 0);
+                    addressed &= match (gathered.next(), gathered.next()) {
+                        (Some(axis), None) => index.get(axis) == Some(bound),
+                        _ => false,
+                    };
+                });
+            }
+            if !addressed {
+                return Err(declined());
+            }
+        }
+        Ok(())
     }
 
     /// Whether output `n` addresses parameter `p`: a read whose storage offset
@@ -936,7 +1026,7 @@ impl Prepared {
         ranges: &HashMap<IndexVar, (i64, i64)>,
         body: &mut Vec<Stmt>,
     ) -> Result<(), LowerError> {
-        let index = element_address(&source.element, names, ranges, body)?;
+        let index = element_address(&source.element, &format!("q{p}"), names, ranges, body)?;
         let at = Expr::Index {
             base: Box::new(var(&parcel_name(source.parcel))),
             index: Box::new(index),
@@ -1610,22 +1700,26 @@ impl Emit<'_> {
                 arg,
             } => match &**arg {
                 Term::Binary {
-                    op: BinaryOp::Mul,
+                    op: op @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div),
                     lhs,
                     rhs,
                 } => {
                     let a = self.term(lhs, out)?;
                     let b = self.term(rhs, out)?;
-                    call(BuiltinFn::ExactMul, vec![a, b])
+                    let exact = match op {
+                        BinaryOp::Add => BuiltinFn::ExactAdd,
+                        BinaryOp::Sub => BuiltinFn::ExactSub,
+                        BinaryOp::Mul => BuiltinFn::ExactMul,
+                        _ => BuiltinFn::ExactDiv,
+                    };
+                    call(exact, vec![a, b])
                 }
-                Term::Binary {
-                    op: BinaryOp::Div,
-                    lhs,
-                    rhs,
+                Term::Unary {
+                    op: UnaryOp::Recip,
+                    arg,
                 } => {
-                    let a = self.term(lhs, out)?;
-                    let b = self.term(rhs, out)?;
-                    call(BuiltinFn::ExactDiv, vec![a, b])
+                    let x = self.term(arg, out)?;
+                    call(BuiltinFn::ExactDiv, vec![float(1.0), x])
                 }
                 other => self.term(other, out)?,
             },
@@ -2035,6 +2129,7 @@ impl Term {
 /// the caller allocated.
 fn element_address(
     element: &Affine,
+    tag: &str,
     names: &HashMap<IndexVar, String>,
     ranges: &HashMap<IndexVar, (i64, i64)>,
     body: &mut Vec<Stmt>,
@@ -2060,7 +2155,8 @@ fn element_address(
         lo += coefficient.saturating_mul(start);
         hi += coefficient.saturating_mul(end);
         let name = names.get(&v).ok_or(LowerError::IndexRange)?;
-        let clamped = format!("{name}_ix{coefficient}");
+        // Each parameter clamps to its own readers' extents, so the name carries `tag`.
+        let clamped = format!("{name}_{tag}_ix{coefficient}");
         body.push(let_int(&clamped, call(BuiltinFn::Min, vec![var(name), int(end)?])));
         let term = if coefficient == 1 {
             var(&clamped)

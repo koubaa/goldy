@@ -48,6 +48,10 @@ use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Internal compile marker for a kernel whose dispatch boundaries are observable
+/// floating-point rounding points.
+pub(crate) const PRECISE_MATH_DEFINE: &str = "_GOLDY_PRECISE_MATH";
+
 /// The compile inputs a [`ShaderModule`] was built from.
 ///
 /// Retained by every module (and by every [`crate::ComputePipeline`] built from one) so
@@ -76,7 +80,7 @@ pub(crate) struct ShaderProvenance {
 /// Stable identity of a kernel program, beyond the module that compiled it.
 ///
 /// Modules carrying one id bind alike, so their specialized variants are interchangeable.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct KernelIdentity {
     pub(crate) id: goldy_shader_ir::KernelId,
     /// Logical name of each scalar wire slot, for diagnostics.
@@ -212,6 +216,11 @@ impl ShaderModule {
     /// ```
     pub fn from_slang(device: &Runtime, source: &str) -> Result<Self> {
         Self::from_slang_with_options(device, source, &[], &[], Default::default(), &[])
+    }
+
+    pub(crate) fn from_slang_with_arithmetic(device: &Runtime, source: &str, precise: bool) -> Result<Self> {
+        let defines = precise.then_some((PRECISE_MATH_DEFINE, "1"));
+        Self::from_slang_with_options(device, source, &[], defines.as_slice(), Default::default(), &[])
     }
 
     /// Create a shader module after injecting Slang declarations generated from Rust GPU types.
@@ -677,6 +686,19 @@ mod tests {
         );
         assert_eq!(variant.source(), base.source());
         assert_eq!(variant.search_paths(), base.search_paths());
+    }
+
+    #[test]
+    fn precise_arithmetic_marker_survives_variants() {
+        let device = mock_runtime();
+        let precise =
+            ShaderModule::from_slang_with_arithmetic(&device, "void main() {}", true).expect("precise shader");
+        let relaxed =
+            ShaderModule::from_slang_with_arithmetic(&device, "void main() {}", false).expect("relaxed shader");
+        let marked = |module: &ShaderModule| module.defines().iter().any(|(name, _)| name == PRECISE_MATH_DEFINE);
+        assert!(marked(&precise));
+        assert!(!marked(&relaxed));
+        assert!(marked(&precise.variant(&[("SPECIALIZED", "1")]).expect("variant")));
     }
 
     #[test]

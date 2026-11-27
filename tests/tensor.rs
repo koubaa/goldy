@@ -353,6 +353,85 @@ fn matmul_indexed_batch_matches_single_dispatches_and_honors_views() {
     assert!(err.is_err());
 }
 
+/// Either half of the rows of a stacked `[slabs, 2 * rows, k]` weight is a weight
+/// whose slabs lie `2 * rows * k` apart; each matches a packed copy of that half.
+#[test]
+fn matmul_indexed_batch_reads_strided_slabs() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let (slabs, rows, k) = (3u32, 3u32, 40u32);
+    let stacked: Vec<f32> = (0..slabs * 2 * rows * k)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 64.0)
+        .collect();
+    let weight = Tensor::from_f32(
+        &device,
+        TensorShape::from_dims(&[slabs, 2 * rows, k]).unwrap(),
+        &stacked,
+    )
+    .unwrap();
+    let x_data: Vec<f32> = (0..k).map(|i| ((i * 13 % 29) as f32 - 14.0) / 16.0).collect();
+    let x = Tensor::from_f32(&device, TensorShape::vector(k), &x_data).unwrap();
+    let ids = Tensor::from_u32(&device, TensorShape::vector(3), &[2, 0, 9]).unwrap();
+    for half in 0..2u32 {
+        let packed_data: Vec<f32> = (0..slabs)
+            .flat_map(|s| {
+                let start = ((s * 2 + half) * rows * k) as usize;
+                stacked[start..start + (rows * k) as usize].to_vec()
+            })
+            .collect();
+        let packed = Tensor::from_f32(
+            &device,
+            TensorShape::from_dims(&[slabs, rows, k]).unwrap(),
+            &packed_data,
+        )
+        .unwrap();
+        let strided_out = Tensor::zeros(&device, TensorShape::vector(3 * rows), TensorDType::F32).unwrap();
+        let packed_out = Tensor::zeros(&device, TensorShape::vector(3 * rows), TensorDType::F32).unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        let mut rec = kernels.recorder(&mut scheme);
+        let view = weight.view().narrow(1, half * rows, rows).unwrap();
+        rec.matmul_indexed_batch_into("half", view, x.view(), ids.view(), 0, 3, 0, strided_out.view())
+            .unwrap();
+        rec.matmul_indexed_batch_into(
+            "packed",
+            packed.view(),
+            x.view(),
+            ids.view(),
+            0,
+            3,
+            0,
+            packed_out.view(),
+        )
+        .unwrap();
+        let got = read_f32(&mut scheme, strided_out.buffer());
+        let want = read_f32(&mut scheme, packed_out.buffer());
+        assert!(
+            got.iter().map(|v| v.to_bits()).eq(want.iter().map(|v| v.to_bits())),
+            "half {half}: {got:?} != {want:?}"
+        );
+        assert!(got[..(2 * rows) as usize].iter().any(|v| *v != 0.0), "{got:?}");
+        assert!(got[(2 * rows) as usize..].iter().all(|v| *v == 0.0), "{got:?}");
+    }
+
+    // Rows that are not packed are rejected.
+    let columns = weight.view().narrow(2, 0, k / 2).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(3 * 2 * rows), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let err = kernels.recorder(&mut scheme).matmul_indexed_batch_into(
+        "columns",
+        columns,
+        x.view().narrow(0, 0, k / 2).unwrap(),
+        ids.view(),
+        0,
+        3,
+        0,
+        out.view(),
+    );
+    assert!(err.is_err());
+}
+
 #[test]
 fn strided_narrow_views_alias_parent() {
     let _gpu = gpu_lock();

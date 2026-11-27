@@ -32,6 +32,47 @@ public float2 to_polar(float2 uv) {
     return float2(dist, angle);
 }
 
+/// `a + b` rounded to float on its own: the device must not reassociate it with the
+/// operation that reads it, as by adding two constant offsets first.
+public float goldy_exact_add(float a, float b) {
+    __target_switch
+    {
+    case spirv:
+        return spirv_asm
+        {
+            %r:$$float = OpFAdd $a $b;
+            OpDecorate %r NoContraction;
+            result:$$float = OpCopyObject %r
+        };
+    case cuda: __intrinsic_asm "__fadd_rn";
+    case hlsl:
+        precise float r = a + b;
+        return r;
+    default:
+        return a + b;
+    }
+}
+
+/// `a - b` rounded to float on its own, as `goldy_exact_add`.
+public float goldy_exact_sub(float a, float b) {
+    __target_switch
+    {
+    case spirv:
+        return spirv_asm
+        {
+            %r:$$float = OpFSub $a $b;
+            OpDecorate %r NoContraction;
+            result:$$float = OpCopyObject %r
+        };
+    case cuda: __intrinsic_asm "__fsub_rn";
+    case hlsl:
+        precise float r = a - b;
+        return r;
+    default:
+        return a - b;
+    }
+}
+
 /// `a * b` rounded to float on its own: the device must not contract it into a
 /// multiply-add with the operation that reads it.
 public float goldy_exact_mul(float a, float b) {

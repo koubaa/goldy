@@ -379,8 +379,9 @@ pub(crate) fn prepare_synthesized(
     device: &Runtime,
     def: &KernelDef,
     scalars: Vec<String>,
+    id: KernelId,
 ) -> anyhow::Result<PreparedKernel> {
-    let identity = KernelIdentity { id: def.id(), scalars };
+    let identity = KernelIdentity { id, scalars };
     let prepared = prepare_kernel_as(device, def.clone(), Some(identity))?;
     tracing::debug!(kernel = %def.entry, id = %def.id(), params = def.params.len(), "semantic fusion prepared");
     Ok(prepared)

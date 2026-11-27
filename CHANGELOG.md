@@ -127,6 +127,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Generated-kernel arithmetic is explicit** — `Scheme::set_arithmetic_policy` selects
+  `ArithmeticPolicy::MatchRecorded` (the default) or `Relaxed`. The policy selects
+  separately cached variants of recorded generated kernels, stdlib matrix kernels, and
+  their composed or semantic fused replacements. On Metal, `MatchRecorded` uses safe
+  arithmetic transformations with fast floating-point functions; `Relaxed` permits fast
+  arithmetic within kernels and across boundaries fusion removes. Authored compute and
+  graphics shaders are unchanged. `FusionArithmetic` and the former Scheme method names
+  remain as deprecated aliases.
+
+- **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
+  packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each
+  stacked slab, say) is a weight without a copy. BF16 weights stay contiguous.
+
 - **Less host work per retained resubmit** — cross-submit planning reads each parcel's
   sync state under its lock instead of cloning it into a ledger snapshot (twice per key),
   the Vulkan bindless slot table uses Fx hashing with inline per-context entries (as DX12
@@ -233,6 +246,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Specialized semantic regions match their unfused dispatches** — specialization bakes a
+  fused kernel's scalars as literals, and the device then combined constants across the
+  operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into
+  `x + (a + b)`. A semantic region now rounds every sum, difference, product, quotient and
+  reciprocal an operation ends in (`goldy_exact_add` / `goldy_exact_sub` join
+  `goldy_exact_mul` / `goldy_exact_div`; `BuiltinFn` gains `ExactAdd` and `ExactSub`), and
+  `Region::round_products` is deprecated for `Region::round_results`. Metal honors these
+  boundaries by compiling structured generated kernels and exact fused variants with safe
+  arithmetic transformations while retaining fast floating-point functions. Authored compute
+  and graphics shaders stay fully fast; `ArithmeticPolicy::Relaxed` selects fast variants of
+  both recorded generated kernels and their fused replacements.
+- **Gathered reads at another batch position** — a sum over the rows of a gathered batch
+  inlined the contraction at each row while the thread held only its own slab index, and
+  read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).
+- **Two gathered contractions in one fused part** — each clamped its index parameter to
+  its own readers' extents under the same name, so the generated Slang declared it twice
+  and did not compile. The name now carries the parameter.
 - **`GOLDY_GPU_PROFILE` with batched dispatches** — Vulkan advanced the timestamp index
   once per dispatch inside a `DispatchBatch` while the query pool holds one pair per batch,
   so every later dispatch wrote past the pool (lavapipe segfaults on its queue thread).

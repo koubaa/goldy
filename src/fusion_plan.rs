@@ -26,6 +26,7 @@
 //! consumers'. The remaining nodes are matched by composing kernel bodies.
 
 use crate::backend::ComputePipelineHandle;
+use crate::compute::ComputePipeline;
 use crate::fusion_cost::FusionCostModel;
 use crate::kernel::{
     access_kind_to_node, admit, prepare_fused, prepare_synthesized, ArgShape, PreparedKernel, StageView,
@@ -70,14 +71,16 @@ pub(crate) enum SiteArg {
 /// A kernel site being collected by a node builder.
 pub(crate) struct SiteDraft {
     kernel: Arc<KernelDef>,
+    pipelines: KernelPipelines,
     args: Vec<SiteArg>,
 }
 
 impl SiteDraft {
-    pub(crate) fn new(kernel: Arc<KernelDef>) -> Self {
+    pub(crate) fn new(kernel: Arc<KernelDef>, pipelines: KernelPipelines) -> Self {
         Self {
             args: Vec::with_capacity(kernel.params.len()),
             kernel,
+            pipelines,
         }
     }
 
@@ -104,12 +107,7 @@ impl SiteDraft {
 
     /// The site of a node with `bindings` bindings, if its arguments follow the signature
     /// and it declares no bindings besides its tracked resource arguments.
-    pub(crate) fn finish(
-        self,
-        universal: ComputePipelineHandle,
-        provenance: &Arc<ShaderProvenance>,
-        bindings: usize,
-    ) -> Option<KernelSite> {
+    pub(crate) fn finish(self, bindings: usize) -> Option<KernelSite> {
         let params = &self.kernel.params;
         let shaped = params.len() == self.args.len()
             && params
@@ -123,20 +121,55 @@ impl SiteDraft {
             .count();
         (shaped && tracked == bindings).then(|| KernelSite {
             kernel: self.kernel,
-            universal,
-            provenance: Arc::clone(provenance),
+            pipelines: self.pipelines,
             args: self.args,
         })
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct KernelPipeline {
+    pub(crate) universal: ComputePipelineHandle,
+    pub(crate) provenance: Arc<ShaderProvenance>,
+}
+
+#[derive(Clone)]
+pub(crate) struct KernelPipelines {
+    match_recorded: KernelPipeline,
+    relaxed: KernelPipeline,
+}
+
+impl KernelPipelines {
+    pub(crate) fn new(match_recorded: &ComputePipeline, relaxed: &ComputePipeline) -> Self {
+        let of = |pipeline: &ComputePipeline| KernelPipeline {
+            universal: pipeline.handle,
+            provenance: Arc::clone(&pipeline.provenance),
+        };
+        Self {
+            match_recorded: of(match_recorded),
+            relaxed: of(relaxed),
+        }
+    }
+
+    pub(crate) fn select(&self, policy: ArithmeticPolicy) -> &KernelPipeline {
+        match policy {
+            ArithmeticPolicy::MatchRecorded => &self.match_recorded,
+            ArithmeticPolicy::Relaxed => &self.relaxed,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ArithmeticSite {
+    pub(crate) pipelines: KernelPipelines,
+    pub(crate) tensor_facts: crate::specialization::BakedSlots,
 }
 
 /// A recorded dispatch of a generated kernel: what admission and plan building need.
 #[derive(Clone)]
 pub(crate) struct KernelSite {
     pub(crate) kernel: Arc<KernelDef>,
-    /// The pipeline the caller recorded, before any specialization.
-    pub(crate) universal: ComputePipelineHandle,
-    pub(crate) provenance: Arc<ShaderProvenance>,
+    pub(crate) pipelines: KernelPipelines,
     pub(crate) args: Vec<SiteArg>,
 }
 
@@ -230,9 +263,35 @@ pub enum FusionTier {
     /// [`crate::kernel::FusedKernel`] admission.
     Composed,
     /// A kernel synthesized from what the constituents compute in index notation. It
-    /// may run on a grid none of them uses, and stores what they store, bit for bit.
+    /// may run on a grid none of them uses. Under
+    /// [`ArithmeticPolicy::MatchRecorded`] it stores what they store, bit for bit.
     Semantic,
 }
+
+/// Floating-point policy for generated kernels and their fused replacements.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ArithmeticPolicy {
+    /// Preserve recorded intermediate rounding, selecting conservative generated
+    /// variants on backends that need them.
+    #[default]
+    MatchRecorded,
+    /// Permit reassociation, reciprocal transforms and contraction within generated
+    /// kernels and across boundaries removed by fusion.
+    Relaxed,
+}
+
+impl ArithmeticPolicy {
+    pub(crate) fn kernel_id(self, id: KernelId) -> KernelId {
+        id.variant(match self {
+            Self::MatchRecorded => 1,
+            Self::Relaxed => 2,
+        })
+    }
+}
+
+/// Deprecated name for [`ArithmeticPolicy`].
+#[deprecated(since = "0.3.0", note = "use ArithmeticPolicy")]
+pub type FusionArithmetic = ArithmeticPolicy;
 
 /// Whether a [`FusionRegion`] runs fused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,10 +435,10 @@ impl Program {
         }
     }
 
-    fn compile(&self, device: &Runtime) -> anyhow::Result<PreparedKernel> {
+    fn compile(&self, device: &Runtime, id: KernelId) -> anyhow::Result<PreparedKernel> {
         match self {
             Program::Composed(definition) => prepare_fused(device, definition),
-            Program::Semantic(program) => prepare_synthesized(device, &program.def, program.scalar_origins()),
+            Program::Semantic(program) => prepare_synthesized(device, &program.def, program.scalar_origins(), id),
         }
     }
 }
@@ -425,6 +484,7 @@ pub(crate) struct FusionPlanner {
     plan: Option<Plan>,
     events: FusionEvents,
     precision: ContractionPrecision,
+    arithmetic: ArithmeticPolicy,
     cost: FusionCostModel,
     /// Resources one fused kernel may bind on this device.
     resource_limit: usize,
@@ -451,6 +511,7 @@ impl FusionPlanner {
             plan: None,
             events: FusionEvents::default(),
             precision: ContractionPrecision::Exact,
+            arithmetic: ArithmeticPolicy::default(),
             cost: FusionCostModel::default(),
             resource_limit,
         }
@@ -474,6 +535,15 @@ impl FusionPlanner {
     /// Admit `precision` from the next plan on; the caller replans.
     pub(crate) fn set_precision(&mut self, precision: ContractionPrecision) {
         self.precision = precision;
+    }
+
+    pub(crate) fn arithmetic(&self) -> ArithmeticPolicy {
+        self.arithmetic
+    }
+
+    /// Admit `arithmetic` from the next plan on; the caller replans.
+    pub(crate) fn set_arithmetic(&mut self, arithmetic: ArithmeticPolicy) {
+        self.arithmetic = arithmetic;
     }
 
     pub(crate) fn cost_model(&self) -> FusionCostModel {
@@ -597,8 +667,12 @@ impl FusionPlanner {
         for (region, outcome) in self.regions.iter_mut().zip(outcomes) {
             let built = outcome.and_then(|kernel| {
                 let node = match &region.program {
-                    Program::Composed(definition) => fused_node(ir, sites, region.nodes.clone(), definition, &kernel),
-                    Program::Semantic(program) => semantic_node(ir, region.nodes.clone(), program, &kernel),
+                    Program::Composed(definition) => {
+                        fused_node(ir, sites, region.nodes.clone(), definition, &kernel, self.arithmetic)
+                    }
+                    Program::Semantic(program) => {
+                        semantic_node(ir, region.nodes.clone(), program, &kernel, self.arithmetic)
+                    }
                 };
                 node.map(|node| (node, kernel))
             });
@@ -700,7 +774,7 @@ impl FusionPlanner {
                     let definition = elide_local_temporaries(definition, start..end, sites, temporaries);
                     self.regions.push(Region {
                         nodes: start..end,
-                        id: definition.id(),
+                        id: self.arithmetic.kernel_id(definition.id()),
                         program: Program::Composed(definition),
                         cost: None,
                         status: FusionRegionStatus::Compiling,
@@ -743,7 +817,16 @@ impl FusionPlanner {
             *alone.entry(i).or_insert_with(|| {
                 let estimate = s
                     .exact
-                    .then(|| synthesize(&[s], target, ContractionPrecision::Exact, resource_limit).ok())
+                    .then(|| {
+                        synthesize(
+                            &[s],
+                            target,
+                            ContractionPrecision::Exact,
+                            ArithmeticPolicy::MatchRecorded,
+                            resource_limit,
+                        )
+                        .ok()
+                    })
                     .flatten()
                     .map(|p| p.lowered.estimate);
                 cost.site_ns(s, estimate.as_ref())
@@ -766,7 +849,7 @@ impl FusionPlanner {
                 let Some(next) = site(end) else { break };
                 run.push(next);
                 unfused_ns += alone_ns(end, next);
-                match synthesize(&run, target, self.precision, self.resource_limit) {
+                match synthesize(&run, target, self.precision, self.arithmetic, self.resource_limit) {
                     Ok(program) => {
                         end += 1;
                         if !recorded(start..end) {
@@ -800,7 +883,7 @@ impl FusionPlanner {
                     taken[start..end].fill(true);
                     self.regions.push(Region {
                         nodes: start..end,
-                        id: program.id(),
+                        id: self.arithmetic.kernel_id(program.id()),
                         program: Program::Semantic(Arc::new(program)),
                         cost: Some(priced),
                         status: FusionRegionStatus::Compiling,
@@ -864,7 +947,7 @@ impl FusionPlanner {
                 let outcome = if fault {
                     Err("injected fused compile failure".to_string())
                 } else {
-                    program.compile(&device).map(Arc::new).map_err(|e| format!("{e:#}"))
+                    program.compile(&device, id).map(Arc::new).map_err(|e| format!("{e:#}"))
                 };
                 let mut compiles = compiles.lock().unwrap();
                 compiles.running.remove(&id);
@@ -976,8 +1059,9 @@ fn fused_node(
     nodes: Range<usize>,
     definition: &FusedDefinition,
     kernel: &PreparedKernel,
+    arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
-    let pipeline = kernel.pipeline();
+    let pipeline = kernel.pipeline_for(arithmetic);
     let mut constituents = Vec::with_capacity(nodes.len());
     for i in nodes.clone() {
         let site = sites.get(&(i as u32)).ok_or("constituent lost its kernel site")?;
@@ -1087,8 +1171,9 @@ fn semantic_node(
     nodes: Range<usize>,
     program: &SemanticProgram,
     kernel: &PreparedKernel,
+    arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
-    let pipeline = kernel.pipeline();
+    let pipeline = kernel.pipeline_for(arithmetic);
     let mut bindings: Vec<ResourceBinding> = Vec::new();
     for i in nodes.clone() {
         for binding in &ir.nodes[i].bindings {

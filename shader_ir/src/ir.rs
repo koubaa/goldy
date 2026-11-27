@@ -68,6 +68,11 @@ pub enum BuiltinFn {
     /// `(value, lane)`: `value` as subgroup lane `lane` holds it. Convergent: every
     /// lane of the subgroup must execute the call.
     SubgroupRead,
+    /// `(a, b)`: the f32 sum `a + b`, rounded on its own, so the device does not
+    /// reassociate it with the operation that reads it.
+    ExactAdd,
+    /// `(a, b)`: the f32 difference `a - b`, rounded on its own, as [`Self::ExactAdd`].
+    ExactSub,
     /// `(a, b)`: the f32 product `a * b`, rounded on its own, so the device does not
     /// contract it with the operation that reads it.
     ExactMul,

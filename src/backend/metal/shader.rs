@@ -6,7 +6,9 @@ use super::types::{MetalState, ShaderState};
 use crate::slang::{ShaderTarget, SlangCompiler, SlangStage};
 use ::metal as mtl;
 use anyhow::{Context, Result};
+use foreign_types::ForeignType;
 use mtl::{Device as MTLDevice, Library};
+use objc::{msg_send, sel, sel_impl};
 use std::collections::HashMap;
 
 /// Patch compute-shader MSL to fix Slang codegen bug that surfaces on Metal:
@@ -389,6 +391,11 @@ fn compile_stage_with_reflection(
     }
 
     let raw_msl = result.shader.as_str().context("Failed to get MSL source")?.to_string();
+    let precise_math = desc.stage == SlangStage::Compute
+        && desc
+            .extra_defines
+            .iter()
+            .any(|(name, _)| *name == crate::shader::PRECISE_MATH_DEFINE);
 
     // Apply stage-specific MSL patches for known Slang codegen bugs.
     let msl_source = if desc.stage == SlangStage::Vertex {
@@ -443,8 +450,28 @@ fn compile_stage_with_reflection(
         }
     }
 
+    let options = mtl::CompileOptions::new();
+    if precise_math {
+        // New Metal splits arithmetic transformations from math-function choice.
+        // Generated structured kernels need stable operation boundaries, but retain
+        // the fast transcendental implementations used by their relaxed variants.
+        const MTL_MATH_MODE_SAFE: isize = 0;
+        const MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST: isize = 0;
+        let raw = options.as_ptr();
+        unsafe {
+            let supports_split: objc::runtime::BOOL =
+                msg_send![raw, respondsToSelector: sel!(setMathFloatingPointFunctions:)];
+            if supports_split == objc::runtime::YES {
+                let (): () = msg_send![raw, setMathMode: MTL_MATH_MODE_SAFE];
+                let (): () = msg_send![raw, setMathFloatingPointFunctions: MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST];
+            } else {
+                // Older SDKs expose only the coupled switch.
+                options.set_fast_math_enabled(false);
+            }
+        }
+    }
     let library = device
-        .new_library_with_source(&msl_source, &mtl::CompileOptions::new())
+        .new_library_with_source(&msl_source, &options)
         .map_err(|e| anyhow::anyhow!("Failed to create Metal library for {}: {}", desc.entry_point, e))?;
 
     if matches!(desc.stage, SlangStage::Mesh | SlangStage::Amplification) {

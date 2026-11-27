@@ -880,28 +880,38 @@ fn bind_operand(
     })
 }
 
-pub(crate) fn prepare_stdlib(runtime: &Runtime, kind: MatMulFallback) -> anyhow::Result<Arc<ComputePipeline>> {
-    let pipeline = match kind {
-        MatMulFallback::Gemm => MatMulF32Kernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-        MatMulFallback::Gemv => GemvF32Kernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-        MatMulFallback::GemvBf16 => GemvBf16Kernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-        MatMulFallback::GemmBf16 => GemmBf16Kernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-        MatMulFallback::GemvIndexed => GemvF32IndexedKernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-        MatMulFallback::GemvBlock => GemvBlockKernel::prepare(runtime)
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .pipeline_arc(),
-    };
-    Ok(pipeline)
+pub(crate) struct StdlibMatMulPipelines {
+    match_recorded: Arc<ComputePipeline>,
+    relaxed: Arc<ComputePipeline>,
+}
+
+impl StdlibMatMulPipelines {
+    pub(crate) fn select(&self, policy: crate::ArithmeticPolicy) -> Arc<ComputePipeline> {
+        match policy {
+            crate::ArithmeticPolicy::MatchRecorded => Arc::clone(&self.match_recorded),
+            crate::ArithmeticPolicy::Relaxed => Arc::clone(&self.relaxed),
+        }
+    }
+}
+
+pub(crate) fn prepare_stdlib(runtime: &Runtime, kind: MatMulFallback) -> anyhow::Result<StdlibMatMulPipelines> {
+    macro_rules! prepare {
+        ($kernel:ty) => {{
+            let kernel = <$kernel>::prepare(runtime).map_err(|e| anyhow::anyhow!("{e}"))?;
+            StdlibMatMulPipelines {
+                match_recorded: kernel.pipeline_arc_for(crate::ArithmeticPolicy::MatchRecorded),
+                relaxed: kernel.pipeline_arc_for(crate::ArithmeticPolicy::Relaxed),
+            }
+        }};
+    }
+    Ok(match kind {
+        MatMulFallback::Gemm => prepare!(MatMulF32Kernel),
+        MatMulFallback::Gemv => prepare!(GemvF32Kernel),
+        MatMulFallback::GemvBf16 => prepare!(GemvBf16Kernel),
+        MatMulFallback::GemmBf16 => prepare!(GemmBf16Kernel),
+        MatMulFallback::GemvIndexed => prepare!(GemvF32IndexedKernel),
+        MatMulFallback::GemvBlock => prepare!(GemvBlockKernel),
+    })
 }
 
 fn bf16_user_slots(

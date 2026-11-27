@@ -98,6 +98,9 @@ impl<'a> TensorRecorder<'a> {
     ///
     /// `x_stride == 0` uses one `x` of length `k` for every id. Otherwise `x`
     /// holds `count` vectors and id `i` reads at `i * x_stride`.
+    ///
+    /// An F32 `weight` needs only packed rows: its slabs may lie further apart than
+    /// `rows * k`, as a narrowed run of rows of a `[slabs, n, k]` tensor does.
     #[allow(clippy::too_many_arguments)]
     pub fn matmul_indexed_batch_into(
         &mut self,
@@ -115,9 +118,9 @@ impl<'a> TensorRecorder<'a> {
         if count == 0 {
             return Err(GoldyError::Validation("matmul_indexed: count is 0".into()));
         }
-        if weight.shape().rank() != 3 || !weight.is_contiguous() {
+        if weight.shape().rank() != 3 {
             return Err(GoldyError::Validation(
-                "matmul_indexed: weight must be a packed [slabs, rows, k] tensor".into(),
+                "matmul_indexed: weight must be a [slabs, rows, k] tensor".into(),
             ));
         }
         if ids.dtype() != TensorDType::U32 || ids.shape().rank() != 1 {
@@ -149,14 +152,34 @@ impl<'a> TensorRecorder<'a> {
                 "matmul_indexed: x matches the stride and out is [count * rows]".into(),
             ));
         }
-        let elems = (slabs as u64).saturating_mul(rows as u64).saturating_mul(k as u64);
-        if elems > u64::from(u32::MAX) {
+        // Rows are packed; slabs may lie further apart, as one half of each slab of a
+        // stacked weight does.
+        let strides = weight.layout().strides().to_vec();
+        let slab_elems = u64::from(rows) * u64::from(k);
+        let rows_packed = (strides[2] == 1 || k == 1) && (strides[1] == i64::from(k) || rows == 1);
+        let slab_stride = if slabs == 1 {
+            slab_elems
+        } else {
+            u64::try_from(strides[0]).unwrap_or(0)
+        };
+        if !rows_packed || slab_stride < slab_elems {
+            return Err(GoldyError::Validation(
+                "matmul_indexed: weight rows must be packed, and slabs must not overlap".into(),
+            ));
+        }
+        let span = u64::from(slabs.saturating_sub(1)) * slab_stride + slab_elems;
+        if span.saturating_add(weight.storage_offset()) > u64::from(u32::MAX) {
             return Err(GoldyError::Validation(
                 "matmul_indexed: weight does not fit a u32 element index".into(),
             ));
         }
         let dtype = match weight.dtype() {
             TensorDType::F32 => MatMulDType::F32,
+            TensorDType::BF16 if !weight.is_contiguous() => {
+                return Err(GoldyError::Validation(
+                    "matmul_indexed: a BF16 weight must be packed".into(),
+                ))
+            }
             TensorDType::BF16 if count == 1 && x_stride == 0 => MatMulDType::BF16,
             TensorDType::BF16 => {
                 return Err(GoldyError::Validation(
@@ -174,7 +197,7 @@ impl<'a> TensorRecorder<'a> {
         desc.index = Some(MatMulIndex {
             first: slot,
             slabs,
-            slab_stride: rows.saturating_mul(k),
+            slab_stride: slab_stride as u32,
             global_per_slab: false,
             batch: count,
             x_stride,

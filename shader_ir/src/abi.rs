@@ -481,6 +481,16 @@ pub struct KernelSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KernelId(pub u64);
 
+impl KernelId {
+    /// Derive the identity of the same source compiled under a semantic variant.
+    ///
+    /// Use when a compile option changes observable program behavior and therefore
+    /// makes its pipelines or specialized variants non-interchangeable.
+    pub fn variant(self, tag: u32) -> Self {
+        StableHasher::new().u64(self.0).u32(tag).finish()
+    }
+}
+
 impl fmt::Display for KernelId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:016x}", self.0)

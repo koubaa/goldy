@@ -748,6 +748,14 @@ fn emit_call(func: BuiltinFn, args: &[Expr], builtins: &BuiltinMask, tensor_slot
             assert_eq!(args.len(), 2);
             format!("WaveReadLaneAt({})", join_args(args, builtins, tensor_slots))
         }
+        BuiltinFn::ExactAdd => {
+            assert_eq!(args.len(), 2);
+            format!("goldy_exact_add({})", join_args(args, builtins, tensor_slots))
+        }
+        BuiltinFn::ExactSub => {
+            assert_eq!(args.len(), 2);
+            format!("goldy_exact_sub({})", join_args(args, builtins, tensor_slots))
+        }
         BuiltinFn::ExactMul => {
             assert_eq!(args.len(), 2);
             format!("goldy_exact_mul({})", join_args(args, builtins, tensor_slots))

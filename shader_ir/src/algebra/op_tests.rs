@@ -365,13 +365,19 @@ fn an_operation_ending_in_a_product_rounds_it_for_its_readers() {
         ]),
     );
     let slang = source(&lower(graph.region(), &[]).unwrap());
-    // The square the residual reads is rounded; the products inside the contraction
-    // are its own and may contract as they do unfused.
+    // The square the residual reads is rounded, as is the residual; the products
+    // inside the contraction are its own and may contract as they do unfused.
     assert!(
-        slang.contains("(goldy_exact_mul(p0[((uint)c5)], p0[((uint)c5)]) + p0[((uint)c5)])"),
+        slang.contains("goldy_exact_add(goldy_exact_mul(p0[((uint)c5)], p0[((uint)c5)]), p0[((uint)c5)])"),
         "{slang}"
     );
     assert!(slang.contains("a1 = (a1 + (x5 * x6));"), "{slang}");
+    let relaxed = source(&lower_graph_relaxed(&graph, &[], &Target::default(), ContractionPrecision::Exact).unwrap());
+    assert!(!relaxed.contains("goldy_exact_"), "{relaxed}");
+    assert!(
+        relaxed.contains("((p0[((uint)c5)] * p0[((uint)c5)]) + p0[((uint)c5)])"),
+        "{relaxed}"
+    );
 }
 
 #[test]
@@ -394,10 +400,10 @@ fn a_rounded_quotient_stays_a_division() {
         &env(&[(0, data(1, m)), (1, vec![0.0; m as usize]), (2, vec![0.0; m as usize])]),
     );
     let slang = source(&lower(graph.region(), &[]).unwrap());
-    // Only the rounded quotient is protected from becoming a multiply by 1/3; a
-    // division the source wrote with a constant divisor lowers as written.
+    // Each operation's quotient is rounded on its own, so the two constant divisors
+    // never combine into one multiply.
     assert!(
-        slang.contains("(goldy_exact_div(p0[((uint)c3)], 3.0) / 7.0)"),
+        slang.contains("goldy_exact_div(goldy_exact_div(p0[((uint)c3)], 3.0), 7.0)"),
         "{slang}"
     );
 }
