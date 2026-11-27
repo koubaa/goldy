@@ -26,8 +26,8 @@ use crate::parcel::Parcel;
 use crate::task_graph::{DispatchDim, NodeKind, ResourceId, TaskNode};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
-    self, Affine, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, Lowered, Map, Op, OpKind, Operand,
-    Params, ParcelId, ReduceOrder, Storage, Sym, Target, Term, UnaryOp,
+    self, Affine, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, IndexVar, Lowered, Map, Op, OpKind,
+    Operand, Params, ParcelId, ReduceOrder, Storage, Sym, Target, Term, UnaryOp,
 };
 use goldy_shader_ir::{
     BinOp, BuiltinFn, ElementType, Expr, FusionRejection, KernelDef, KernelId, ParamCategory, ScalarType, Stmt,
@@ -150,7 +150,7 @@ pub(crate) fn matmul(
     desc: &MatMulDesc,
     fallback: MatMulFallback,
     [(a, pa), (b, pb), (c, pc)]: [(&MatMulOperand, SiteParcel); 3],
-    ids: Option<SiteParcel>,
+    ids: Option<(&MatMulOperand, SiteParcel)>,
 ) -> Option<SemanticSite> {
     if !desc.requires_stdlib_identity_epilogue() {
         return None;
@@ -175,42 +175,56 @@ pub(crate) fn matmul(
                 order: GEMV_ORDER,
             }
         }
-        // y[i] = sum{s}(A[index * stride + offset + i, s] * x[s]). One slab index.
-        // An index past `slabs` yields a zero row, the same as `gemv_f32_indexed`.
+        // y[b, i] = sum{s}(A[idx(b), i, s] * x[b, s]), with idx(b) = indices[first + b].
+        // `x_stride == 0` broadcasts one right-hand side. An index past `slabs` yields
+        // a zero row, the same masked gather as `gemv_f32_indexed`. Label 0 is the
+        // batch axis, which a fresh expansion binds as `IndexVar::of_label(0)`.
         MatMulFallback::GemvIndexed if desc.dtype == MatMulDType::F32 && desc.n == 1 => {
             let index = desc.index?;
-            // A run of indices stays on the stdlib kernel. This contraction is one index.
-            if index.slabs == 0 || index.batch != 1 || index.x_stride != 0 {
+            if index.slabs == 0 || index.batch == 0 {
                 return None;
             }
-            let indices = ids?;
+            let (index_op, indices) = ids?;
             let index_parcel = s.parcel(indices);
+            let index_at = i64::try_from(index_op.offset_elements).ok()? + i64::from(index.first);
+            // Label 0 of this contraction. `synthesize` shifts it into the composed region.
+            let batch_axis = IndexVar::of_label(0);
             let slab = s.index_param(
                 "slab",
                 0..i64::from(index.slabs),
                 IndexSource {
                     parcel: index_parcel,
-                    element: index.first,
+                    element: Affine::constant(index_at) + Affine::from(batch_axis),
                     element_type: ElementType::U32,
-                    // The stdlib kernel writes a zero row when the index is past `slabs`.
                     zero_if_outside: true,
                 },
             );
-            if a.offset_elements > u64::from(u32::MAX) || b.offset_elements != 0 || c.offset_elements != 0 {
-                // The indexed kernel carries A's element offset and reads x and y
-                // from element 0. A nonzero x or y offset would not match it.
-                return None;
-            }
             let row = i64::from(a.leading_dim);
             let base = Affine::sym(Sym::Param(slab)) * i64::from(index.slab_stride)
                 + Affine::constant(i64::try_from(a.offset_elements).ok()?);
-            let ld = |o: &MatMulOperand| i64::from(o.leading_dim);
+            let x_inner = i64::from(b.leading_dim);
+            let y_inner = i64::from(c.leading_dim);
+            let (x_shape, x_strides, x_labels): (Vec<u32>, Vec<i64>, Vec<usize>) = if index.x_stride == 0 {
+                (vec![k], vec![x_inner], vec![2])
+            } else {
+                (
+                    vec![index.batch, k],
+                    vec![i64::from(index.x_stride), x_inner],
+                    vec![0, 2],
+                )
+            };
+            let y_off = i64::try_from(c.offset_elements).ok()?;
+            let x_off = i64::try_from(b.offset_elements).ok()?;
             Contraction {
-                extents: vec![m, k],
-                lhs: Operand::new("A", &[m, k], Storage::strided(pa, base, &[row, 1])),
-                rhs: operand("x", &[k], pb, b, &[ld(b)])?,
-                out: operand("y", &[m], pc, c, &[ld(c)])?,
-                labels: [vec![0, 1], vec![1], vec![0]],
+                extents: vec![index.batch, m, k],
+                lhs: Operand::new("A", &[index.batch, m, k], Storage::strided(pa, base, &[0, row, 1])),
+                rhs: Operand::new("x", &x_shape, Storage::strided(pb, x_off, &x_strides)),
+                out: Operand::new(
+                    "y",
+                    &[index.batch, m],
+                    Storage::strided(pc, y_off, &[y_inner * i64::from(m), y_inner]),
+                ),
+                labels: [vec![0, 1, 2], x_labels, vec![0, 1]],
                 order: GEMV_ORDER,
             }
         }
@@ -613,9 +627,15 @@ pub(crate) fn synthesize(
         let mut op = site.op.clone();
         op.map_parcels(|p| map[p.0 as usize]);
         op.rename_operands(|o| format!("p{}", o.storage.parcel.0));
+        let shift = graph.region().index_count();
         sources.extend(site.sources.iter().map(|s| IndexSource {
             parcel: map[s.parcel.0 as usize],
-            ..*s
+            element: s.element.rename(&|sym| match sym {
+                Sym::Index(v) => Sym::Index(IndexVar::of_label(v.index() + shift)),
+                other => other,
+            }),
+            element_type: s.element_type,
+            zero_if_outside: s.zero_if_outside,
         }));
         scalars.extend(site.scalars.iter().map(|&slot| (k, slot)));
         graph.push(op).map_err(|e| FusionRejection::Semantic {

@@ -199,6 +199,35 @@ fn gemv_strided_operands_match_reference() {
     });
 }
 
+/// `out += Aᵀ x` with `A` stored row-major as `[k, m]`.
+#[test]
+fn transposed_gemv_adds_onto_out() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    // Rows are the inner index of the product: [[1, 2, 3], [4, 5, 6]].
+    let a = device
+        .acquire_buffer_with_data(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], BufferKind::Scattered)
+        .unwrap();
+    let x = device
+        .acquire_buffer_with_data(&[10.0f32, 20.0], BufferKind::Scattered)
+        .unwrap();
+    let out = device
+        .acquire_buffer_with_data(&[1.0f32, 2.0, 3.0], BufferKind::Scattered)
+        .unwrap();
+    let mut desc = MatMulDesc::gemm(3, 1, 2);
+    desc.transpose_a = true;
+    desc.beta = 1.0;
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .matmul("accum", desc)
+        .a(&a, MatMulView::packed())
+        .b(&x, MatMulView::packed())
+        .out(&out, MatMulView::packed())
+        .record();
+    assert_eq!(read_f32(&mut scheme, &out), vec![91.0, 122.0, 153.0]);
+}
+
 #[test]
 fn gemv_model_shapes_match_reference() {
     for (m, k) in [(288, 288), (768, 288), (288, 768), (4099, 1031), (1, 5)] {

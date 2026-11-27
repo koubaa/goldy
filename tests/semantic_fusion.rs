@@ -1048,6 +1048,135 @@ fn indexed_gemv_honors_a_weight_offset() {
     assert_one_semantic_region(&scheme, 2);
 }
 
+/// A run of slab indices is one contraction. It matches the unfused kernel with the
+/// 64-wide main loop, a row count that is not a multiple of 4, a nonzero first index,
+/// a weight offset, and a narrowed output. Rewriting the index vector replays it.
+#[test]
+fn gathered_batch_matches_unfused_and_replays() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (n_slabs, rows, k, first, batch, pad, out_off) = (4u32, 5u32, 80u32, 1u32, 2u32, 3u32, 2u32);
+    let slab_elems = n_slabs * rows * k;
+    let mut weight = vec![0.0; pad as usize];
+    weight.extend_from_slice(&data(4, slab_elems));
+    let out_len = batch * rows;
+    let out = vec![-1.0; (out_off + out_len + 2) as usize];
+    let mut ids = vec![9u32, 1, 3, 0];
+    let init = [
+        Init::F32(TensorShape::vector(pad + slab_elems), weight),
+        Init::F32(TensorShape::vector(k), data(5, k)),
+        Init::U32(TensorShape::vector(4), ids.clone()),
+        Init::F32(TensorShape::vector(out.len() as u32), out),
+        Init::F32(
+            TensorShape::from_dims(&[batch, rows]).unwrap(),
+            vec![0.0; out_len as usize],
+        ),
+    ];
+    let record = move |rec: &mut TensorRecorder<'_>, t: &[Tensor]| {
+        let mut desc = goldy::MatMulDesc::gemv(rows, k);
+        desc.index = Some(goldy::ops::MatMulIndex {
+            first,
+            slabs: n_slabs,
+            slab_stride: rows * k,
+            global_per_slab: false,
+            batch,
+            x_stride: 0,
+        });
+        rec.scheme()
+            .matmul("gather", desc)
+            .a(t[0].buffer(), goldy::MatMulView::offset(u64::from(pad)))
+            .b(t[1].buffer(), goldy::MatMulView::packed())
+            .out(t[3].buffer(), goldy::MatMulView::offset(u64::from(out_off)))
+            .extra(t[2].buffer(), goldy::MatMulView::packed())
+            .record();
+        let window = t[3].view().narrow(0, out_off, out_len)?.reshape(&[batch, rows])?;
+        rec.mul_scalar_into("scale", window, 2.0, t[4].view())?;
+        Ok((Vec::new(), Vec::new()))
+    };
+    let mut twin = Twin::new(&device, &init, record);
+    twin.frames(3, "gathered batch");
+    assert_one_semantic_region(twin.fused(), 2);
+    let (scheme, tensors, _) = &mut twin.runs[0];
+    let mut sub = scheme.submit().expect("submit");
+    let got = (&mut sub >> tensors[3].buffer()).take::<f32>().expect("take").to_vec();
+    drop(sub);
+    assert!(got[..out_off as usize].iter().all(|v| *v == -1.0), "prefix {got:?}");
+    assert!(
+        got[(out_off + out_len) as usize..].iter().all(|v| *v == -1.0),
+        "suffix {got:?}"
+    );
+    assert!(got[out_off as usize..(out_off + out_len) as usize]
+        .iter()
+        .any(|v| *v != -1.0 && *v != 0.0));
+
+    ids = vec![0, u32::MAX, 2, 1];
+    for (_, tensors, _) in &mut twin.runs {
+        tensors[2]
+            .buffer()
+            .write(0, bytemuck::cast_slice(&ids))
+            .expect("rewrite indices");
+    }
+    twin.frames(2, "rewritten indices");
+    assert_one_semantic_region(twin.fused(), 2);
+}
+
+/// Each index reads its own right-hand side, including a stride longer than `k`,
+/// and a narrowed `x`.
+#[test]
+fn gathered_batch_honors_strided_inputs() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (n_slabs, rows, k, batch, x_stride, x_off) = (3u32, 5u32, 80u32, 2u32, 84u32, 3u32);
+    let x_need = (batch - 1) * x_stride + k;
+    let mut xs = vec![0.0; (x_off + x_need) as usize];
+    for (i, v) in data(6, x_need).into_iter().enumerate() {
+        xs[x_off as usize + i] = v;
+    }
+    let init = [
+        Init::F32(
+            TensorShape::from_dims(&[n_slabs, rows, k]).unwrap(),
+            data(7, n_slabs * rows * k),
+        ),
+        Init::F32(TensorShape::vector(xs.len() as u32), xs),
+        Init::U32(TensorShape::vector(2), vec![2, 0]),
+        Init::F32(
+            TensorShape::from_dims(&[batch, rows]).unwrap(),
+            vec![0.0; (batch * rows) as usize],
+        ),
+        Init::F32(
+            TensorShape::from_dims(&[batch, rows]).unwrap(),
+            vec![0.0; (batch * rows) as usize],
+        ),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        move |rec, t| {
+            let mut desc = goldy::MatMulDesc::gemv(rows, k);
+            desc.index = Some(goldy::ops::MatMulIndex {
+                first: 0,
+                slabs: n_slabs,
+                slab_stride: rows * k,
+                global_per_slab: false,
+                batch,
+                x_stride,
+            });
+            rec.scheme()
+                .matmul("gather", desc)
+                .a(t[0].buffer(), goldy::MatMulView::packed())
+                .b(t[1].buffer(), goldy::MatMulView::strided(u64::from(x_off), 1))
+                .out(t[3].buffer(), goldy::MatMulView::packed())
+                .extra(t[2].buffer(), goldy::MatMulView::packed())
+                .record();
+            let view = t[3].view().reshape(&[batch, rows])?;
+            rec.mul_scalar_into("scale", view, 3.0, t[4].view())?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 2);
+}
+
 fn sum_inputs(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Result<(Vec<Tensor>, Vec<NodeId>), GoldyError> {
     let last = t.len() - 1;
     rec.add_into("sum", t[0].view(), t[1].view(), t[last].view())?;

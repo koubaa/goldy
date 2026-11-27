@@ -13,7 +13,7 @@ use super::kernels::{
 use super::view::TensorView;
 use crate::semantic_fusion::{SemanticSite, SiteBuilder, SiteParcel};
 use goldy_shader_ir::algebra::{
-    BinaryOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Term, UnaryOp,
+    Affine, BinaryOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Term, UnaryOp,
 };
 use goldy_shader_ir::ElementType;
 
@@ -169,7 +169,7 @@ pub(crate) fn scatter_slice(
     let mut s = SiteBuilder::default();
     let source = IndexSource {
         parcel: s.parcel(SiteParcel::of(index.buffer().whole())?),
-        element: u32::try_from(index.storage_offset()).ok()?,
+        element: Affine::constant(i64::try_from(index.storage_offset()).ok()?),
         // The kernel binds every index parcel as i32.
         element_type: ElementType::I32,
         zero_if_outside: false,

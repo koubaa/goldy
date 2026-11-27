@@ -10,6 +10,22 @@ use std::ops::{Add, Mul, Neg, Sub};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndexVar(pub(crate) u32);
 
+impl IndexVar {
+    /// The index variable a fresh [`crate::algebra::Op::expand`] assigns to label `label`.
+    ///
+    /// A contraction's label `l` is this variable. Composition shifts it by the index
+    /// variables already in the region; an [`crate::algebra::IndexSource`] that names it
+    /// applies that same shift.
+    pub const fn of_label(label: u32) -> Self {
+        IndexVar(label)
+    }
+
+    /// Position among the region's index variables, in creation order.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
 /// A runtime integer with a declared range, such as a cache position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IndexParam(pub(crate) u32);
