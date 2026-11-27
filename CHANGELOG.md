@@ -130,9 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fusion arithmetic is explicit** — `Scheme::set_fusion_arithmetic` selects
   `FusionArithmetic::MatchRecorded` (the default) or `Relaxed`. The former carries a
   precise-arithmetic marker through semantic-fusion compilation and specialization;
-  Metal applies safe arithmetic only inside the exact boundary helpers. Every other
-  operation in the same kernel, other compute kernels and graphics shaders retain
-  Metal's fast default.
+  Metal selects safe arithmetic only for those kernels while retaining fast
+  transcendental functions. Other compute kernels and graphics shaders retain Metal's
+  fully fast default.
 
 - **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
   packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each
