@@ -127,12 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Fusion arithmetic is explicit** — `Scheme::set_fusion_arithmetic` selects
-  `FusionArithmetic::MatchRecorded` (the default) or `Relaxed`. The former carries a
-  precise-arithmetic marker through semantic-fusion compilation and specialization;
-  Metal keeps each exact boundary helper out of line so every operation retains its
-  fast arithmetic while the compiler cannot combine across operation boundaries. Other
-  compute kernels and graphics shaders are unchanged.
+- **Generated-kernel arithmetic is explicit** — `Scheme::set_arithmetic_policy` selects
+  `ArithmeticPolicy::MatchRecorded` (the default) or `Relaxed`. The policy selects
+  separately cached variants of recorded generated kernels, stdlib matrix kernels, and
+  their composed or semantic fused replacements. On Metal, `MatchRecorded` uses safe
+  arithmetic transformations with fast floating-point functions; `Relaxed` permits fast
+  arithmetic within kernels and across boundaries fusion removes. Authored compute and
+  graphics shaders are unchanged. `FusionArithmetic` and the former Scheme method names
+  remain as deprecated aliases.
 
 - **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
   packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each
@@ -253,7 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Region::round_products` is deprecated for `Region::round_results`. Metal honors these
   boundaries by compiling structured generated kernels and exact fused variants with safe
   arithmetic transformations while retaining fast floating-point functions. Authored compute
-  and graphics shaders stay fully fast, and relaxed fused variants opt back into fast arithmetic.
+  and graphics shaders stay fully fast; `ArithmeticPolicy::Relaxed` selects fast variants of
+  both recorded generated kernels and their fused replacements.
 - **Gathered reads at another batch position** — a sum over the rows of a gathered batch
   inlined the contraction at each row while the thread held only its own slab index, and
   read the wrong slabs. Lowering declines that region (`LowerError::GatheredRead`).

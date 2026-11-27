@@ -760,6 +760,8 @@ pub(crate) struct SchemeDesc {
     present_transactions: Vec<PresentTransactionInfo>,
     /// Generated-kernel dispatches automatic fusion may fuse, keyed by node index.
     kernel_sites: HashMap<u32, crate::fusion_plan::KernelSite>,
+    /// Arithmetic pipeline variants of every generated-kernel dispatch.
+    arithmetic_sites: HashMap<u32, crate::fusion_plan::ArithmeticSite>,
     /// What recorded nodes compute in index notation, keyed by node index.
     semantic_sites: HashMap<u32, crate::semantic_fusion::SemanticSite>,
     /// Temporaries declared by [`Scheme::temporary_buffer`], indexed by id.
@@ -773,6 +775,7 @@ impl SchemeDesc {
     fn new() -> Self {
         Self {
             kernel_sites: HashMap::new(),
+            arithmetic_sites: HashMap::new(),
             semantic_sites: HashMap::new(),
             temporaries: Vec::new(),
             temporary_uses: Vec::new(),
@@ -1112,6 +1115,7 @@ impl Scheme {
     ) -> Result<GroupId, GoldyError> {
         let mut child = Scheme::new(&self.ctx);
         child.automatic_fusion = self.automatic_fusion;
+        child.fusion.set_arithmetic(self.fusion.arithmetic());
         f(&mut child)?;
         // Parameter buffers are owned by the scheme that recorded them. The child
         // is dropped at the end of this call, so the parent keeps them alive.
@@ -1193,6 +1197,11 @@ impl Scheme {
         for (&node, site) in &child.desc.kernel_sites {
             self.desc.kernel_sites.insert(node + node_offset as u32, site.clone());
         }
+        for (&node, site) in &child.desc.arithmetic_sites {
+            self.desc
+                .arithmetic_sites
+                .insert(node + node_offset as u32, site.clone());
+        }
         for (&node, site) in &child.desc.semantic_sites {
             self.desc.semantic_sites.insert(node + node_offset as u32, site.clone());
         }
@@ -1210,6 +1219,34 @@ impl Scheme {
                 }
             }
         }
+        if child.fusion.arithmetic() != self.fusion.arithmetic() {
+            let policy = self.fusion.arithmetic();
+            for node in &mut self.desc.ir.nodes[node_offset..] {
+                if let NodeKind::MatMul(matmul) = &mut node.kind {
+                    matmul.fallback_pipeline = None;
+                }
+            }
+            for &node in child.desc.arithmetic_sites.keys() {
+                let node = node as usize + node_offset;
+                let site = &self.desc.arithmetic_sites[&(node as u32)];
+                let variant = site.pipelines.select(policy);
+                let recorded = &mut self.desc.ir.nodes[node];
+                if let NodeKind::Dispatch {
+                    pipeline, user_slots, ..
+                } = &mut recorded.kind
+                {
+                    *pipeline = variant.universal;
+                    self.specialization.register_site(
+                        node as u32,
+                        variant.universal,
+                        &variant.provenance,
+                        recorded.label.clone(),
+                        user_slots,
+                        &site.tensor_facts,
+                    );
+                }
+            }
+        }
         wrapper
     }
 
@@ -1218,15 +1255,21 @@ impl Scheme {
         let Some(site) = self.desc.kernel_sites.get(&(node as u32)) else {
             return;
         };
+        let pipeline = site.pipelines.select(self.fusion.arithmetic());
+        let facts = self
+            .desc
+            .arithmetic_sites
+            .get(&(node as u32))
+            .map_or(&[][..], |site| site.tensor_facts.as_slice());
         let recorded = &self.desc.ir.nodes[node];
         if let NodeKind::Dispatch { user_slots, .. } = &recorded.kind {
             self.specialization.register_site(
                 node as u32,
-                site.universal,
-                &site.provenance,
+                pipeline.universal,
+                &pipeline.provenance,
                 recorded.label.clone(),
                 user_slots,
-                &[],
+                facts,
             );
         }
     }
@@ -1262,14 +1305,14 @@ impl Scheme {
             if let (Some(site), NodeKind::Dispatch { pipeline, .. }) =
                 (self.desc.kernel_sites.get(&(c as u32)), &mut self.desc.ir.nodes[c].kind)
             {
-                *pipeline = site.universal;
+                *pipeline = site.pipelines.select(self.fusion.arithmetic()).universal;
             }
         }
         self.specialization.rekey(|node| plan.exec_of(node as usize));
         for f in &plan.fused {
             let node = &plan.ir.nodes[f.exec as usize];
             if let NodeKind::Dispatch { user_slots, .. } = &node.kind {
-                let pipeline = f.kernel.pipeline();
+                let pipeline = f.kernel.pipeline_for(self.fusion.arithmetic());
                 self.specialization.register_site(
                     f.exec,
                     pipeline.handle,
@@ -1312,6 +1355,51 @@ impl Scheme {
             self.revert_fusion_plan(plan);
             self.dirty = SchemeDirty::Structure;
             self.submit_static = None;
+        }
+    }
+
+    /// Select the recorded pipeline variant for every generated dispatch.
+    fn apply_arithmetic_policy(&mut self) {
+        let policy = self.fusion.arithmetic();
+        let variants: Vec<_> = self
+            .desc
+            .arithmetic_sites
+            .iter()
+            .map(|(&node, site)| {
+                (
+                    node as usize,
+                    site.pipelines.select(policy).clone(),
+                    site.tensor_facts.clone(),
+                )
+            })
+            .collect();
+        let mut changed = false;
+        for (node, variant, facts) in variants {
+            let recorded = &mut self.desc.ir.nodes[node];
+            let NodeKind::Dispatch {
+                pipeline, user_slots, ..
+            } = &mut recorded.kind
+            else {
+                continue;
+            };
+            changed |= *pipeline != variant.universal;
+            *pipeline = variant.universal;
+            self.specialization.register_site(
+                node as u32,
+                variant.universal,
+                &variant.provenance,
+                recorded.label.clone(),
+                user_slots,
+                &facts,
+            );
+        }
+        for node in &mut self.desc.ir.nodes {
+            if let NodeKind::MatMul(matmul) = &mut node.kind {
+                changed |= matmul.fallback_pipeline.take().is_some();
+            }
+        }
+        if changed {
+            self.mark_params_dirty();
         }
     }
 
@@ -2073,6 +2161,7 @@ impl Scheme {
             yielding: None,
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
+            arithmetic_site: None,
             kernel_site: None,
             temporary_uses: Vec::new(),
         }
@@ -2104,6 +2193,7 @@ impl Scheme {
             yielding: None,
             yield_parcels: Vec::new(),
             yield_points: Vec::new(),
+            arithmetic_site: None,
             kernel_site: None,
             temporary_uses: Vec::new(),
         }
@@ -2268,6 +2358,7 @@ impl Scheme {
             self.replan_fusion();
         }
         self.desc.kernel_sites.remove(&(node.index() as u32));
+        self.desc.arithmetic_sites.remove(&(node.index() as u32));
         self.desc.semantic_sites.remove(&(node.index() as u32));
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
@@ -2358,8 +2449,8 @@ impl Scheme {
     /// The rounding automatic fusion may add to matrix products and other contractions.
     ///
     /// [`ContractionPrecision::Exact`] (the default) keeps fused results bit-identical to
-    /// the recorded dispatches when [`Self::fusion_arithmetic`] is
-    /// [`crate::FusionArithmetic::MatchRecorded`]. [`ContractionPrecision::F16Factors`] lets a
+    /// the recorded dispatches when [`Self::arithmetic_policy`] is
+    /// [`crate::ArithmeticPolicy::MatchRecorded`]. [`ContractionPrecision::F16Factors`] lets a
     /// semantic region run its two-dimensional contractions on matrix units where the
     /// device has them ([`crate::RuntimeCapabilities::matrix_multiply`]): each factor
     /// rounded to f16, the products summed in f32 in the hardware's order. A change
@@ -2379,29 +2470,43 @@ impl Scheme {
         self.fusion.precision()
     }
 
-    /// Floating-point transformations semantic fusion may make across the
-    /// operation boundaries it removes.
+    /// Floating-point policy for generated kernels and their fused replacements.
     ///
-    /// [`FusionArithmetic::MatchRecorded`] (the default) keeps those boundaries as
-    /// observable rounding points. [`FusionArithmetic::Relaxed`] lets the compiler
-    /// reassociate, contract and replace division with reciprocal multiplication across
-    /// them. Changing this policy drops and replans the promoted fusion plan.
+    /// [`ArithmeticPolicy::MatchRecorded`] (the default) compiles generated kernels
+    /// conservatively and keeps operation boundaries removed by fusion as observable
+    /// rounding points. [`ArithmeticPolicy::Relaxed`] lets the compiler reassociate,
+    /// contract and replace division with reciprocal multiplication both within generated
+    /// kernels and across removed dispatch boundaries.
     ///
     /// This is separate from deterministic algorithm selection: either policy can
     /// produce repeatable results, but `Relaxed` need not match the recorded dispatches.
     ///
-    /// [`FusionArithmetic::MatchRecorded`]: crate::FusionArithmetic::MatchRecorded
-    /// [`FusionArithmetic::Relaxed`]: crate::FusionArithmetic::Relaxed
-    pub fn set_fusion_arithmetic(&mut self, arithmetic: crate::FusionArithmetic) {
-        if self.fusion.arithmetic() != arithmetic {
-            self.fusion.set_arithmetic(arithmetic);
-            self.replan_fusion();
+    /// [`ArithmeticPolicy::MatchRecorded`]: crate::ArithmeticPolicy::MatchRecorded
+    /// [`ArithmeticPolicy::Relaxed`]: crate::ArithmeticPolicy::Relaxed
+    pub fn set_arithmetic_policy(&mut self, policy: crate::ArithmeticPolicy) {
+        if self.fusion.arithmetic() == policy {
+            return;
         }
+        self.fusion.set_arithmetic(policy);
+        self.replan_fusion();
+        self.apply_arithmetic_policy();
     }
 
-    /// See [`Self::set_fusion_arithmetic`].
-    pub fn fusion_arithmetic(&self) -> crate::FusionArithmetic {
+    /// See [`Self::set_arithmetic_policy`].
+    pub fn arithmetic_policy(&self) -> crate::ArithmeticPolicy {
         self.fusion.arithmetic()
+    }
+
+    /// Deprecated name for [`Self::set_arithmetic_policy`].
+    #[deprecated(since = "0.3.0", note = "use set_arithmetic_policy")]
+    pub fn set_fusion_arithmetic(&mut self, arithmetic: crate::ArithmeticPolicy) {
+        self.set_arithmetic_policy(arithmetic);
+    }
+
+    /// Deprecated name for [`Self::arithmetic_policy`].
+    #[deprecated(since = "0.3.0", note = "use arithmetic_policy")]
+    pub fn fusion_arithmetic(&self) -> crate::ArithmeticPolicy {
+        self.arithmetic_policy()
     }
 
     /// How automatic fusion prices a semantic region against the dispatches it
@@ -2721,7 +2826,7 @@ impl Scheme {
             if !self.desc.ir.nodes.iter().any(pending) {
                 continue;
             }
-            let pipeline = self.ctx.runtime().stdlib_matmul_f32(kind)?;
+            let pipeline = self.ctx.runtime().stdlib_matmul_f32(kind, self.arithmetic_policy())?;
             let handle = pipeline.handle;
             self.intern_compute_pipeline(&pipeline);
             for node in &mut self.desc.ir.nodes {
@@ -3976,6 +4081,8 @@ pub struct SchemeNodeBuilder<'a> {
     /// Buffer parcels behind each `with_parcel` call (yielding scripts only).
     yield_parcels: Vec<Option<(Parcel, NodeAccess)>>,
     yield_points: Vec<(String, crate::petition::YieldPoint)>,
+    /// Arithmetic variants of a generated kernel, including kernels fusion cannot admit.
+    arithmetic_site: Option<crate::fusion_plan::KernelPipelines>,
     /// Kernel and arguments of a generated-kernel record, for automatic fusion.
     kernel_site: Option<crate::fusion_plan::SiteDraft>,
     /// Temporaries bound so far; their `node` is filled in when the node is pushed.
@@ -4164,8 +4271,17 @@ impl<'a> SchemeNodeBuilder<'a> {
     }
 
     /// Start collecting the kernel site of a generated-kernel record.
-    pub(crate) fn begin_kernel_site(&mut self, kernel: Arc<goldy_shader_ir::KernelDef>) {
-        self.kernel_site = Some(crate::fusion_plan::SiteDraft::new(kernel));
+    pub(crate) fn begin_arithmetic_site(&mut self, pipelines: crate::fusion_plan::KernelPipelines) {
+        self.arithmetic_site = Some(pipelines);
+    }
+
+    /// Start collecting the fusion site of a generated-kernel record.
+    pub(crate) fn begin_kernel_site(
+        &mut self,
+        kernel: Arc<goldy_shader_ir::KernelDef>,
+        pipelines: crate::fusion_plan::KernelPipelines,
+    ) {
+        self.kernel_site = Some(crate::fusion_plan::SiteDraft::new(kernel, pipelines));
     }
 
     /// Declare explicit resource view handles (internal: present-lease slot bookkeeping).
@@ -4382,10 +4498,20 @@ impl<'a> SchemeNodeBuilder<'a> {
         // Present placeholders are resolved by declaration order, not binding index.
         if self.rt_pipeline.is_none() {
             self.register_specialization_site();
-            if let (Some(site), Some(provenance), DispatchDim::Direct { .. }) =
-                (self.kernel_site.take(), self.provenance.as_ref(), &dispatch)
-            {
-                if let Some(site) = site.finish(self.pipeline, provenance, self.bindings.len()) {
+            if matches!(dispatch, DispatchDim::Direct { .. }) {
+                if let Some(site) = self.arithmetic_site.take() {
+                    let node = self.scheme.desc.ir.nodes.len() as u32;
+                    self.scheme.desc.arithmetic_sites.insert(
+                        node,
+                        crate::fusion_plan::ArithmeticSite {
+                            pipelines: site,
+                            tensor_facts: self.tensor_facts.clone(),
+                        },
+                    );
+                }
+            }
+            if let (Some(site), DispatchDim::Direct { .. }) = (self.kernel_site.take(), &dispatch) {
+                if let Some(site) = site.finish(self.bindings.len()) {
                     let node = self.scheme.desc.ir.nodes.len() as u32;
                     self.scheme.desc.kernel_sites.insert(node, site);
                 }
@@ -9041,6 +9167,20 @@ void cs_main(Filter samp, DirectSpatial<float4> dst, ThreadId id) {
         let bindings = |s: &Scheme| s.ir_nodes().iter().map(|n| n.bindings.clone()).collect::<Vec<_>>();
         assert_eq!(labels(&via_include), labels(&via_group));
         assert_eq!(bindings(&via_include), bindings(&via_group));
+    }
+
+    #[test]
+    fn group_inherits_parent_arithmetic_policy() {
+        let device = mock_runtime();
+        let ctx = device.create_context().unwrap();
+        let mut parent = Scheme::new(&ctx);
+        parent.set_arithmetic_policy(crate::ArithmeticPolicy::Relaxed);
+        parent
+            .group("g", |child| {
+                assert_eq!(child.arithmetic_policy(), crate::ArithmeticPolicy::Relaxed);
+                Ok(())
+            })
+            .unwrap();
     }
 }
 

@@ -465,6 +465,14 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     self.prepared.pipeline_arc()
                 }
 
+                #[doc(hidden)]
+                pub fn pipeline_arc_for(
+                    &self,
+                    policy: ::goldy::ArithmeticPolicy,
+                ) -> ::std::sync::Arc<::goldy::ComputePipeline> {
+                    self.prepared.pipeline_arc_for(policy)
+                }
+
                 /// Structured ABI used to prepare this kernel.
                 pub fn def(&self) -> &::goldy::kernel::KernelDef {
                     self.prepared.def()

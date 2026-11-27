@@ -80,7 +80,7 @@ pub(crate) struct ShaderProvenance {
 /// Stable identity of a kernel program, beyond the module that compiled it.
 ///
 /// Modules carrying one id bind alike, so their specialized variants are interchangeable.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct KernelIdentity {
     pub(crate) id: goldy_shader_ir::KernelId,
     /// Logical name of each scalar wire slot, for diagnostics.

@@ -9,7 +9,7 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, ContractionPrecision, FusionArithmetic, FusionRegionStatus, FusionRejection, FusionSchedule,
+    compute, ArithmeticPolicy, BackendType, ContractionPrecision, FusionRegionStatus, FusionRejection, FusionSchedule,
     FusionTier, GoldyError, NodeId, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
     TensorKernels, TensorRecorder, TensorShape,
 };
@@ -984,19 +984,20 @@ fn fused_program_cache_is_keyed_by_arithmetic_policy() {
     let shape = TensorShape::vector(n);
     let mut schemes = Vec::new();
     for arithmetic in [
-        FusionArithmetic::MatchRecorded,
-        FusionArithmetic::MatchRecorded,
-        FusionArithmetic::Relaxed,
+        ArithmeticPolicy::MatchRecorded,
+        ArithmeticPolicy::MatchRecorded,
+        ArithmeticPolicy::Relaxed,
     ] {
         let mut scheme = Scheme::new(&ctx);
         assert_eq!(
-            scheme.fusion_arithmetic(),
-            FusionArithmetic::MatchRecorded,
+            scheme.arithmetic_policy(),
+            ArithmeticPolicy::MatchRecorded,
             "recorded arithmetic is the default"
         );
         scheme.set_automatic_fusion(true);
-        scheme.set_fusion_arithmetic(arithmetic);
-        assert_eq!(scheme.fusion_arithmetic(), arithmetic);
+        if arithmetic == ArithmeticPolicy::MatchRecorded {
+            scheme.set_arithmetic_policy(arithmetic);
+        }
         let a = Tensor::from_f32(&device, shape, &data(1, n)).unwrap();
         let b = Tensor::from_f32(&device, shape, &data(2, n)).unwrap();
         let out = Tensor::zeros(&device, shape, goldy::TensorDType::F32).unwrap();
@@ -1006,6 +1007,10 @@ fn fused_program_cache_is_keyed_by_arithmetic_policy() {
             rec.add_into("add", scaled.view(), a.view(), out.view()).unwrap();
             scaled
         };
+        // Changing policy after recording must switch recorded generated variants
+        // as well as re-key and rebuild any fused replacement.
+        scheme.set_arithmetic_policy(arithmetic);
+        assert_eq!(scheme.arithmetic_policy(), arithmetic);
         schemes.push((scheme, scaled, a, b, out));
     }
     for (scheme, _, _, _, _) in &mut schemes {

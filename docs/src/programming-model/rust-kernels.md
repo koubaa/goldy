@@ -39,6 +39,24 @@ kernel
 topology — it does not launch into a stream. Use `use goldy::gpu;` (or
 `goldy::gpu::global_id()`) for builtins.
 
+## Arithmetic policy
+
+Generated kernels have conservative and relaxed pipeline variants. A scheme selects
+between them for recorded dispatches, stdlib matrix fallbacks, and automatic or explicit
+fused replacements:
+
+```rust
+scheme.set_arithmetic_policy(goldy::ArithmeticPolicy::Relaxed);
+```
+
+`MatchRecorded` is the default and keeps fusion byte-equivalent to its recorded
+dispatches. `Relaxed` permits reassociation, contraction, and reciprocal transforms
+within generated kernels and across boundaries fusion removes. It is suitable when the
+application accepts ordinary floating-point noise, as inference commonly does. This is
+not a determinism switch: either policy can be repeatable, and numerically sensitive
+decisions such as near-tied top-k or sampling can still amplify small differences.
+Hand-authored compute and graphics shaders keep their existing backend defaults.
+
 ## Signature mapping
 
 Rust GPU-dialect types use the same names as `shaders/goldy_exp/access.slang`

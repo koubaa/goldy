@@ -615,7 +615,7 @@ pub(crate) struct DeviceInner {
     /// Frontend Slang session for compile-outside-mutex. Shared across device aliases.
     pub(crate) slang: Arc<OnceLock<Arc<SlangCompiler>>>,
     /// Lazily compiled stdlib MatMul kernels, indexed by [`crate::ops::matmul::MatMulFallback`].
-    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::compute::ComputePipeline>>; 6]>,
+    pub(crate) stdlib_matmul: Mutex<[Option<Arc<crate::ops::matmul::StdlibMatMulPipelines>>; 6]>,
     /// The backend's [`Validation`], read once so hot paths need not lock the backend.
     pub(crate) validation: Validation,
     /// Partition policy for this runtime. See [`resolve_compute_partition_split`].
@@ -968,18 +968,19 @@ impl Runtime {
     pub(crate) fn stdlib_matmul_f32(
         &self,
         kind: crate::ops::matmul::MatMulFallback,
+        policy: crate::ArithmeticPolicy,
     ) -> Result<Arc<crate::compute::ComputePipeline>, GoldyError> {
         let index = kind as usize;
-        if let Some(pipeline) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
-            return Ok(pipeline);
+        if let Some(kernel) = self.inner.stdlib_matmul.lock().unwrap()[index].clone() {
+            return Ok(kernel.select(policy));
         }
-        let pipeline = crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?;
+        let kernel = Arc::new(crate::ops::matmul::prepare_stdlib(self, kind).map_err(GoldyError::Backend)?);
         let mut slots = self.inner.stdlib_matmul.lock().unwrap();
         if let Some(existing) = slots[index].as_ref() {
-            return Ok(Arc::clone(existing));
+            return Ok(existing.select(policy));
         }
-        slots[index] = Some(Arc::clone(&pipeline));
-        Ok(pipeline)
+        slots[index] = Some(Arc::clone(&kernel));
+        Ok(kernel.select(policy))
     }
 
     /// Check if the device is still valid.

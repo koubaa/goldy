@@ -6,6 +6,7 @@ use crate::runtime::Runtime;
 use crate::scheme::{Scheme, SchemeBindable};
 use crate::shader::{KernelIdentity, ShaderModule};
 use crate::task_graph::NodeAccess;
+use crate::{ArithmeticPolicy, BackendType};
 use anyhow::{Context, Result};
 #[cfg(feature = "tensor")]
 use goldy_shader_ir::{BoundTensorDim, TensorShapeSpec};
@@ -30,19 +31,38 @@ impl TensorShapeEnv {
 
 /// Runtime-scoped prepared kernel: compiled pipeline + ABI metadata.
 pub struct PreparedKernel {
-    pipeline: Arc<ComputePipeline>,
+    match_recorded: Arc<ComputePipeline>,
+    relaxed: Arc<ComputePipeline>,
     def: Arc<KernelDef>,
 }
 
 impl PreparedKernel {
+    /// Conservative pipeline used by [`ArithmeticPolicy::MatchRecorded`].
+    ///
+    /// Recording through [`Self::begin_record`] selects the scheme's policy instead.
     pub fn pipeline(&self) -> &ComputePipeline {
-        &self.pipeline
+        &self.match_recorded
     }
 
-    /// Shared pipeline handle. Prefer this over copying [`ComputePipeline`] so Drop
-    /// stays refcounted.
+    /// Shared conservative pipeline. Recording generated kernels selects the scheme's
+    /// policy instead.
     pub fn pipeline_arc(&self) -> Arc<ComputePipeline> {
-        Arc::clone(&self.pipeline)
+        Arc::clone(&self.match_recorded)
+    }
+
+    pub(crate) fn pipeline_for(&self, policy: ArithmeticPolicy) -> &ComputePipeline {
+        match policy {
+            ArithmeticPolicy::MatchRecorded => &self.match_recorded,
+            ArithmeticPolicy::Relaxed => &self.relaxed,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn pipeline_arc_for(&self, policy: ArithmeticPolicy) -> Arc<ComputePipeline> {
+        match policy {
+            ArithmeticPolicy::MatchRecorded => Arc::clone(&self.match_recorded),
+            ArithmeticPolicy::Relaxed => Arc::clone(&self.relaxed),
+        }
     }
 
     pub fn def(&self) -> &KernelDef {
@@ -61,9 +81,14 @@ impl PreparedKernel {
         scheme: &'a mut Scheme,
         label: impl Into<crate::SchemeLabel>,
     ) -> SchemeNodeStart<'a> {
-        let mut builder = scheme.node(label, self.pipeline.as_ref());
+        let policy = scheme.arithmetic_policy();
+        let pipelines = crate::fusion_plan::KernelPipelines::new(self.match_recorded.as_ref(), self.relaxed.as_ref());
+        scheme.intern_compute_pipeline(self.match_recorded.as_ref());
+        scheme.intern_compute_pipeline(self.relaxed.as_ref());
+        let mut builder = scheme.node(label, self.pipeline_for(policy));
+        builder.begin_arithmetic_site(pipelines.clone());
         if crate::fusion_plan::fusable_kernel(&self.def) {
-            builder.begin_kernel_site(Arc::clone(&self.def));
+            builder.begin_kernel_site(Arc::clone(&self.def), pipelines);
         }
         SchemeNodeStart {
             builder,
@@ -256,10 +281,7 @@ pub(crate) fn access_kind_to_node(access: goldy_shader_ir::AccessKind) -> NodeAc
 /// Pipeline creation happens here (not on every `record`), matching the
 /// existing `ShaderModule` + `ComputePipeline` path and disk cache.
 pub fn prepare_kernel(device: &Runtime, def: KernelDef) -> Result<PreparedKernel> {
-    // Structured generated kernels may become constituents of a semantic region.
-    // Their standalone arithmetic is therefore the reference that exact fusion
-    // reproduces; carry the same arithmetic policy through both compilations.
-    prepare_kernel_as(device, def, None, true)
+    prepare_kernel_as(device, def, None)
 }
 
 /// [`prepare_kernel`] for a program whose variants are shared by every module of `identity`.
@@ -267,7 +289,6 @@ pub(super) fn prepare_kernel_as(
     device: &Runtime,
     def: KernelDef,
     identity: Option<KernelIdentity>,
-    precise_arithmetic: bool,
 ) -> Result<PreparedKernel> {
     if def.abi_version != goldy_shader_ir::KERNEL_ABI_VERSION {
         anyhow::bail!(
@@ -289,15 +310,26 @@ pub(super) fn prepare_kernel_as(
     }
     dump_kernel_artifacts(&def, None)?;
 
-    let mut shader = ShaderModule::from_slang_with_arithmetic(device, &def.source.canonical_slang, precise_arithmetic)
-        .with_context(|| format!("compiling rust kernel `{}`", def.entry))?;
-    if let Some(identity) = identity {
-        shader = shader.with_kernel_identity(identity);
-    }
-    let pipeline = ComputePipeline::new_with_label(device, &shader, Some(&format!("rust_kernel_{}", def.entry)))?;
+    let compile = |policy: ArithmeticPolicy| -> Result<Arc<ComputePipeline>> {
+        let precise = policy == ArithmeticPolicy::MatchRecorded;
+        let mut shader = ShaderModule::from_slang_with_arithmetic(device, &def.source.canonical_slang, precise)
+            .with_context(|| format!("compiling rust kernel `{}`", def.entry))?;
+        if let Some(mut identity) = identity.clone() {
+            identity.id = policy.kernel_id(identity.id);
+            shader = shader.with_kernel_identity(identity);
+        }
+        ComputePipeline::new_with_label(device, &shader, Some(&format!("rust_kernel_{}", def.entry))).map(Arc::new)
+    };
+    let match_recorded = compile(ArithmeticPolicy::MatchRecorded)?;
+    let relaxed = if device.backend_type() == BackendType::Metal {
+        compile(ArithmeticPolicy::Relaxed)?
+    } else {
+        Arc::clone(&match_recorded)
+    };
 
     Ok(PreparedKernel {
-        pipeline: Arc::new(pipeline),
+        match_recorded,
+        relaxed,
         def: Arc::new(def),
     })
 }

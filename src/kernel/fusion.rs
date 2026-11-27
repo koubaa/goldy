@@ -360,7 +360,7 @@ pub(crate) fn prepare_fused(device: &Runtime, definition: &FusedDefinition) -> a
         id: definition.id(),
         scalars: definition.scalar_origins().iter().map(ToString::to_string).collect(),
     };
-    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity), true)?;
+    let prepared = prepare_kernel_as(device, definition.lower(), Some(identity))?;
     tracing::debug!(
         kernel = %definition.name,
         id = %definition.id(),
@@ -379,16 +379,10 @@ pub(crate) fn prepare_synthesized(
     device: &Runtime,
     def: &KernelDef,
     scalars: Vec<String>,
-    arithmetic: crate::FusionArithmetic,
     id: KernelId,
 ) -> anyhow::Result<PreparedKernel> {
     let identity = KernelIdentity { id, scalars };
-    let prepared = prepare_kernel_as(
-        device,
-        def.clone(),
-        Some(identity),
-        arithmetic == crate::FusionArithmetic::MatchRecorded,
-    )?;
+    let prepared = prepare_kernel_as(device, def.clone(), Some(identity))?;
     tracing::debug!(kernel = %def.entry, id = %def.id(), params = def.params.len(), "semantic fusion prepared");
     Ok(prepared)
 }
