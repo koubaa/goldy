@@ -53,8 +53,9 @@ pub(super) fn patch_compute_msl(msl: &str) -> String {
 }
 
 /// Keep only the arithmetic helpers that represent recorded dispatch boundaries
-/// from inheriting Metal's file-wide fast math. Other arithmetic, including math
-/// intrinsics in the same fused kernel, retains the compiler default.
+/// from inheriting Metal's file-wide fast math. A volatile f32 result keeps the
+/// boundary observable after the tiny helper is inlined. Other arithmetic, including
+/// math intrinsics in the same fused kernel, retains the compiler default.
 fn patch_precise_math_msl(msl: &str) -> String {
     const PRAGMAS: &str = "\n#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)";
     let mut out = msl.to_string();
@@ -66,7 +67,21 @@ fn patch_precise_math_msl(msl: &str) -> String {
         };
         let brace = start + brace_rel;
         out.insert_str(brace + 1, PRAGMAS);
-        search_from = brace + 1 + PRAGMAS.len();
+        let body = brace + 1 + PRAGMAS.len();
+        let Some(return_rel) = out[body..].find("return ") else {
+            search_from = body;
+            continue;
+        };
+        let return_start = body + return_rel;
+        let Some(end_rel) = out[return_start..].find(';') else {
+            search_from = body;
+            continue;
+        };
+        let return_end = return_start + end_rel + 1;
+        let expression = out[return_start + "return ".len()..return_end - 1].trim();
+        let rounded = format!("volatile float goldy_exact_result = {expression};\n    return goldy_exact_result;");
+        out.replace_range(return_start..return_end, &rounded);
+        search_from = return_start + rounded.len();
     }
     out
 }
@@ -1150,6 +1165,7 @@ mod tests {
         assert!(out.contains(
             "float goldy_exact_add_0(float a, float b)\n{\n#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)"
         ));
+        assert!(out.contains("volatile float goldy_exact_result = a + b;"));
         assert!(!out.contains("float ordinary(float a, float b)\n{\n#pragma"));
         assert!(!out.contains("[[kernel]] void cs_main()\n{\n#pragma"));
     }
