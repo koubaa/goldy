@@ -179,6 +179,8 @@ fn composition_relocates_into_a_selected_row() {
         parcel: ParcelId(4),
         element: Affine::constant(0),
         element_type: crate::ElementType::I32,
+        add: 0,
+        modulus: None,
         zero_if_outside: false,
     };
     let lowered = lower(&fused, &[source]).unwrap();

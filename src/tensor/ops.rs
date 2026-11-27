@@ -3,10 +3,11 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR,
-    OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR,
-    OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN,
-    OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM, OP_TANH,
+    CopyU32Kernel, CyclicDotF32Kernel, CyclicStoreF32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel,
+    UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX,
+    OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN,
+    OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
+    OP_TANH,
 };
 use super::semantic;
 use super::shape::TensorShape;
@@ -68,6 +69,8 @@ pub(crate) struct PreparedOps {
     pub reduce: ReduceF32Kernel,
     pub gather: GatherF32Kernel,
     pub scatter: ScatterF32Kernel,
+    pub cyclic_store: CyclicStoreF32Kernel,
+    pub cyclic_dot: CyclicDotF32Kernel,
     pub batched: BatchedMatMulKernel,
     pub cast_f32_i32: CastF32I32Kernel,
     pub cast_f32_u32: CastF32U32Kernel,
@@ -84,6 +87,8 @@ impl PreparedOps {
             reduce: ReduceF32Kernel::prepare(runtime)?,
             gather: GatherF32Kernel::prepare(runtime)?,
             scatter: ScatterF32Kernel::prepare(runtime)?,
+            cyclic_store: CyclicStoreF32Kernel::prepare(runtime)?,
+            cyclic_dot: CyclicDotF32Kernel::prepare(runtime)?,
             batched: BatchedMatMulKernel::prepare(runtime)?,
             cast_f32_i32: CastF32I32Kernel::prepare(runtime)?,
             cast_f32_u32: CastF32U32Kernel::prepare(runtime)?,
@@ -545,6 +550,63 @@ impl<'a> TensorRecorder<'a> {
             self.scheme
                 .record_semantic_site(node, semantic::scatter_slice(src, index, dst, axis));
         }
+        Ok(())
+    }
+
+    /// Store `src` in a row-major cyclic history and compute one causal row dot.
+    ///
+    /// `state` and `weight` are `[rows, width]`; `position` is one `u32`.
+    /// The newest value uses the last weight column and positions before zero
+    /// contribute zero. Recording emits ordinary generated kernels so automatic
+    /// fusion may compose the store, dot, and neighboring tensor algebra.
+    pub fn cyclic_dot_at(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        weight: TensorView<'_>,
+        state: TensorView<'_>,
+        position: TensorView<'_>,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        for (name, view) in [("src", src), ("weight", weight), ("state", state), ("out", out)] {
+            view.dtype().require_f32(&format!("cyclic_dot_at {name}"))?;
+        }
+        state.layout().require_writeable("cyclic_dot_at state")?;
+        out.layout().require_writeable("cyclic_dot_at out")?;
+        if position.dtype() != TensorDType::U32 || position.numel_u32() != 1 {
+            return Err(GoldyError::Validation("cyclic_dot_at: position must be one U32".into()));
+        }
+        let state_shape = state.shape();
+        let state_dims = state_shape.dims();
+        if state_dims.len() != 2
+            || weight.shape().dims() != state_dims
+            || src.shape().dims() != [state_dims[0]]
+            || out.shape().dims() != [state_dims[0]]
+            || state_dims[1] == 0
+        {
+            return Err(GoldyError::Validation(
+                "cyclic_dot_at: src/out must be [rows], state/weight [rows, width]".into(),
+            ));
+        }
+        let rows = state_dims[0].max(1);
+        let store = self
+            .kernels
+            .ops
+            .cyclic_store
+            .record(self.scheme, format!("{label}_store"), src, state, position)?
+            .over_1d(rows)
+            .node();
+        self.scheme
+            .record_semantic_site(store, semantic::cyclic_store(src, state, position));
+        let dot = self
+            .kernels
+            .ops
+            .cyclic_dot
+            .record(self.scheme, format!("{label}_dot"), state, weight, position, out)?
+            .over_1d(rows)
+            .node();
+        self.scheme
+            .record_semantic_site(dot, semantic::cyclic_dot(state, weight, position, out));
         Ok(())
     }
 

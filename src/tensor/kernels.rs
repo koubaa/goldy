@@ -280,6 +280,50 @@ fn tensor_scatter_f32(
     }
 }
 
+/// Store one vector in the position-addressed slot of a row-major cyclic matrix.
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn tensor_cyclic_store_f32(
+    src: goldy::gpu::Tensor<f32>,
+    state: goldy::gpu::TensorMut<f32>,
+    position: goldy::gpu::Tensor<u32>,
+) {
+    let row = goldy::gpu::global_id().x;
+    if row < src.len() {
+        let width = state.dim(1);
+        state[row * width + (position[0] % width)] = src[row];
+    }
+}
+
+/// Dot each row with its causal cyclic window, newest element last in `weight`.
+///
+/// Positions before the beginning of the sequence contribute zero. The current
+/// element must already have been stored in `state[position % width]`.
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn tensor_cyclic_dot_f32(
+    state: goldy::gpu::Tensor<f32>,
+    weight: goldy::gpu::Tensor<f32>,
+    position: goldy::gpu::Tensor<u32>,
+    dst: goldy::gpu::TensorWrite<f32>,
+) {
+    let row = goldy::gpu::global_id().x;
+    if row < dst.len() {
+        let width = state.dim(1);
+        let pos = position[0];
+        let base = row * width;
+        let mut acc = 0.0;
+        let mut lag = 0u32;
+        while lag < width {
+            let mut value = 0.0;
+            if pos >= lag {
+                value = state[base + ((pos - lag) % width)];
+            }
+            acc = acc + weight[base + (width - 1 - lag)] * value;
+            lag = lag + 1;
+        }
+        dst[row] = acc;
+    }
+}
+
 /// Rank-3 GEMM over any strides: `C[b,i,j] = A[b,i,p] @ B[b,p,j]`.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
 fn tensor_batched_matmul_f32(
@@ -315,6 +359,8 @@ pub use tensor_cast_f32_u32::Kernel as CastF32U32Kernel;
 pub use tensor_cast_i32_f32::Kernel as CastI32F32Kernel;
 pub use tensor_cast_u32_f32::Kernel as CastU32F32Kernel;
 pub use tensor_copy_u32::Kernel as CopyU32Kernel;
+pub use tensor_cyclic_dot_f32::Kernel as CyclicDotF32Kernel;
+pub use tensor_cyclic_store_f32::Kernel as CyclicStoreF32Kernel;
 pub use tensor_gather_f32::Kernel as GatherF32Kernel;
 pub use tensor_reduce_f32::Kernel as ReduceF32Kernel;
 pub use tensor_scatter_f32::Kernel as ScatterF32Kernel;

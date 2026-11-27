@@ -197,6 +197,8 @@ pub(crate) fn matmul(
                     parcel: index_parcel,
                     element: Affine::constant(index_at) + Affine::from(batch_axis),
                     element_type: ElementType::U32,
+                    add: 0,
+                    modulus: None,
                     zero_if_outside: true,
                 },
             );
@@ -645,6 +647,8 @@ pub(crate) fn synthesize(
                 other => other,
             }),
             element_type: s.element_type,
+            add: s.add,
+            modulus: s.modulus,
             zero_if_outside: s.zero_if_outside,
         }));
         scalars.extend(site.scalars.iter().map(|&slot| (k, slot)));

@@ -114,6 +114,10 @@ pub struct IndexSource {
     pub element: Affine,
     /// [`ElementType::I32`] or [`ElementType::U32`].
     pub element_type: ElementType,
+    /// Added to the loaded integer before range validation.
+    pub add: i64,
+    /// Reduce the adjusted integer modulo this positive value before validation.
+    pub modulus: Option<u32>,
     /// When the loaded value is outside the parameter's declared range, stores that
     /// depend on it write zero instead of the value computed from the clamped index.
     pub zero_if_outside: bool,
@@ -941,6 +945,28 @@ impl Prepared {
     /// mentions it, or the output's own storage.
     fn output_mentions_param(&self, n: usize, p: IndexParam) -> bool {
         let sym = Sym::Param(p);
+        fn term_mentions(term: &Term, sym: Sym) -> bool {
+            match term {
+                Term::Lit(_) | Term::Scalar(_) => false,
+                Term::IndexValue(index) => index.mentions(sym),
+                Term::Read { index, .. } => index.iter().any(|a| a.mentions(sym)),
+                Term::Unary { arg, .. } => term_mentions(arg, sym),
+                Term::Binary { lhs, rhs, .. } => term_mentions(lhs, sym) || term_mentions(rhs, sym),
+                Term::Select {
+                    lhs,
+                    rhs,
+                    then,
+                    otherwise,
+                    ..
+                } => {
+                    lhs.mentions(sym) || rhs.mentions(sym) || term_mentions(then, sym) || term_mentions(otherwise, sym)
+                }
+                Term::Reduce { body, .. } => term_mentions(body, sym),
+            }
+        }
+        if term_mentions(&self.bodies[n].1, sym) {
+            return true;
+        }
         let stored = self
             .region
             .value(self.bodies[n].0)
@@ -1034,6 +1060,20 @@ impl Prepared {
         let q = format!("q{p}");
         let inn = format!("in{p}");
         body.push(let_int(&q, cast(at, "int")));
+        if source.add != 0 {
+            body.push(assign(&q, bin(BinOp::Add, var(&q), int(source.add)?)));
+        }
+        if let Some(modulus) = source.modulus {
+            let modulus = int(i64::from(modulus))?;
+            body.push(assign(
+                &q,
+                bin(
+                    BinOp::Rem,
+                    bin(BinOp::Add, bin(BinOp::Rem, var(&q), modulus.clone()), modulus.clone()),
+                    modulus,
+                ),
+            ));
+        }
         let range = self.region.param_range(IndexParam(p as u32));
         let lo = int(range.start)?;
         let hi = int(range.end.saturating_sub(1))?;

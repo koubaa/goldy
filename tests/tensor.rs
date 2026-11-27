@@ -107,6 +107,27 @@ fn read_f32(scheme: &mut Scheme, buf: &goldy::Buffer) -> Vec<f32> {
     bytemuck::cast_slice(&bytes).to_vec()
 }
 
+fn settle_fusion(scheme: &mut Scheme) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        drop(scheme.submit().expect("submit"));
+        let compiling = scheme
+            .fusion_report()
+            .regions
+            .iter()
+            .any(|region| matches!(region.status, goldy::FusionRegionStatus::Compiling));
+        if !scheme.compiles_pending() && !compiling {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fusion did not settle: {:?}",
+            scheme.fusion_report()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn add_and_broadcast_and_replay() {
     let _gpu = gpu_lock();
@@ -1161,4 +1182,84 @@ fn block_scaled_matvec_distinguishes_nibble_order() {
     let mut scheme = Scheme::new(&ctx);
     let got = run(&mut scheme, 9);
     assert_eq!(got, 0.0);
+}
+
+#[test]
+fn cyclic_dot_and_neighboring_algebra_fuse_exactly() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let rows = 2u32;
+    let width = 4u32;
+    let source_data = [2.0f32, -3.0];
+    let weight_data = [0.5, 1.0, 1.5, 2.0, -1.0, -0.5, 0.25, 0.75];
+    let position = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+
+    let record = |automatic: bool| {
+        let source = Tensor::from_f32(&device, TensorShape::vector(rows), &source_data).unwrap();
+        let weight = Tensor::from_f32(&device, TensorShape::matrix(rows, width), &weight_data).unwrap();
+        let state = Tensor::zeros(&device, TensorShape::matrix(rows, width), TensorDType::F32).unwrap();
+        let dot = Tensor::zeros(&device, TensorShape::vector(rows), TensorDType::F32).unwrap();
+        let skipped = Tensor::zeros(&device, TensorShape::vector(rows), TensorDType::F32).unwrap();
+        let out = Tensor::zeros(&device, TensorShape::vector(rows), TensorDType::F32).unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(automatic);
+        let mut rec = kernels.recorder(&mut scheme);
+        rec.cyclic_dot_at(
+            "window",
+            source.view(),
+            weight.view(),
+            state.view(),
+            position.view(),
+            dot.view(),
+        )
+        .unwrap();
+        rec.add_into("skip", dot.view(), source.view(), skipped.view()).unwrap();
+        rec.div_scalar_into("scale", skipped.view(), 5.0f32.sqrt(), out.view())
+            .unwrap();
+        (scheme, source, weight, state, dot, skipped, out)
+    };
+
+    let (mut fused, _fused_source, _fused_weight, fused_state, _fused_dot, _fused_skipped, fused_out) = record(true);
+    let (mut plain, _plain_source, _plain_weight, plain_state, _plain_dot, _plain_skipped, plain_out) = record(false);
+    settle_fusion(&mut fused);
+    settle_fusion(&mut plain);
+
+    let report = fused.fusion_report();
+    assert!(
+        report
+            .regions
+            .iter()
+            .any(|region| { region.labels.len() == 3 && matches!(region.status, goldy::FusionRegionStatus::Promoted) }),
+        "{report:?}"
+    );
+    assert_eq!(fused.executed_node_count(), 2, "{report:?}");
+    assert_eq!(plain.executed_node_count(), 4);
+
+    let fused_bits = read_f32(&mut fused, fused_out.buffer())
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    let plain_bits = read_f32(&mut plain, plain_out.buffer())
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(fused_bits, plain_bits);
+    let got = fused_bits.iter().copied().map(f32::from_bits).collect::<Vec<_>>();
+    let expected = [6.0 / 5.0f32.sqrt(), -5.25 / 5.0f32.sqrt()];
+    assert!(
+        got.iter()
+            .zip(expected)
+            .all(|(&actual, expected)| (actual - expected).abs() < 1e-6),
+        "{got:?}"
+    );
+    assert_eq!(
+        read_f32(&mut fused, fused_state.buffer()),
+        read_f32(&mut plain, plain_state.buffer())
+    );
+    assert_eq!(
+        read_f32(&mut fused, fused_state.buffer()),
+        vec![2.0, 0.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0]
+    );
 }
