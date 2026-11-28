@@ -543,43 +543,69 @@ pub(super) fn begin_compute_encoder<'a>(
 
     // Collect resource refs by usage tier then call use_resources once per tier,
     // replacing one ObjC msg_send per resource with at most three total.
-    // Safety: BufferRef/TextureRef are subclasses of Resource in the Metal ObjC
-    // hierarchy, so transmuting the reference type is sound (same pointer, same layout).
-    // Withdraw staging is only ever a blit operand, bound directly. A view shares its
-    // parent's `MTLBuffer`, so the list is deduplicated by object: the driver's cost is
-    // per entry.
-    let mut rw_refs: Vec<&mtl::ResourceRef> = Vec::with_capacity(state.buffers.len());
-    let mut ro_refs: Vec<&mtl::ResourceRef> = Vec::new();
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle && !buf_state.is_withdraw_staging {
-            let buf_ref: &mtl::BufferRef = &buf_state.buffer;
-            rw_refs.push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
-        }
-    }
-    rw_refs.sort_unstable_by_key(|r| std::ptr::from_ref(*r));
-    rw_refs.dedup_by_key(|r| std::ptr::from_ref(*r));
-    for tex_state in state.textures.values() {
-        if tex_state.device_handle == device_handle {
-            let tex_ref: &mtl::TextureRef = &tex_state.texture;
-            let res_ref = unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
-            if tex_state.is_storage_image {
-                rw_refs.push(res_ref);
-            } else {
-                ro_refs.push(res_ref);
+    // Safety: BufferRef/TextureRef/AccelerationStructureRef are subclasses of Resource
+    // in the Metal ObjC hierarchy, so transmuting the reference type is sound (same
+    // thin pointer, same layout). The deduplicated pointer lists are cached per device
+    // across encoders while `state.residency_generation` is unchanged (`&MetalState`
+    // holds all backing ObjC objects alive for the duration of this call).
+    const _: () = assert!(std::mem::size_of::<&mtl::ResourceRef>() == std::mem::size_of::<usize>());
+    {
+        let mut cache = logical_device.residency_cache.lock().unwrap();
+        if cache.generation != state.residency_generation {
+            cache.rw_ptrs.clear();
+            cache.ro_ptrs.clear();
+            cache.accel_ptrs.clear();
+            for buf_state in state.buffers.values() {
+                if buf_state.device_handle == device_handle && !buf_state.is_withdraw_staging {
+                    let buf_ref: &mtl::BufferRef = &buf_state.buffer;
+                    let res_ref = unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) };
+                    cache.rw_ptrs.push(std::ptr::from_ref(res_ref) as usize);
+                }
             }
+            cache.rw_ptrs.sort_unstable();
+            cache.rw_ptrs.dedup();
+            for tex_state in state.textures.values() {
+                if tex_state.device_handle == device_handle {
+                    let tex_ref: &mtl::TextureRef = &tex_state.texture;
+                    let res_ref = unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
+                    let ptr = std::ptr::from_ref(res_ref) as usize;
+                    if tex_state.is_storage_image {
+                        cache.rw_ptrs.push(ptr);
+                    } else {
+                        cache.ro_ptrs.push(ptr);
+                    }
+                }
+            }
+            for accel in state.accels.values() {
+                if accel.device_handle == device_handle {
+                    let as_ref: &mtl::AccelerationStructureRef = &accel.accel;
+                    let res_ref =
+                        unsafe { std::mem::transmute::<&mtl::AccelerationStructureRef, &mtl::ResourceRef>(as_ref) };
+                    cache.accel_ptrs.push(std::ptr::from_ref(res_ref) as usize);
+                }
+            }
+            cache.generation = state.residency_generation;
         }
-    }
-    if !rw_refs.is_empty() {
-        encoder.use_resources(&rw_refs, mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write);
-    }
-    if !ro_refs.is_empty() {
-        encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
-    }
-    for accel in state.accels.values() {
-        if accel.device_handle == device_handle {
-            let as_ref: &mtl::AccelerationStructureRef = &accel.accel;
-            let res_ref = unsafe { std::mem::transmute::<&mtl::AccelerationStructureRef, &mtl::ResourceRef>(as_ref) };
-            encoder.use_resources(&[res_ref], mtl::MTLResourceUsage::Read);
+        if !cache.rw_ptrs.is_empty() {
+            let rw_refs = unsafe {
+                std::slice::from_raw_parts(cache.rw_ptrs.as_ptr().cast::<&mtl::ResourceRef>(), cache.rw_ptrs.len())
+            };
+            encoder.use_resources(rw_refs, mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write);
+        }
+        if !cache.ro_ptrs.is_empty() {
+            let ro_refs = unsafe {
+                std::slice::from_raw_parts(cache.ro_ptrs.as_ptr().cast::<&mtl::ResourceRef>(), cache.ro_ptrs.len())
+            };
+            encoder.use_resources(ro_refs, mtl::MTLResourceUsage::Read);
+        }
+        if !cache.accel_ptrs.is_empty() {
+            let accel_refs = unsafe {
+                std::slice::from_raw_parts(
+                    cache.accel_ptrs.as_ptr().cast::<&mtl::ResourceRef>(),
+                    cache.accel_ptrs.len(),
+                )
+            };
+            encoder.use_resources(accel_refs, mtl::MTLResourceUsage::Read);
         }
     }
 

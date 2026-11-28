@@ -725,6 +725,21 @@ pub(crate) struct PendingSlotReclamation {
     pub requirements: Vec<(super::ContextHandle, u64)>,
 }
 
+/// Cached deduplicated `MTLResource` pointer lists for `begin_compute_encoder`.
+///
+/// Rebuilt only when [`MetalState::residency_generation`] advances; steady-state
+/// encoder opens pass the cached slices directly to `useResources:count:usage:`
+/// without scanning, sorting, or allocating. Every pointer is borrowed from
+/// `state.{buffers,textures,accels}` while `&MetalState` is held and no `&mut MetalState`
+/// mutation has occurred since `generation`.
+#[derive(Default)]
+pub(crate) struct DeviceResidencyCache {
+    pub generation: u64,
+    pub rw_ptrs: Vec<usize>,
+    pub ro_ptrs: Vec<usize>,
+    pub accel_ptrs: Vec<usize>,
+}
+
 /// A logical Metal device with associated resources.
 ///
 /// Requires Argument Buffers Tier 2 (Apple Silicon, Intel 2017+, AMD 2015+).
@@ -792,6 +807,8 @@ pub(crate) struct LogicalDevice {
     pub queue_lock: Arc<Mutex<()>>,
     /// Async FIFO worker for `command_buffer.commit()` (render thread enqueues, worker runs).
     pub submission_worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
+    /// Cached deduplicated `useResources:count:usage:` slices invalidated by resource mutations.
+    pub residency_cache: Mutex<DeviceResidencyCache>,
 }
 
 impl LogicalDevice {
@@ -1710,9 +1727,16 @@ pub(super) struct MetalState {
     /// Re-created automatically on demand when a shader must be lazily compiled.
     pub slang_compiler: Option<crate::slang::SlangCompiler>,
     pub validation: crate::Validation,
+    /// Monotonic counter bumped whenever `buffers`, `textures`, or `accels` changes.
+    pub residency_generation: u64,
 }
 
 impl MetalState {
+    #[inline]
+    pub(super) fn bump_residency_generation(&mut self) {
+        self.residency_generation = self.residency_generation.wrapping_add(1);
+    }
+
     #[inline]
     pub(super) fn slang_compiler_mut_or_init(&mut self) -> anyhow::Result<&mut crate::slang::SlangCompiler> {
         use anyhow::Context;
