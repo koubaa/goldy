@@ -255,6 +255,12 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test
 
+      - name: Report frame-rate regression timings
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --test frame_rate -- --nocapture
+
       - name: Run goldy-ffi integration tests
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}

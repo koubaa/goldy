@@ -2,10 +2,10 @@
 //! budget is sensitive to: a retained worker that waits, two frames in flight,
 //! a new scheme every frame, and a dispatch size that changes every frame.
 //!
-//! Absolute times are lavapipe host times. The assertions reject the regression
+//! Absolute times are backend host times. The assertions reject the regression
 //! where building or copying a frame-table row costs tens of milliseconds.
 
-#![cfg(feature = "vulkan")]
+#![cfg(any(feature = "vulkan", feature = "metal"))]
 
 #[path = "common/submission.rs"]
 mod submission;
@@ -50,6 +50,10 @@ fn buffers(device: &Runtime) -> (Buffer, Buffer) {
     (input, output)
 }
 
+fn supports_frame_rate_test(device: &Runtime) -> bool {
+    matches!(device.backend_type(), BackendType::Vulkan | BackendType::Metal)
+}
+
 fn record_worker(
     ctx: &Context,
     pipeline: &ComputePipeline,
@@ -83,7 +87,7 @@ fn retained_worker_wait_every_frame_stays_under_a_millisecond() {
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -115,7 +119,7 @@ fn retained_worker_two_in_flight_keeps_its_rate() {
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -143,7 +147,7 @@ fn new_scheme_every_frame_stays_under_five_milliseconds() {
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -168,7 +172,7 @@ fn changing_dispatch_size_does_not_stall_on_row_eviction() {
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
