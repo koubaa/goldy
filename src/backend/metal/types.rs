@@ -35,11 +35,11 @@ use mtl::{
 /// Maximum resources per access-pattern category (must match
 /// `GOLDY_MAX_RESOURCES` in `bindless_resources.slang`).
 ///
-/// Raised from 4,096 to 8,192 so long-lived workloads can retain more than
-/// 4,096 storage buffers. The six-category argument buffer occupies 384 KiB,
+/// Raised from 4,096 to 16,384 so long-lived workloads can retain more than
+/// 4,096 storage buffers. The six-category argument buffer occupies 768 KiB,
 /// while Metal Argument Buffers Tier 2 supports at least 500,000 resources per
 /// argument buffer.
-pub const MAX_RESOURCES_PER_CATEGORY: u32 = 8192;
+pub const MAX_RESOURCES_PER_CATEGORY: u32 = 16_384;
 
 /// Maximum size of the six-category argument buffer.
 pub const ARGUMENT_BUFFER_SIZE: u64 = 6 * MAX_RESOURCES_PER_CATEGORY as u64 * std::mem::size_of::<u64>() as u64;
@@ -1729,7 +1729,7 @@ mod tests {
 
     #[test]
     fn argument_buffer_layout_matches_category_capacity() {
-        assert_eq!(MAX_RESOURCES_PER_CATEGORY, 8192);
+        assert_eq!(MAX_RESOURCES_PER_CATEGORY, 16_384);
         assert_eq!(
             ARGUMENT_BUFFER_SIZE,
             6 * u64::from(MAX_RESOURCES_PER_CATEGORY) * std::mem::size_of::<u64>() as u64
@@ -1737,9 +1737,9 @@ mod tests {
     }
 
     #[test]
-    fn storage_registry_can_cross_legacy_capacity() {
+    fn storage_registry_can_cross_previous_capacity() {
         let mut reg = ResourceRegistry::new();
-        for handle in 0..=4096 {
+        for handle in 0..=8192 {
             assert_eq!(reg.register_storage_buffer(handle), handle as u32);
         }
     }
