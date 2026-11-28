@@ -167,6 +167,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Generated-kernel push ABI 5** (breaking) — native push/root constants shrink
+  from 128 to 96 bytes by removing the obsolete 32-byte bindless-index region.
+  Resources already resolve through the frame table. User words now occupy bytes
+  0–31 and routing/launch words bytes 32–95; `KERNEL_ABI_VERSION` is 5 so
+  retained definitions and shader caches cannot mix layouts.
 - **Exact fusion where compilers contract** (breaking) — a compiler that contracts a
   multiply into the add that reads it need not contract the same pairs in a fused
   kernel as in the kernels it replaces. `RuntimeCapabilities::fp_contraction` reports
@@ -284,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ammon's RMSNorm falls from 2.75 µs to 2.24 µs.
 
 - **Tensor layouts as launch facts** — each tensor's element offset travels as a launch
-  word (`PushLayout` region C on DX12 / Vulkan / Metal, a trailing kernel argument on
+  word (the routing/launch portion of `PushLayout` on DX12 / Vulkan / Metal, a trailing kernel argument on
   CUDA; first 13 tensors), and its shape facts bake through the specializer as certain
   words, so a tensor node warms at its first submit and its promoted variant loads no
   `GoldyTensorLayout`. Sites that differ only in offsets share a variant.

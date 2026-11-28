@@ -158,7 +158,7 @@ pub enum NodeKind {
         pipeline: ComputePipelineHandle,
         resource_slots: Vec<u32>,
         user_slots: Vec<u32>,
-        /// Words the pipeline reads outside region B, today tensor element offsets.
+        /// Words the pipeline reads after user parameters, today tensor element offsets.
         /// Fixed for the node's lifetime and never baked by specialization.
         launch_words: Vec<u32>,
         dispatch: DispatchDim,
