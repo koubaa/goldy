@@ -99,6 +99,8 @@
 - [Static Shader Bounds Analysis](./design/shader-bounds-analysis.md)
 - [Goldy vs wgpu](./design/comparison.md)
 - [Target Hardware](./design/hardware.md)
+- [Intel and Discrete Macs on Metal](./design/intel-mac-metal.md)
+- [Metal on Intel and AMD Macs: Audit](./design/metal-discrete-audit.md)
 
 # Fondaco Machine (research)
 
