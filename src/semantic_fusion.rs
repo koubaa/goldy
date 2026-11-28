@@ -759,7 +759,8 @@ struct Composition {
     scalars: Vec<(usize, SiteScalar)>,
     /// Each site's operation on the graph's parcels.
     ops: Vec<algebra::Op>,
-    elided_temporaries: HashSet<u32>,
+    /// Scheme-local temporaries eligible for speculative register elision during lowering.
+    candidate_temporaries: Vec<(ParcelId, u32)>,
 }
 
 fn compose(sites: &[(usize, &SemanticSite)], local_temporaries: &HashSet<u32>) -> Result<Composition, FusionRejection> {
@@ -810,7 +811,7 @@ fn compose(sites: &[(usize, &SemanticSite)], local_temporaries: &HashSet<u32>) -
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
     }
-    let mut elided_temporaries = HashSet::new();
+    let mut candidate_temporaries = Vec::new();
     for (at, parcel) in parcels.iter().enumerate() {
         let pid = ParcelId(at as u32);
         if sites.iter().any(|(_, s)| s.private.contains(&parcel.resource)) {
@@ -822,8 +823,8 @@ fn compose(sites: &[(usize, &SemanticSite)], local_temporaries: &HashSet<u32>) -
                 .region()
                 .values()
                 .any(|(_, v)| v.role == Role::Input && v.storage.as_ref().is_some_and(|s| s.parcel == pid));
-            if local_temporaries.contains(&temp) && !read_from_storage && graph.demote(pid) > 0 {
-                elided_temporaries.insert(temp);
+            if local_temporaries.contains(&temp) && !read_from_storage {
+                candidate_temporaries.push((pid, temp));
             }
         }
     }
@@ -833,7 +834,7 @@ fn compose(sites: &[(usize, &SemanticSite)], local_temporaries: &HashSet<u32>) -
         sources,
         scalars,
         ops,
-        elided_temporaries,
+        candidate_temporaries,
     })
 }
 
@@ -869,18 +870,18 @@ pub(crate) fn synthesize(
     resource_limit: usize,
 ) -> Result<SemanticProgram, FusionRejection> {
     let Composition {
-        graph,
+        graph: base_graph,
         parcels,
         sources,
         scalars,
         ops,
-        elided_temporaries,
+        candidate_temporaries,
     } = compose(sites, local_temporaries)?;
-    let lowered = match arithmetic {
-        crate::ArithmeticPolicy::MatchRecorded => algebra::lower_graph(&graph, &sources, target, precision),
-        crate::ArithmeticPolicy::Relaxed => algebra::lower_graph_relaxed(&graph, &sources, target, precision),
-    }
-    .map_err(|e| match e {
+    let lower_graph = |g: &Graph| match arithmetic {
+        crate::ArithmeticPolicy::MatchRecorded => algebra::lower_graph(g, &sources, target, precision),
+        crate::ArithmeticPolicy::Relaxed => algebra::lower_graph_relaxed(g, &sources, target, precision),
+    };
+    let map_lower_err = |e: algebra::LowerError| match e {
         algebra::LowerError::Contraction { .. } => FusionRejection::Contraction {
             stage: sites[contracted_stage(&ops, target.contraction)].0,
         },
@@ -888,7 +889,41 @@ pub(crate) fn synthesize(
             stage: sites.len() - 1,
             reason: e.to_string(),
         },
-    })?;
+    };
+    let (graph, lowered, elided_temporaries) = if candidate_temporaries.is_empty() {
+        let lowered = lower_graph(&base_graph).map_err(map_lower_err)?;
+        (base_graph, lowered, HashSet::new())
+    } else {
+        let mut all_graph = base_graph.clone();
+        let mut all_elided = HashSet::new();
+        for &(pid, temp) in &candidate_temporaries {
+            if all_graph.demote(pid) > 0 {
+                all_elided.insert(temp);
+            }
+        }
+        match lower_graph(&all_graph) {
+            Ok(lowered) => (all_graph, lowered, all_elided),
+            Err(_) => {
+                // Keep any temporary whose demotion would break schedule lowering (such as
+                // an indexed-gather contraction output whose batch axis feeds an IndexSource),
+                // while still eliding every other temporary in the region.
+                let mut best_lowered = lower_graph(&base_graph).map_err(map_lower_err)?;
+                let mut best_graph = base_graph;
+                let mut elided = HashSet::new();
+                for (pid, temp) in candidate_temporaries {
+                    let mut trial = best_graph.clone();
+                    if trial.demote(pid) > 0 {
+                        if let Ok(lowered) = lower_graph(&trial) {
+                            best_graph = trial;
+                            best_lowered = lowered;
+                            elided.insert(temp);
+                        }
+                    }
+                }
+                (best_graph, best_lowered, elided)
+            }
+        }
+    };
     if lowered.parcels.len() > resource_limit {
         return Err(FusionRejection::ResourceLimit {
             count: lowered.parcels.len(),
