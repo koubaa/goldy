@@ -1447,6 +1447,78 @@ fn cyclic_history_with_row_axes_fuses_exactly() {
     assert_eq!(relaxed.executed_node_count(), 2, "{report:?}");
 }
 
+/// A bounded store writes its rows at a position inside the history and nothing past
+/// it. Fused with the add that produces the rows, into a history whose slot axis is
+/// outermost, it leaves the unfused bits at every position, past the history included.
+#[test]
+fn bounded_store_fuses_and_stores_nothing_past_the_history() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let (groups, per, width) = (2u32, 3u32, 4u32);
+    let rows = TensorShape::from_dims(&[groups, per]).unwrap();
+    let n = (groups * per) as usize;
+    let initial: Vec<f32> = (0..width as usize * n).map(|i| (i as f32 * 0.37).sin()).collect();
+    let bias: Vec<f32> = (0..n).map(|i| 0.5 * i as f32 - 1.0).collect();
+    let source_at = |position: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as u32).wrapping_add(position.wrapping_mul(7)) as f32 * 0.61).cos())
+            .collect()
+    };
+
+    let record = |automatic: bool| {
+        let source = Tensor::zeros(&device, rows, TensorDType::F32).unwrap();
+        let bias = Tensor::from_f32(&device, rows, &bias).unwrap();
+        let row = Tensor::zeros(&device, rows, TensorDType::F32).unwrap();
+        let position = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+        let slots = TensorShape::from_dims(&[width, groups, per]).unwrap();
+        let state = Tensor::from_f32(&device, slots, &initial).unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(automatic);
+        let mut rec = kernels.recorder(&mut scheme);
+        rec.add_into("shift", source.view(), bias.view(), row.view()).unwrap();
+        let history = state.view().permute(&[1, 2, 0]).unwrap();
+        rec.store_at("store", row.view(), history, position.view()).unwrap();
+        drop(rec);
+        (scheme, source, position, state, [bias, row])
+    };
+
+    let mut runs = [record(true), record(false)];
+    let mut history = initial.clone();
+    for position in [0, 2, width - 1, width, width + 3, i32::MAX as u32, 1] {
+        let input = source_at(position);
+        if position < width {
+            let slot = &mut history[position as usize * n..][..n];
+            for ((h, x), b) in slot.iter_mut().zip(&input).zip(&bias) {
+                *h = x + b;
+            }
+        }
+        let mut bits = Vec::new();
+        for (scheme, source, at, state, _) in &mut runs {
+            source.buffer().write(0, bytemuck::cast_slice(&input)).unwrap();
+            at.buffer().write(0, bytemuck::bytes_of(&position)).unwrap();
+            if position == 0 && scheme.automatic_fusion() {
+                settle_fusion(scheme);
+            }
+            let got = read_f32(scheme, state.buffer());
+            assert_eq!(got, history, "position {position}");
+            bits.push(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        }
+        assert_eq!(bits[0], bits[1], "position {position}");
+    }
+    let [(fused, ..), (plain, ..)] = &runs;
+    let report = fused.fusion_report();
+    // A compiler that may rewrite any arithmetic fuses nothing exactly.
+    let (regions, executed): (&[&[&str]], usize) = match device.capabilities().fp_contraction {
+        FpContraction::Anywhere => (&[], 2),
+        _ => (&[&["shift", "store"]], 1),
+    };
+    assert_eq!(promoted_regions(&report), regions, "{report:?}");
+    assert_eq!(fused.executed_node_count(), executed, "{report:?}");
+    assert_eq!(plain.executed_node_count(), 2);
+}
+
 /// The cyclic entry points check every view before recording, and name the view at fault.
 #[test]
 fn cyclic_entry_points_validate_before_recording() {
@@ -1508,6 +1580,15 @@ fn cyclic_entry_points_validate_before_recording() {
         rec.cyclic_store_at("store", narrow_out.view(), flat_state.view(), p),
     );
     rejects("position", rec.cyclic_store_at("store", s, h, two_positions.view()));
+
+    rejects("state", rec.store_at("store", s, broadcast_state, p));
+    rejects("src", rec.store_at("store", short.view(), h, p));
+    rejects(
+        "row axis",
+        rec.store_at("store", narrow_out.view(), flat_state.view(), p),
+    );
+    rejects("zero width", rec.store_at("store", s, empty_state.view(), p));
+    rejects("position", rec.store_at("store", s, h, float_position.view()));
 
     rejects("out", rec.cyclic_window_dot_at("dot", w, h, p, broadcast_out));
     rejects("weight", rec.cyclic_window_dot_at("dot", wide_weight.view(), h, p, o));
