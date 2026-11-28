@@ -3,11 +3,11 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, CyclicDotF32Kernel, CyclicStoreF32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, StoreAtF32Kernel,
-    UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX,
-    OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN,
-    OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
-    OP_TANH,
+    CopyU32Kernel, CyclicDotF32Kernel, CyclicStoreF32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel,
+    StoreAtF32Kernel, UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL,
+    OP_LOG, OP_MAX, OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX,
+    OP_RMIN, OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB,
+    OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::semantic;
 use super::shape::TensorShape;

@@ -1583,7 +1583,10 @@ fn cyclic_entry_points_validate_before_recording() {
 
     rejects("state", rec.store_at("store", s, broadcast_state, p));
     rejects("src", rec.store_at("store", short.view(), h, p));
-    rejects("row axis", rec.store_at("store", narrow_out.view(), flat_state.view(), p));
+    rejects(
+        "row axis",
+        rec.store_at("store", narrow_out.view(), flat_state.view(), p),
+    );
     rejects("zero width", rec.store_at("store", s, empty_state.view(), p));
     rejects("position", rec.store_at("store", s, h, float_position.view()));
 
