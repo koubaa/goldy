@@ -502,6 +502,28 @@ fn reduce_sum_and_softmax() {
 }
 
 #[test]
+fn max_and_min_reduce_into_a_kept_or_dropped_axis() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let x = Tensor::from_f32(&device, TensorShape::matrix(2, 3), &[1.0, -5.0, 4.0, -2.0, -7.0, -3.0]).unwrap();
+    let kept = Tensor::zeros(&device, TensorShape::matrix(2, 1), TensorDType::F32).unwrap();
+    let dropped = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    let mut rec = kernels.recorder(&mut scheme);
+    rec.max_reduce_into("max", x.view(), 1, kept.view()).unwrap();
+    rec.min_reduce_into("min", x.view(), 0, dropped.view()).unwrap();
+    let wrong = Tensor::zeros(&device, TensorShape::vector(3), TensorDType::F32).unwrap();
+    let err = expect_record_err(rec.max_reduce_into("max", x.view(), 1, wrong.view()));
+    assert!(err.to_string().contains("numel"), "{err}");
+    drop(rec);
+    assert_eq!(scheme.ir_node_count(), 2, "a rejected reduction records nothing");
+    assert_eq!(read_f32(&mut scheme, kept.buffer()), vec![4.0, -2.0]);
+    assert_eq!(read_f32(&mut scheme, dropped.buffer()), vec![-2.0, -7.0, -3.0]);
+}
+
+#[test]
 fn gather_1d() {
     let _gpu = gpu_lock();
     let device = runtime();

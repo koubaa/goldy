@@ -458,6 +458,44 @@ fn a_scale_updated_in_place() {
 }
 
 #[test]
+fn reductions_over_entries_that_hold_the_identity() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    // Each row's last columns hold -1e30, the identity of its max, so they weigh
+    // exp(-1e30 - max) = 0 in the row's sum: a fixed-width reduction over a padded axis.
+    let (rows, cols, live) = (8, 12, 8);
+    let mut x = data(9, rows * cols);
+    for row in x.chunks_mut(cols as usize) {
+        row[live as usize..].fill(-1.0e30);
+    }
+    let init = [
+        Init::F32(TensorShape::matrix(rows, cols), x),
+        Init::F32(TensorShape::matrix(rows, 1), vec![0.0; rows as usize]),
+        Init::F32(TensorShape::matrix(rows, cols), vec![0.0; (rows * cols) as usize]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+        Init::F32(TensorShape::vector(rows), vec![0.0; rows as usize]),
+    ];
+    let scheme = fused_matches_unfused(
+        &device,
+        &init,
+        |rec, t| {
+            let (x, top, shifted) = (t[0].view(), t[1].view(), t[2].view());
+            let (total, low, out) = (t[3].view(), t[4].view(), t[5].view());
+            rec.max_reduce_into("max", x, 1, top)?;
+            rec.sub_into("shift", x, top, shifted)?;
+            rec.exp_into("exp", shifted, shifted)?;
+            rec.sum_into("sum", shifted, 1, total)?;
+            rec.min_reduce_into("min", x.narrow(1, 0, live)?, 1, low)?;
+            rec.div_into("ratio", total, low, out)?;
+            Ok((Vec::new(), Vec::new()))
+        },
+        3,
+    );
+    assert_one_semantic_region(&scheme, 6);
+}
+
+#[test]
 fn tanh_and_sigmoid_fuse() {
     let _gpu = gpu_lock();
     let device = runtime();
