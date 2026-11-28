@@ -72,28 +72,6 @@ fn collect_bindless_slots_from_gpu_commands(
             GpuCommand::BindResourcesRaw { indices, .. } => {
                 slots.extend(indices.iter().copied().map(DeferredSlot::CbvSrvUav));
             }
-            GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                let layout_size = std::mem::size_of::<PushLayout>();
-                for i in 0..*count as usize {
-                    let base = i * DISPATCH_BATCH_STRIDE;
-                    if base + layout_size <= arg_data.len() {
-                        let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                        // Skip zero entries: PushLayout::bindless is a fixed [u16; N]
-                        // array default-initialised to 0. Positions the caller did not
-                        // fill remain 0 and do not correspond to an actual binding.
-                        // Tracking them would create spurious slot_last_seen[0] entries
-                        // on every batch submit, causing CbvSrvUav(0) reclamation to
-                        // wait for unrelated contexts. BindResourcesRaw/Typed are not
-                        // filtered because those vecs contain only the slots the caller
-                        // explicitly provided.
-                        for &idx in &layout.bindless {
-                            if idx != 0 {
-                                slots.push(DeferredSlot::CbvSrvUav(idx as u32));
-                            }
-                        }
-                    }
-                }
-            }
             _ => {}
         }
     }

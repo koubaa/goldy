@@ -290,7 +290,7 @@ pub(super) fn create_with_depth(bundle: VulkanGraphicsPipelineCreateBundle<'_>) 
 
     let all_layouts = vec![bindless_set_layout];
 
-    // Vulkan push constant range for the packed 128-byte PushLayout
+    // Vulkan push constant range for the packed PushLayout.
     let slot_range = vk::PushConstantRange {
         stage_flags: vk::ShaderStageFlags::ALL,
         offset: 0,

@@ -408,8 +408,8 @@ pub(crate) enum RenderCommand {
     /// Bind resource slots with raw u32 indices (fully bindless mode).
     /// Use this for textures/samplers or when you already have the indices.
     ///
-    /// `indices` go to region A (bindless, packed as u16).
-    /// `user` go to region B (user scalars, full u32).
+    /// `indices` go to the frame table.
+    /// `user` go to push-layout user words as full `u32`s.
     ///
     /// **Prefer [`RenderCommand::BindResourcesTyped`]** — the raw form
     /// bypasses per-slot category validation.
@@ -557,8 +557,8 @@ pub(crate) enum GpuCommand {
     SetPipeline(ComputePipelineHandle),
     /// Bind resource slots with raw u32 indices (for textures/samplers or mixed resources).
     ///
-    /// `indices` go to region A (bindless, packed as u16).
-    /// `user` go to region B (user scalars, full u32).
+    /// `indices` go to the frame table.
+    /// `user` go to push-layout user words as full `u32`s.
     BindResourcesRaw {
         indices: Vec<u32>,
         user: Vec<u32>,

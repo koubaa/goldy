@@ -108,22 +108,21 @@ float4 fs_main(MyUniforms cfg, FullscreenVarying input) : SV_Target {
 
 The transform (implemented in `slang/virtual_main.rs`) runs before Slang compilation and performs three operations:
 
-1. **Generates a wrapper function** with the real `[shader("...")]` attribute and a fixed 16-word push-constant signature (mesh wrappers also declare `out vertices` / `out indices`).
+1. **Generates a wrapper function** with the real `[shader("...")]` attribute and fixed-offset push-constant words (mesh wrappers also declare `out vertices` / `out indices`).
 2. **Renames the user function** to `_goldy_user_<name>` (or `goldy_mesh` / `goldy_amplification` for those stages) so both can coexist.
 3. **Removes the `[goldy_*]` attribute** and `[numthreads]` / `[outputtopology]` from the renamed helper (they live on the generated wrapper).
 
 ### Push Constant Layout
 
-The generated entry point always declares a fixed signature regardless of how many parameters the user function has. The whole block is 128 bytes:
+The generated entry point uses the same offsets regardless of how many parameters the user function has. The whole block is 96 bytes:
 
 ```
-Words  0–7:  _bw0.._bw7   — 16 × u16 of the unused bindless region
-Words  8–15: _uw0.._uw7   — 8 × u32 user scalar parameters
-Words 16–18: _rs0.._rs2   — frame-table dispatch base and table slots
-Words 19–31: _rs3..       — up to 13 tensor launch words
+Words  0–7:  _uw0.._uw7   — 8 × u32 user scalar parameters
+Words  8–10: _rs0.._rs2   — frame-table dispatch base and table slots
+Words 11–23: _rs3.._rs15  — up to 13 tensor launch words
 ```
 
-Shaders do not read `_bw*`. Resource indices live in the frame table (`goldy_frame_table_index`). A dispatch may bind up to 24 resources. On WebGPU the cap is the device's `maxStorageBuffersPerShaderStage` when that is smaller. The unused bindless region stays so the user-word and launch-word offsets, and the kernel ABI, do not move.
+Resource indices live in the frame table (`goldy_frame_table_index`), so they consume no push words. A dispatch may bind up to 24 resources. On WebGPU the cap is the device's `maxStorageBuffersPerShaderStage` when that is smaller. Kernels with no tensor metadata omit the unused trailing launch-word parameters while preserving every declared word's offset.
 
 ### Before and After
 
@@ -142,11 +141,13 @@ void cs_main(TimeUniforms cfg, Scattered<uint> data, ThreadId id) {
 ```hlsl
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint _bw0, ..., uniform uint _bw7,
-             uniform uint _uw0, ..., uniform uint _uw7,
+void cs_main(uniform uint _uw0, ..., uniform uint _uw7,
+             uniform uint _rs0, uniform uint _rs1, uniform uint _rs2,
              uint3 _sv0 : SV_DispatchThreadID) {
-    TimeUniforms cfg = goldy_broadcast<TimeUniforms>(_bw0 & 0xFFFFu);
-    Scattered<uint> data = goldy_scattered<uint>((_bw0 >> 16u) & 0xFFFFu);
+    TimeUniforms cfg = goldy_broadcast<TimeUniforms>(
+        goldy_frame_table_index(_rs0, 0u, _rs1, _rs2));
+    Scattered<uint> data = goldy_scattered<uint>(
+        goldy_frame_table_index(_rs0, 1u, _rs1, _rs2));
     ThreadId id = ThreadId(_sv0);
     _goldy_user_cs_main(cfg, data, id);
 }

@@ -1747,18 +1747,6 @@ impl WebGpuBackend {
     fn collect_webgpu_slots_from_gpu_command(command: &GpuCommand, slots: &mut Vec<u32>) {
         match command {
             GpuCommand::BindResourcesRaw { indices, .. } => slots.extend(indices.iter().copied()),
-            GpuCommand::DispatchBatch { arg_data, count, .. } => {
-                let layout_size = std::mem::size_of::<PushLayout>();
-                for i in 0..*count as usize {
-                    let base = i * DISPATCH_BATCH_STRIDE;
-                    if base + layout_size <= arg_data.len() {
-                        let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                        for &idx in &layout.bindless {
-                            slots.push(u32::from(idx));
-                        }
-                    }
-                }
-            }
             _ => {}
         }
     }
