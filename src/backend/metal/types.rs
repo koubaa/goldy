@@ -690,6 +690,8 @@ pub(crate) struct MetalSubmissionContext {
     /// resubmit clones allocation-free. Multiple schemes can share one context without
     /// evicting each other because each fingerprint is a distinct map key.
     pub retained_graphs: std::collections::HashMap<u64, MetalRetainedGraph>,
+    /// Context-local residency snapshot slot invalidated by `LogicalDevice::residency`.
+    pub residency: super::residency::ContextResidencySlot,
 }
 
 /// Retained graph IR plus bindless slots baked at record time.
@@ -792,6 +794,8 @@ pub(crate) struct LogicalDevice {
     pub queue_lock: Arc<Mutex<()>>,
     /// Async FIFO worker for `command_buffer.commit()` (render thread enqueues, worker runs).
     pub submission_worker: Arc<crate::backend::submission_worker::SubmissionWorker>,
+    /// Incrementally maintained `useResources:count:usage:` sets subscribed to resource tables.
+    pub residency: super::residency::DeviceResidency,
 }
 
 impl LogicalDevice {
@@ -1688,7 +1692,7 @@ pub(super) struct MetalState {
     pub next_device_handle: DeviceHandle,
     pub contexts: std::collections::HashMap<super::ContextHandle, SharedMetalSubmissionContext>,
     pub next_context_id: super::ContextHandle,
-    pub buffers: std::collections::HashMap<BufferHandle, BufferState>,
+    pub buffers: crate::observer::ObservableTable<BufferHandle, BufferState, DeviceHandle>,
     pub next_buffer_handle: BufferHandle,
     pub shaders: std::collections::HashMap<ShaderHandle, ShaderState>,
     pub next_shader_handle: ShaderHandle,
@@ -1700,11 +1704,11 @@ pub(super) struct MetalState {
     pub next_render_target_handle: RenderTargetHandle,
     pub surfaces: std::collections::HashMap<SurfaceHandle, SurfaceState>,
     pub next_surface_handle: SurfaceHandle,
-    pub textures: std::collections::HashMap<TextureHandle, TextureState>,
+    pub textures: crate::observer::ObservableTable<TextureHandle, TextureState, DeviceHandle>,
     pub next_texture_handle: TextureHandle,
     pub samplers: std::collections::HashMap<SamplerHandle, SamplerState_>,
     pub next_sampler_handle: SamplerHandle,
-    pub accels: std::collections::HashMap<AccelerationStructureHandle, AccelState>,
+    pub accels: crate::observer::ObservableTable<AccelerationStructureHandle, AccelState, DeviceHandle>,
     pub next_accel_handle: AccelerationStructureHandle,
     /// `None` after release via [`crate::runtime::Runtime::release_idle_shader_compiler`].
     /// Re-created automatically on demand when a shader must be lazily compiled.

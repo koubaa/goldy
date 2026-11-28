@@ -233,7 +233,7 @@ pub(crate) fn integer_value(src: TensorView<'_>, dst: TensorView<'_>) -> Option<
     let shape = dims(dst)?;
     let mut s = SiteBuilder::default();
     let source = IndexSource {
-        parcel: s.parcel(SiteParcel::of(src.buffer().whole())?),
+        parcel: s.parcel(src.site_parcel()?),
         element: Affine::constant(i64::try_from(src.storage_offset()).ok()?),
         element_type,
         add: 0,

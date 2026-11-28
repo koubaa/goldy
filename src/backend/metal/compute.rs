@@ -517,13 +517,25 @@ pub(super) fn destroy(state: &mut MetalState, pipeline_handle: ComputePipelineHa
 /// Using the batched form reduces Objective-C msg_send overhead from O(N) per encoder open
 /// to O(1) regardless of how many resources the device owns.
 ///
+fn resolve_context_residency(
+    state: &MetalState,
+    ctx: ContextHandle,
+    logical_device: &super::types::LogicalDevice,
+) -> Arc<super::residency::ResidencyLists> {
+    if let Some(sc_arc) = state.contexts.get(&ctx) {
+        sc_arc.lock().unwrap().residency.resolve(&logical_device.residency)
+    } else {
+        logical_device.residency.snapshot()
+    }
+}
+
 /// `pass` carries counter sample attachments when dispatch timing is on.
 pub(super) fn begin_compute_encoder<'a>(
     command_buffer: &'a mtl::CommandBufferRef,
     pass: Option<&mtl::ComputePassDescriptorRef>,
-    state: &MetalState,
+    _state: &MetalState,
     logical_device: &super::types::LogicalDevice,
-    device_handle: DeviceHandle,
+    residency: &super::residency::ResidencyLists,
 ) -> &'a mtl::ComputeCommandEncoderRef {
     super::frame_table::stage_bindless_uploads(logical_device, command_buffer);
     let encoder = match pass {
@@ -541,50 +553,15 @@ pub(super) fn begin_compute_encoder<'a>(
         .unwrap()
         .use_heaps_for_compute(encoder);
 
-    // Collect resource refs by usage tier then call use_resources once per tier,
-    // replacing one ObjC msg_send per resource with at most three total.
-    // Safety: BufferRef/TextureRef are subclasses of Resource in the Metal ObjC
-    // hierarchy, so transmuting the reference type is sound (same pointer, same layout).
-    // Withdraw staging is only ever a blit operand, bound directly. A view shares its
-    // parent's `MTLBuffer`, so the list is deduplicated by object: the driver's cost is
-    // per entry.
-    let mut rw_refs: Vec<&mtl::ResourceRef> = Vec::with_capacity(state.buffers.len());
-    let mut ro_refs: Vec<&mtl::ResourceRef> = Vec::new();
-    for buf_state in state.buffers.values() {
-        if buf_state.device_handle == device_handle && !buf_state.is_withdraw_staging {
-            let buf_ref: &mtl::BufferRef = &buf_state.buffer;
-            rw_refs.push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
-        }
-    }
-    rw_refs.sort_unstable_by_key(|r| std::ptr::from_ref(*r));
-    rw_refs.dedup_by_key(|r| std::ptr::from_ref(*r));
-    for tex_state in state.textures.values() {
-        if tex_state.device_handle == device_handle {
-            let tex_ref: &mtl::TextureRef = &tex_state.texture;
-            let res_ref = unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) };
-            if tex_state.is_storage_image {
-                rw_refs.push(res_ref);
-            } else {
-                ro_refs.push(res_ref);
-            }
-        }
-    }
-    if !rw_refs.is_empty() {
-        encoder.use_resources(&rw_refs, mtl::MTLResourceUsage::Read | mtl::MTLResourceUsage::Write);
-    }
-    if !ro_refs.is_empty() {
-        encoder.use_resources(&ro_refs, mtl::MTLResourceUsage::Read);
-    }
-    for accel in state.accels.values() {
-        if accel.device_handle == device_handle {
-            let as_ref: &mtl::AccelerationStructureRef = &accel.accel;
-            let res_ref = unsafe { std::mem::transmute::<&mtl::AccelerationStructureRef, &mtl::ResourceRef>(as_ref) };
-            encoder.use_resources(&[res_ref], mtl::MTLResourceUsage::Read);
-        }
+    // Safety: `_state: &MetalState` guarantees no concurrent resource-table removals can
+    // release any backing Objective-C `MTLResource` referenced by `residency`.
+    unsafe {
+        residency.declare_for_compute(encoder);
     }
 
     // Frame-table device table (not in state.buffers).  Selector is intentionally
     // omitted: Metal shaders use absolute offsets via `_reserved[0]`, not the selector.
+    const _: () = assert!(std::mem::size_of::<&mtl::ResourceRef>() == std::mem::size_of::<usize>());
     {
         let ft = logical_device.frame_table.lock().unwrap();
         let tbl_ref: &mtl::BufferRef = ft.table_buffer();
@@ -637,7 +614,7 @@ pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
     state: &MetalState,
     command_buffer: &mtl::CommandBufferRef,
     logical_device: &super::types::LogicalDevice,
-    device_handle: DeviceHandle,
+    residency: &super::residency::ResidencyLists,
     commands: &[C],
     belt_slices: &[(mtl::Buffer, u64)],
     texture_scratches: &[TextureStagingEntry],
@@ -715,13 +692,7 @@ pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
                     super::api_log::log_encoder_open("compute");
                 }
                 let pass = timer.as_mut().and_then(|t| t.next_pass());
-                let enc = begin_compute_encoder(
-                    command_buffer,
-                    pass.as_deref(),
-                    state,
-                    logical_device,
-                    device_handle,
-                );
+                let enc = begin_compute_encoder(command_buffer, pass.as_deref(), state, logical_device, residency);
                 if let Some(pipeline) = current_pipeline {
                     enc.set_compute_pipeline_state(&pipeline.pipeline);
                 }
@@ -1687,6 +1658,7 @@ fn submit_inner(
 
     let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let residency = resolve_context_residency(state, ctx, ld);
         let mut belt_idx = 0usize;
         let mut tex_idx = 0usize;
         let mut accel_uploads = Vec::new();
@@ -1694,7 +1666,7 @@ fn submit_inner(
             state,
             command_buffer_ref,
             ld,
-            device_handle,
+            &residency,
             commands,
             &belt_slices,
             &texture_scratches,
@@ -1895,6 +1867,7 @@ fn submit_graph_inner(
     // record_commands_to_buffer so they consume the single pre-pass result.
     let mut accel_uploads = {
         let ld = state.devices.get(&device_handle).context("Invalid device handle")?;
+        let residency = resolve_context_residency(state, ctx, ld);
 
         let mut compute_batch: Vec<&GpuCommand> = Vec::with_capacity(all_compute_cmds.len());
         let mut belt_idx = 0usize;
@@ -1917,7 +1890,7 @@ fn submit_graph_inner(
                             state,
                             command_buffer_ref,
                             ld,
-                            device_handle,
+                            &residency,
                             &compute_batch,
                             &belt_slices,
                             &texture_scratches,
@@ -1976,7 +1949,7 @@ fn submit_graph_inner(
                 state,
                 command_buffer_ref,
                 ld,
-                device_handle,
+                &residency,
                 &compute_batch,
                 &belt_slices,
                 &texture_scratches,
