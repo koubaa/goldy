@@ -195,6 +195,29 @@ fn maps_and_reductions_expand_element_wise() {
 }
 
 #[test]
+fn non_finite_reduction_identities_are_bit_pattern_constants() {
+    for (reduce_op, bits) in [
+        (ReduceOp::Max, f32::NEG_INFINITY.to_bits()),
+        (ReduceOp::Min, f32::INFINITY.to_bits()),
+    ] {
+        let mut graph = Graph::new();
+        graph
+            .push(op(OpKind::Reduction(Reduction {
+                op: reduce_op,
+                order: ReduceOrder::Sequential,
+                axis: 0,
+                input: operand("x", 0, &[4]),
+                out: operand("out", 1, &[1]),
+                finish: Term::arg(0),
+            })))
+            .unwrap();
+        let slang = source(&lower(graph.region(), &[]).unwrap());
+        assert!(slang.contains(&format!("asfloat({bits}u)")), "{slang}");
+        assert!(!slang.contains("/ 0.0"), "{slang}");
+    }
+}
+
+#[test]
 fn a_graph_forwards_between_operations() {
     let m = 9;
     let mut graph = Graph::new();

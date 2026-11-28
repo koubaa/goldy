@@ -159,6 +159,15 @@ The runtime may transform a scheme before or during execution if observable beha
 
 These are algorithms over schemes (§9). Merchants express natural granularity; the runtime reshapes for hardware. Final parcel states are the invariant.
 
+Floating-point arithmetic is the explicit exception to bitwise parcel-state
+equivalence. Unless a scheme opts into a relaxed arithmetic policy, stored
+floating-point bits remain observable. An explicit relaxed policy permits the
+runtime to reassociate, contract, and substitute reciprocal multiplication
+within the equivalence that policy defines, including across dispatch boundaries
+removed by fusion. The opt-in does not weaken partial ordering, ownership,
+exchange constraints, parcel identity, or the observability of non-floating
+parcel state.
+
 ## 9. Algorithms over schemes
 
 A scheme is first-class data. **Execution** — producing parcel states consistent with the partial order — is the defining algorithm, but not the only one.
