@@ -212,18 +212,13 @@ jobs:
           echo "Slang libraries:"
           ls -la "$SLANG_DIR" || echo "Directory not found"
 
-      - name: Cache cargo
-        uses: actions/cache@v5
+      # Keep reusable dependency artifacts without archiving the full incremental
+      # workspace target tree; the Metal-specific key avoids cross-job churn.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-metal-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-metal-
+          shared-key: metal
+          cache-bin: false
 
       - name: Debug mesh_dispatch (Metal)
         env:
