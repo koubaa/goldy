@@ -1,8 +1,9 @@
 //! Pipeline and shader bytecode cache integration checks.
-#![cfg(any(feature = "vulkan", feature = "dx12"))]
 
 use goldy::shader_cache::{ShaderBytecodeDiskCache, GOLDY_SHADER_CACHE_MAGIC};
-use goldy::{types::BackendType, ComputePipeline, Instance, RequestAdapterOptions, RuntimeDescriptor, ShaderModule};
+#[cfg(feature = "vulkan")]
+use goldy::types::BackendType;
+use goldy::{ComputePipeline, Instance, RequestAdapterOptions, RuntimeDescriptor, ShaderModule};
 /// Simple compute shader (same intent as [`compute_integration::DOUBLE_SHADER`]).
 const CACHE_TEST_COMPUTE: &str = r#"
 import goldy_exp;
@@ -80,9 +81,10 @@ fn vk_pipeline_cache_survives_reload() {
     let _pipeline2 = ComputePipeline::new(&device2, &shader2).expect("compute pipeline after reload");
 }
 
-/// Compiled Slang shaders flush `shader_cache.bin.zst` on [`Runtime`] / compiler teardown.
+/// Compiled Slang shaders flush `shader_cache.bin.zst` on runtime/compiler teardown,
+/// and a fresh runtime can load the same file.
 #[test]
-fn shader_cache_file_written_after_compile() {
+fn shader_cache_survives_runtime_reload() {
     let Some(cache_root) = dirs::cache_dir() else {
         return;
     };
@@ -106,9 +108,35 @@ fn shader_cache_file_written_after_compile() {
     drop(_pipeline);
     drop(shader);
     drop(device);
-    drop(instance);
 
     assert!(path.exists(), "expected Slang bytecode cache file at {:?}", path);
+    let first = ShaderBytecodeDiskCache::new_at_path(path.clone());
+    assert!(
+        first.version_ok_on_disk(),
+        "freshly written cache has the current envelope"
+    );
+    assert!(!first.is_empty(), "compiled shader was persisted");
+    let first_len = first.len();
+    drop(first);
+
+    let device2 = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .and_then(|a| a.request_runtime(&RuntimeDescriptor::default()))
+        .expect("second runtime");
+    let shader2 = ShaderModule::from_slang(&device2, CACHE_TEST_COMPUTE).expect("compile from persisted cache");
+    let pipeline2 = ComputePipeline::new(&device2, &shader2).expect("pipeline after cache reload");
+    drop(pipeline2);
+    drop(shader2);
+    drop(device2);
+    drop(instance);
+
+    let second = ShaderBytecodeDiskCache::new_at_path(path);
+    assert!(second.version_ok_on_disk(), "reloaded cache keeps the current envelope");
+    assert!(
+        second.len() >= first_len,
+        "reloading and compiling must not lose cache entries: before={first_len}, after={}",
+        second.len()
+    );
 }
 
 /// Wrong version line in envelope → cold [`ShaderBytecodeDiskCache`] (does not corrupt process cache).

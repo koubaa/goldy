@@ -6,7 +6,7 @@
 mod submission;
 
 use goldy::{
-    compute, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions,
+    compute, ArithmeticPolicy, BackendType, BufferKind, DepositTarget, Instance, MemoryExchange, RequestAdapterOptions,
     RuntimeDescriptor, Scheme, StructuredBufferElement, TextureFlags, TextureFormat, TextureKind,
 };
 use std::sync::Arc;
@@ -294,6 +294,38 @@ fn main() {
                 format!("{}\n{}", plasma.type_decls[0], read_plasma_uniforms::CANONICAL_SOURCE)
             );
             Ok(())
+        }),
+        libtest_mimic::Trial::test("metal_arithmetic_variants_materialize_on_demand", {
+            let device = Arc::clone(&device);
+            move || {
+                if device.backend_type() != BackendType::Metal {
+                    return Ok(());
+                }
+                let ctx = device.create_context()?;
+                let x = device.acquire_buffer_with_data(&[1.0f32], BufferKind::Scattered)?;
+                let y = device.acquire_buffer_with_data(&[2.0f32], BufferKind::Scattered)?;
+
+                let strict = saxpy::Kernel::prepare(&device)?;
+                assert!(strict.is_pipeline_materialized(ArithmeticPolicy::MatchRecorded));
+                assert!(!strict.is_pipeline_materialized(ArithmeticPolicy::Relaxed));
+                let mut relaxed_scheme = Scheme::new(&ctx);
+                relaxed_scheme.set_arithmetic_policy(ArithmeticPolicy::Relaxed);
+                strict
+                    .record(&mut relaxed_scheme, "relaxed", &x, &y, 2.0)
+                    .groups([1, 1, 1]);
+                assert!(strict.is_pipeline_materialized(ArithmeticPolicy::Relaxed));
+
+                let relaxed = saxpy::Kernel::prepare_for_policy(&device, ArithmeticPolicy::Relaxed)?;
+                assert!(relaxed.is_pipeline_materialized(ArithmeticPolicy::Relaxed));
+                assert!(!relaxed.is_pipeline_materialized(ArithmeticPolicy::MatchRecorded));
+                let mut switched = Scheme::new(&ctx);
+                switched.set_arithmetic_policy(ArithmeticPolicy::Relaxed);
+                relaxed.record(&mut switched, "switch", &x, &y, 2.0).groups([1, 1, 1]);
+                assert!(!relaxed.is_pipeline_materialized(ArithmeticPolicy::MatchRecorded));
+                switched.set_arithmetic_policy(ArithmeticPolicy::MatchRecorded);
+                assert!(relaxed.is_pipeline_materialized(ArithmeticPolicy::MatchRecorded));
+                Ok(())
+            }
         }),
         libtest_mimic::Trial::test("rust_kernel_workgroup_sum_gpu", {
             let device = Arc::clone(&device);

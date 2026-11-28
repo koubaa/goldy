@@ -141,8 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their composed or semantic fused replacements. On Metal, `MatchRecorded` uses safe
   arithmetic transformations with fast floating-point functions; `Relaxed` permits fast
   arithmetic within kernels and across boundaries fusion removes. Authored compute and
-  graphics shaders are unchanged. `FusionArithmetic` and the former Scheme method names
-  remain as deprecated aliases.
+  graphics shaders are unchanged. Metal materializes only the initially selected variant;
+  the other is compiled on first use. `prepare_kernel_for_policy`, generated kernels'
+  `prepare_for_policy`, and `TensorKernels::new_for_policy` let callers select the initial
+  variant. `FusionArithmetic` and the former Scheme method names remain as deprecated aliases.
 
 - **`matmul_indexed_batch_into` reads strided F32 slabs** — an F32 weight needs only
   packed rows, so a narrowed run of rows of a `[slabs, n, k]` tensor (one half of each

@@ -423,6 +423,14 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
             impl #kernel_struct {
                 /// Compile (or hit the shader cache) and create a device-scoped pipeline.
                 pub fn prepare(device: &::goldy::Runtime) -> ::core::result::Result<Self, ::goldy::GoldyError> {
+                    Self::prepare_for_policy(device, ::goldy::ArithmeticPolicy::MatchRecorded)
+                }
+
+                /// Compile the selected arithmetic policy; materialize the other on first use.
+                pub fn prepare_for_policy(
+                    device: &::goldy::Runtime,
+                    policy: ::goldy::ArithmeticPolicy,
+                ) -> ::core::result::Result<Self, ::goldy::GoldyError> {
                     let definition = definition()?;
                     let mut canonical_slang = ::std::string::String::new();
                     for decl in &definition.type_decls {
@@ -445,7 +453,8 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                         abi_version: #abi_version,
                         definition: Some(definition),
                     };
-                    let prepared = ::goldy::kernel::prepare_kernel(device, def).map_err(::goldy::GoldyError::Backend)?;
+                    let prepared = ::goldy::kernel::prepare_kernel_for_policy(device, def, policy)
+                        .map_err(::goldy::GoldyError::Backend)?;
                     Ok(Self { prepared })
                 }
 
@@ -473,9 +482,31 @@ fn expand_fn(args: ComputeArgs, func: ItemFn) -> Result<TokenStream, Error> {
                     self.prepared.pipeline_arc_for(policy)
                 }
 
+                #[doc(hidden)]
+                pub fn try_pipeline_arc_for(
+                    &self,
+                    policy: ::goldy::ArithmeticPolicy,
+                ) -> ::core::result::Result<
+                    ::std::sync::Arc<::goldy::ComputePipeline>,
+                    ::goldy::GoldyError,
+                > {
+                    self.prepared.try_pipeline_arc_for(policy).map_err(::goldy::GoldyError::Backend)
+                }
+
+                /// Whether this policy's pipeline has already been materialized.
+                #[doc(hidden)]
+                pub fn is_pipeline_materialized(&self, policy: ::goldy::ArithmeticPolicy) -> bool {
+                    self.prepared.is_pipeline_materialized(policy)
+                }
+
                 /// Structured ABI used to prepare this kernel.
                 pub fn def(&self) -> &::goldy::kernel::KernelDef {
                     self.prepared.def()
+                }
+
+                #[doc(hidden)]
+                pub fn into_prepared(self) -> ::goldy::kernel::PreparedKernel {
+                    self.prepared
                 }
             }
         }

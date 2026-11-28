@@ -881,26 +881,25 @@ fn bind_operand(
 }
 
 pub(crate) struct StdlibMatMulPipelines {
-    match_recorded: Arc<ComputePipeline>,
-    relaxed: Arc<ComputePipeline>,
+    kernel: crate::kernel::PreparedKernel,
 }
 
 impl StdlibMatMulPipelines {
-    pub(crate) fn select(&self, policy: crate::ArithmeticPolicy) -> Arc<ComputePipeline> {
-        match policy {
-            crate::ArithmeticPolicy::MatchRecorded => Arc::clone(&self.match_recorded),
-            crate::ArithmeticPolicy::Relaxed => Arc::clone(&self.relaxed),
-        }
+    pub(crate) fn select(&self, policy: crate::ArithmeticPolicy) -> anyhow::Result<Arc<ComputePipeline>> {
+        self.kernel.try_pipeline_arc_for(policy)
     }
 }
 
-pub(crate) fn prepare_stdlib(runtime: &Runtime, kind: MatMulFallback) -> anyhow::Result<StdlibMatMulPipelines> {
+pub(crate) fn prepare_stdlib(
+    runtime: &Runtime,
+    kind: MatMulFallback,
+    policy: crate::ArithmeticPolicy,
+) -> anyhow::Result<StdlibMatMulPipelines> {
     macro_rules! prepare {
         ($kernel:ty) => {{
-            let kernel = <$kernel>::prepare(runtime).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let kernel = <$kernel>::prepare_for_policy(runtime, policy).map_err(|e| anyhow::anyhow!("{e}"))?;
             StdlibMatMulPipelines {
-                match_recorded: kernel.pipeline_arc_for(crate::ArithmeticPolicy::MatchRecorded),
-                relaxed: kernel.pipeline_arc_for(crate::ArithmeticPolicy::Relaxed),
+                kernel: kernel.into_prepared(),
             }
         }};
     }

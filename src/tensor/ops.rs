@@ -79,21 +79,21 @@ pub(crate) struct PreparedOps {
 }
 
 impl PreparedOps {
-    fn prepare(runtime: &Runtime) -> Result<Self, GoldyError> {
+    fn prepare(runtime: &Runtime, policy: crate::ArithmeticPolicy) -> Result<Self, GoldyError> {
         Ok(Self {
-            unary: UnaryF32Kernel::prepare(runtime)?,
-            binary: BinaryF32Kernel::prepare(runtime)?,
-            copy: CopyU32Kernel::prepare(runtime)?,
-            reduce: ReduceF32Kernel::prepare(runtime)?,
-            gather: GatherF32Kernel::prepare(runtime)?,
-            scatter: ScatterF32Kernel::prepare(runtime)?,
-            cyclic_store: CyclicStoreF32Kernel::prepare(runtime)?,
-            cyclic_dot: CyclicDotF32Kernel::prepare(runtime)?,
-            batched: BatchedMatMulKernel::prepare(runtime)?,
-            cast_f32_i32: CastF32I32Kernel::prepare(runtime)?,
-            cast_f32_u32: CastF32U32Kernel::prepare(runtime)?,
-            cast_i32_f32: CastI32F32Kernel::prepare(runtime)?,
-            cast_u32_f32: CastU32F32Kernel::prepare(runtime)?,
+            unary: UnaryF32Kernel::prepare_for_policy(runtime, policy)?,
+            binary: BinaryF32Kernel::prepare_for_policy(runtime, policy)?,
+            copy: CopyU32Kernel::prepare_for_policy(runtime, policy)?,
+            reduce: ReduceF32Kernel::prepare_for_policy(runtime, policy)?,
+            gather: GatherF32Kernel::prepare_for_policy(runtime, policy)?,
+            scatter: ScatterF32Kernel::prepare_for_policy(runtime, policy)?,
+            cyclic_store: CyclicStoreF32Kernel::prepare_for_policy(runtime, policy)?,
+            cyclic_dot: CyclicDotF32Kernel::prepare_for_policy(runtime, policy)?,
+            batched: BatchedMatMulKernel::prepare_for_policy(runtime, policy)?,
+            cast_f32_i32: CastF32I32Kernel::prepare_for_policy(runtime, policy)?,
+            cast_f32_u32: CastF32U32Kernel::prepare_for_policy(runtime, policy)?,
+            cast_i32_f32: CastI32F32Kernel::prepare_for_policy(runtime, policy)?,
+            cast_u32_f32: CastU32F32Kernel::prepare_for_policy(runtime, policy)?,
         })
     }
 }
@@ -112,9 +112,14 @@ pub struct TensorKernels {
 
 impl TensorKernels {
     pub fn new(runtime: &Runtime) -> Result<Self, GoldyError> {
+        Self::new_for_policy(runtime, crate::ArithmeticPolicy::MatchRecorded)
+    }
+
+    /// Prepare only `policy`; the alternate Metal variant is compiled on first use.
+    pub fn new_for_policy(runtime: &Runtime, policy: crate::ArithmeticPolicy) -> Result<Self, GoldyError> {
         Ok(Self {
             runtime: runtime.clone(),
-            ops: PreparedOps::prepare(runtime)?,
+            ops: PreparedOps::prepare(runtime, policy)?,
             unit_u32: Tensor::from_u32(runtime, TensorShape::vector(1), &[0])?,
             unit_f32: Tensor::from_f32(runtime, TensorShape::vector(1), &[1.0])?,
         })
