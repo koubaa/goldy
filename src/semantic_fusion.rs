@@ -16,6 +16,10 @@
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
 //! lifted binds a scheme temporary, so every value a site stores stays an output.
+//!
+//! An authored dispatch can be stated as the operations that compute what it stores (a
+//! [`Description`]). A region takes every one of its sites or none, and does not store
+//! the buffers only the description writes.
 
 use crate::backend::BufferHandle;
 use crate::fusion_plan::{KernelSite, SiteArg};
@@ -24,7 +28,7 @@ use crate::ops::matmul::{MatMulDType, MatMulFallback, MatMulOperand};
 use crate::ops::matmul_kernel::GEMV_ORDER;
 use crate::ops::MatMulDesc;
 use crate::parcel::Parcel;
-use crate::task_graph::{DispatchDim, NodeKind, ResourceId, TaskNode};
+use crate::task_graph::{DispatchDim, NodeKind, ResourceBinding, ResourceId, TaskNode};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
     self, Affine, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, IndexVar, Lowered, Map, Op, OpKind,
@@ -66,12 +70,83 @@ pub(crate) struct SemanticSite {
     pub(crate) parcels: Vec<SiteParcel>,
     /// Where each index parameter's value is read, by parameter.
     pub(crate) sources: Vec<IndexSource>,
-    /// The node user slot each scalar parameter binds, by parameter.
-    pub(crate) scalars: Vec<usize>,
+    /// What each scalar parameter binds, by parameter.
+    pub(crate) scalars: Vec<SiteScalar>,
     /// Whether `op` sums in the association the recorded node does. A library product
     /// sums in its own, so its site joins a region only under a
     /// [`ContractionPrecision`] that lets contractions reassociate.
     pub(crate) exact: bool,
+    /// Buffers whose stores nothing outside the region observes: a fused region does
+    /// not store them.
+    pub(crate) private: Vec<BufferHandle>,
+}
+
+/// What a scalar parameter of a [`SemanticSite`] binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SiteScalar {
+    /// The value the node's user slot holds when the region is built.
+    Slot(usize),
+    /// A value fixed when the site was recorded, as f32 bits.
+    #[cfg_attr(not(feature = "tensor"), allow(dead_code))]
+    Bits(u32),
+}
+
+/// An authored dispatch stated as the tensor operations that compute what it stores.
+///
+/// A region takes either every site or none; outside a region the dispatch runs as
+/// recorded. Scalars are fixed at the values the operations were recorded with.
+#[derive(Debug, Clone)]
+pub(crate) struct Description {
+    pub(crate) sites: Vec<SemanticSite>,
+    /// What the operations' dispatches bind on the sites' parcels, so a fused node also
+    /// declares the buffers only the description uses.
+    pub(crate) bindings: Vec<ResourceBinding>,
+}
+
+#[cfg(feature = "tensor")]
+impl Description {
+    /// The operations `ir` records, each with its site in `semantic`, describing
+    /// `described`. `Err` names the first node without a site. Buffers `described` does
+    /// not bind are private to the description. Without `exact`, the sites join a region
+    /// only under a [`ContractionPrecision`] that lets contractions reassociate.
+    pub(crate) fn of(
+        described: &TaskNode,
+        ir: &crate::task_graph::GraphIR,
+        semantic: &HashMap<u32, SemanticSite>,
+        exact: bool,
+    ) -> Result<Self, String> {
+        let bound = |buffer: BufferHandle| {
+            described.bindings.iter().any(|b| {
+                matches!(b.resource, ResourceId::Buffer(h) | ResourceId::BufferRange { parent: h, .. } if h == buffer)
+            })
+        };
+        let mut sites = Vec::with_capacity(ir.nodes.len());
+        let mut bindings: Vec<ResourceBinding> = Vec::new();
+        for (i, node) in ir.nodes.iter().enumerate() {
+            let (Some(site), NodeKind::Dispatch { user_slots, .. }) = (semantic.get(&(i as u32)), &node.kind) else {
+                return Err(node.label.to_string());
+            };
+            let mut site = site.clone();
+            for scalar in &mut site.scalars {
+                if let SiteScalar::Slot(slot) = *scalar {
+                    *scalar = SiteScalar::Bits(*user_slots.get(slot).ok_or_else(|| node.label.to_string())?);
+                }
+            }
+            site.exact &= exact;
+            site.private = site.parcels.iter().map(|p| p.buffer).filter(|&b| !bound(b)).collect();
+            for binding in &node.bindings {
+                let parent = match binding.resource {
+                    ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
+                    _ => continue,
+                };
+                if site.parcels.iter().any(|p| p.buffer == parent) && !bindings.contains(binding) {
+                    bindings.push(binding.clone());
+                }
+            }
+            sites.push(site);
+        }
+        Ok(Self { sites, bindings })
+    }
 }
 
 /// A [`SemanticSite`] under construction.
@@ -80,7 +155,7 @@ pub(crate) struct SiteBuilder {
     params: Params,
     parcels: Vec<SiteParcel>,
     sources: Vec<IndexSource>,
-    scalars: Vec<usize>,
+    scalars: Vec<SiteScalar>,
 }
 
 impl SiteBuilder {
@@ -97,7 +172,7 @@ impl SiteBuilder {
 
     /// A scalar parameter bound by user slot `slot`.
     pub(crate) fn scalar(&mut self, name: &str, slot: usize) -> algebra::ScalarParam {
-        self.scalars.push(slot);
+        self.scalars.push(SiteScalar::Slot(slot));
         self.params.scalar(name)
     }
 
@@ -122,6 +197,7 @@ impl SiteBuilder {
             sources: self.sources,
             scalars: self.scalars,
             exact: true,
+            private: Vec::new(),
         })
     }
 }
@@ -564,8 +640,9 @@ pub(crate) struct SemanticProgram {
     pub(crate) lowered: Lowered,
     /// `ParcelId(i)` of the composed region is `parcels[i]`.
     pub(crate) parcels: Vec<SiteParcel>,
-    /// Per scalar parameter of the composed region: the constituent and user slot it binds.
-    pub(crate) scalars: Vec<(usize, usize)>,
+    /// Per scalar parameter of the composed region: the constituent, counted in
+    /// recorded nodes from the run's first, and what it binds there.
+    pub(crate) scalars: Vec<(usize, SiteScalar)>,
     /// The constituents' operations, composed; operands are named `p{parcel}`.
     pub(crate) graph: Graph,
 }
@@ -585,14 +662,15 @@ impl SemanticProgram {
         self.graph.structure().to_string()
     }
 
-    /// Each synthesized scalar parameter's origin, `constituent:slot`.
+    /// Each synthesized scalar parameter's origin, `constituent:slot` or
+    /// `constituent:bits`.
     pub(crate) fn scalar_origins(&self) -> Vec<String> {
         self.lowered
             .scalars
             .iter()
-            .map(|s| {
-                let (k, slot) = self.scalars[s.index()];
-                format!("{k}:slot{slot}")
+            .map(|s| match self.scalars[s.index()] {
+                (k, SiteScalar::Slot(slot)) => format!("{k}:slot{slot}"),
+                (k, SiteScalar::Bits(bits)) => format!("{k}:{bits:#010x}"),
             })
             .collect()
     }
@@ -607,9 +685,10 @@ pub(crate) fn target(caps: &crate::runtime::RuntimeCapabilities) -> Target {
 }
 
 /// Compose `sites`, in execution order, and lower the composition to one kernel for
-/// `target`, rounding contractions no more than `precision` admits.
+/// `target`, rounding contractions no more than `precision` admits. Each site comes with
+/// the position of the node it describes in the run.
 pub(crate) fn synthesize(
-    sites: &[&SemanticSite],
+    sites: &[(usize, &SemanticSite)],
     target: &Target,
     precision: ContractionPrecision,
     arithmetic: crate::ArithmeticPolicy,
@@ -619,7 +698,7 @@ pub(crate) fn synthesize(
     let mut graph = Graph::default();
     let mut sources = Vec::new();
     let mut scalars = Vec::new();
-    for (k, site) in sites.iter().enumerate() {
+    for (k, &(node, site)) in sites.iter().enumerate() {
         let map: Vec<ParcelId> = site
             .parcels
             .iter()
@@ -651,7 +730,7 @@ pub(crate) fn synthesize(
             modulus: s.modulus,
             zero_if_outside: s.zero_if_outside,
         }));
-        scalars.extend(site.scalars.iter().map(|&slot| (k, slot)));
+        scalars.extend(site.scalars.iter().map(|&scalar| (node, scalar)));
         graph.push(op).map_err(|e| FusionRejection::Semantic {
             stage: k,
             reason: e.to_string(),
@@ -659,6 +738,11 @@ pub(crate) fn synthesize(
     }
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
+    }
+    for (at, parcel) in parcels.iter().enumerate() {
+        if sites.iter().any(|(_, s)| s.private.contains(&parcel.buffer)) {
+            graph.demote(ParcelId(at as u32));
+        }
     }
     let lowered = match arithmetic {
         crate::ArithmeticPolicy::MatchRecorded => algebra::lower_graph(&graph, &sources, target, precision),

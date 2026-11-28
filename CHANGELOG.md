@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Described dispatches** — `TensorRecorder::describe(node, exact, f)` states an
+  authored dispatch as the tensor operations `f` records, without recording them.
+  Automatic fusion composes the node with its neighbours as those operations, and a
+  region takes all of them or none; anywhere else the authored kernel runs. Buffers
+  only the description writes are not stored by a fused region. A description that
+  does not round as its kernel does (`exact = false`) joins regions only when
+  contractions may reassociate.
+
+- **`Scheme::keep_alive`** — ties a value, such as a buffer only the scheme's nodes
+  use, to the scheme and every scheme that includes it.
+
 - **Cyclic row dots** — `TensorRecorder::cyclic_dot_at` records a position-addressed
   row history update and causal dot as generic tensor algebra. Automatic fusion can
   absorb the update, dot, and neighboring elementwise operations; transformed index

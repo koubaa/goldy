@@ -146,6 +146,29 @@ impl<'a> TensorRecorder<'a> {
         self.scheme
     }
 
+    /// States `node`, a dispatch already recorded on this scheme, as the tensor
+    /// operations `describe` records, so automatic fusion can compose it with its
+    /// neighbours. The operations are not recorded on the scheme: a fused region either
+    /// runs all of them in place of the node, or the node runs as recorded.
+    ///
+    /// The operations must store what the dispatch stores. With `exact` they compute it
+    /// bit for bit: the dispatch rounds wherever an operation stores and sums in the
+    /// order the operations do. Otherwise the description joins a region only when the
+    /// scheme's [`crate::ContractionPrecision`] lets contractions reassociate.
+    ///
+    /// A buffer only the operations use carries values between them; the scheme must
+    /// keep it alive ([`Scheme::keep_alive`]). Scalars are fixed at the values recorded.
+    pub fn describe(
+        &mut self,
+        node: crate::NodeId,
+        exact: bool,
+        describe: impl FnOnce(&mut TensorRecorder<'_>) -> Result<(), GoldyError>,
+    ) -> Result<(), GoldyError> {
+        let mut sketch = self.scheme.sketch();
+        describe(&mut self.kernels.recorder(&mut sketch))?;
+        self.scheme.describe_node(node, &sketch, exact)
+    }
+
     pub fn zeros(&mut self, shape: TensorShape, dtype: TensorDType) -> Result<Tensor, GoldyError> {
         Tensor::zeros(&self.kernels.runtime, shape, dtype)
     }

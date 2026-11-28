@@ -764,6 +764,8 @@ pub(crate) struct SchemeDesc {
     arithmetic_sites: HashMap<u32, crate::fusion_plan::ArithmeticSite>,
     /// What recorded nodes compute in index notation, keyed by node index.
     semantic_sites: HashMap<u32, crate::semantic_fusion::SemanticSite>,
+    /// Authored dispatches stated as tensor operations, keyed by node index.
+    descriptions: HashMap<u32, crate::semantic_fusion::Description>,
     /// Temporaries declared by [`Scheme::temporary_buffer`], indexed by id.
     temporaries: Vec<TemporaryDecl>,
     /// Every recorded binding of a temporary. Lowering patches these positions of the
@@ -777,6 +779,7 @@ impl SchemeDesc {
             kernel_sites: HashMap::new(),
             arithmetic_sites: HashMap::new(),
             semantic_sites: HashMap::new(),
+            descriptions: HashMap::new(),
             temporaries: Vec::new(),
             temporary_uses: Vec::new(),
             ir: GraphIR::default(),
@@ -956,6 +959,8 @@ pub struct Scheme {
     temporary_storage: TemporaryStorage,
     /// Parameter buffers for gathered GEMVs. The node only stores the resource id.
     matmul_param_buffers: Vec<crate::Buffer>,
+    /// Values [`Scheme::keep_alive`] ties to this scheme and the schemes including it.
+    kept_alive: Vec<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// The IR a scheme submits: its promoted fusion plan, else what was recorded.
@@ -1014,7 +1019,16 @@ impl Scheme {
             yield_stats: HashMap::new(),
             temporary_storage: TemporaryStorage::default(),
             matmul_param_buffers: Vec::new(),
+            kept_alive: Vec::new(),
         }
+    }
+
+    /// Keep `value` alive as long as this scheme and every scheme that includes it.
+    ///
+    /// For resources the recorded nodes bind but nothing else owns, such as a buffer
+    /// that carries values from one node to the next.
+    pub fn keep_alive(&mut self, value: impl Send + Sync + 'static) {
+        self.kept_alive.push(Arc::new(value));
     }
 
     /// Declare a scheme-local temporary buffer of `len` elements of `T`.
@@ -1205,6 +1219,12 @@ impl Scheme {
         for (&node, site) in &child.desc.semantic_sites {
             self.desc.semantic_sites.insert(node + node_offset as u32, site.clone());
         }
+        for (&node, description) in &child.desc.descriptions {
+            self.desc
+                .descriptions
+                .insert(node + node_offset as u32, description.clone());
+        }
+        self.kept_alive.extend(child.kept_alive.iter().cloned());
         let offset = node_offset as u32;
         match child.fusion.plan() {
             None => self
@@ -1374,6 +1394,7 @@ impl Scheme {
             &self.desc.ir,
             &self.desc.kernel_sites,
             &self.desc.semantic_sites,
+            &self.desc.descriptions,
             &self.desc.temporary_uses,
         ) {
             self.promote_fusion_plan(plan);
@@ -2266,6 +2287,48 @@ impl Scheme {
         }
     }
 
+    /// State dispatch `node` as the operations recorded on `sketch`; see
+    /// [`crate::tensor::TensorRecorder::describe`].
+    #[cfg(feature = "tensor")]
+    pub(crate) fn describe_node(&mut self, node: NodeId, sketch: &Scheme, exact: bool) -> Result<(), GoldyError> {
+        if node.scheme_id != self.scheme_id {
+            return Err(GoldyError::Validation(
+                "describe: node belongs to another scheme".into(),
+            ));
+        }
+        if !matches!(
+            self.desc.ir.nodes.get(node.index()).map(|n| &n.kind),
+            Some(NodeKind::Dispatch { .. })
+        ) {
+            return Err(GoldyError::Validation("describe: node is not a dispatch".into()));
+        }
+        if let Some(msg) = sketch.record_errors.first() {
+            return Err(GoldyError::Validation(format!("describe: {msg}")));
+        }
+        let description = crate::semantic_fusion::Description::of(
+            &self.desc.ir.nodes[node.index()],
+            &sketch.desc.ir,
+            &sketch.desc.semantic_sites,
+            exact,
+        )
+        .map_err(|label| {
+            GoldyError::Validation(format!("describe: `{label}` has no form automatic fusion can compose"))
+        })?;
+        self.desc.descriptions.insert(node.index, description);
+        self.mark_structure_dirty();
+        Ok(())
+    }
+
+    /// A scheme on this scheme's context that records as this one does, for operations
+    /// that describe a node rather than run.
+    #[cfg(feature = "tensor")]
+    pub(crate) fn sketch(&self) -> Scheme {
+        let mut sketch = Scheme::new(&self.ctx);
+        sketch.automatic_fusion = self.automatic_fusion;
+        sketch.fusion.set_arithmetic(self.fusion.arithmetic());
+        sketch
+    }
+
     pub(crate) fn backend_type(&self) -> crate::types::BackendType {
         self.ctx.runtime().backend_type()
     }
@@ -2392,6 +2455,7 @@ impl Scheme {
         self.desc.kernel_sites.remove(&(node.index() as u32));
         self.desc.arithmetic_sites.remove(&(node.index() as u32));
         self.desc.semantic_sites.remove(&(node.index() as u32));
+        self.desc.descriptions.remove(&(node.index() as u32));
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
                 pipeline: slot,
@@ -2600,6 +2664,7 @@ impl Scheme {
             }
             // A site's region spans the grid it was recorded with.
             self.desc.semantic_sites.remove(&(node.index() as u32));
+            self.desc.descriptions.remove(&(node.index() as u32));
             let exec = self.executed_node(node.index());
             if let Some(plan) = self.fusion.plan_mut() {
                 if let NodeKind::Dispatch { dispatch, .. } = &mut plan.ir.nodes[exec].kind {

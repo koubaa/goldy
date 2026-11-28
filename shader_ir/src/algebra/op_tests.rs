@@ -238,6 +238,29 @@ fn a_graph_forwards_between_operations() {
 }
 
 #[test]
+fn a_demoted_parcel_is_no_longer_stored() {
+    let m = 7;
+    let mut graph = Graph::new();
+    graph
+        .push(map(&[("x", 0)], ("t", 1), m, Term::arg(0) + Term::lit(1.0)))
+        .unwrap();
+    graph
+        .push(map(&[("t", 1), ("w", 2)], ("y", 3), m, Term::arg(0) * Term::arg(1)))
+        .unwrap();
+    assert_eq!(graph.demote(ParcelId(1)), 1);
+    assert_eq!(graph.demote(ParcelId(1)), 0);
+    let stored: Vec<u32> = graph
+        .region()
+        .values()
+        .filter(|(_, v)| v.role == Role::Output)
+        .map(|(_, v)| v.storage.as_ref().unwrap().parcel.0)
+        .collect();
+    assert_eq!(stored, [3]);
+    let lowered = lower(graph.region(), &[]).unwrap();
+    assert!(lowered.parcels.iter().all(|&(p, _)| p != ParcelId(1)));
+}
+
+#[test]
 fn sibling_contractions_share_their_input() {
     let (m, k) = (6, 50);
     let mut graph = Graph::new();
