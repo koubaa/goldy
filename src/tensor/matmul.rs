@@ -202,18 +202,18 @@ impl<'a> TensorRecorder<'a> {
             batch: count,
             x_stride,
         });
-        let a_buf = if dtype == MatMulDType::BF16 {
-            weight.packed_u32_words()?.buffer()
+        let a_backing = if dtype == MatMulDType::BF16 {
+            weight.packed_u32_words()?.backing()
         } else {
-            weight.buffer()
+            weight.backing()
         };
         let a_view = MatMulView::strided(weight.storage_offset(), k);
         self.scheme
             .matmul(label, desc)
-            .a(a_buf, a_view)
-            .b(x.buffer(), vector_matmul_view(x)?)
-            .out(out.buffer(), vector_matmul_view(out)?)
-            .extra(ids.buffer(), vector_matmul_view(ids)?)
+            .a(&a_backing, a_view)
+            .b(&x.backing(), vector_matmul_view(x)?)
+            .out(&out.backing(), vector_matmul_view(out)?)
+            .extra(&ids.backing(), vector_matmul_view(ids)?)
             .record();
         Ok(())
     }
@@ -272,9 +272,9 @@ impl<'a> TensorRecorder<'a> {
         let bits = weight.packed_u32_words()?;
         self.scheme
             .matmul(label, desc)
-            .a(bits.buffer(), MatMulView::packed())
-            .b(x.buffer(), MatMulView::packed())
-            .out(out.buffer(), MatMulView::packed())
+            .a(&bits.backing(), MatMulView::offset(bits.storage_offset()))
+            .b(&x.backing(), MatMulView::packed())
+            .out(&out.backing(), MatMulView::packed())
             .extra(self.kernels.unit_u32.buffer(), MatMulView::packed())
             .record();
         Ok(())
@@ -347,7 +347,7 @@ impl<'a> TensorRecorder<'a> {
             ));
         }
         let mut index = None;
-        let ids_buf = if let Some((ids, slot)) = ids {
+        let ids_backing = if let Some((ids, slot)) = ids {
             if rank != 3 {
                 return Err(GoldyError::Validation(
                     "matmul_block: an index selects a rank-3 code tensor".into(),
@@ -366,15 +366,15 @@ impl<'a> TensorRecorder<'a> {
                 batch: 1,
                 x_stride: 0,
             });
-            ids.buffer()
+            ids.backing()
         } else {
-            self.kernels.unit_u32.buffer()
+            self.kernels.unit_u32.view().backing()
         };
-        let global_buf = if let Some(global) = weight.global {
+        let global_backing = if let Some(global) = weight.global {
             global.dtype().require_f32("matmul_block")?;
-            global.buffer()
+            global.backing()
         } else {
-            self.kernels.unit_f32.buffer()
+            self.kernels.unit_f32.view().backing()
         };
         let mut desc = MatMulDesc::gemv(rows, k);
         desc.dtype = MatMulDType::BlockScaled;
@@ -389,12 +389,12 @@ impl<'a> TensorRecorder<'a> {
         let scale_bits = scales.packed_u32_words()?;
         self.scheme
             .matmul(label, desc)
-            .a(code_bits.buffer(), MatMulView::packed())
-            .b(x.buffer(), MatMulView::packed())
-            .out(out.buffer(), MatMulView::packed())
-            .extra(scale_bits.buffer(), MatMulView::packed())
-            .extra(global_buf, MatMulView::packed())
-            .extra(ids_buf, MatMulView::packed())
+            .a(&code_bits.backing(), MatMulView::packed())
+            .b(&x.backing(), MatMulView::packed())
+            .out(&out.backing(), MatMulView::packed())
+            .extra(&scale_bits.backing(), MatMulView::packed())
+            .extra(&global_backing, MatMulView::packed())
+            .extra(&ids_backing, MatMulView::packed())
             .record();
         Ok(())
     }
@@ -416,9 +416,9 @@ impl<'a> TensorRecorder<'a> {
         let c_view = packed_or_strided(out, false)?;
         self.scheme
             .matmul(label, desc)
-            .a(a.buffer(), g.a)
-            .b(b.buffer(), g.b)
-            .out(out.buffer(), c_view)
+            .a(&a.backing(), g.a)
+            .b(&b.backing(), g.b)
+            .out(&out.backing(), c_view)
             .record();
         Ok(())
     }

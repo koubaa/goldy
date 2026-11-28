@@ -103,6 +103,8 @@ pub(crate) struct TemporaryUse {
     /// Descriptor the slot needs (SRV or UAV).
     pub(crate) descriptor: ResourceAccess,
     pub(crate) temporary: u32,
+    /// Optional `(offset, len)` byte sub-range when bound via a narrowed view.
+    pub(crate) byte_range: Option<(u64, u64)>,
 }
 
 /// Inclusive node and wave ranges over which the executed IR binds one temporary.
@@ -262,12 +264,25 @@ impl TemporaryStorage {
         for u in uses {
             let parcel = self.backings[backing_of[&u.temporary]].buffer.whole();
             let node = &mut ir.nodes[u.node as usize];
-            node.bindings[u.binding as usize].resource = parcel.resource_id();
+            node.bindings[u.binding as usize].resource = match (parcel.buffer_handle(), u.byte_range) {
+                (Some(parent), Some((offset, len))) => ResourceId::BufferRange { parent, offset, len },
+                _ => parcel.resource_id(),
+            };
             let slots = match &mut node.kind {
                 NodeKind::Dispatch { resource_slots, .. } | NodeKind::TraceRays { resource_slots, .. } => {
                     resource_slots
                 }
-                _ => unreachable!("temporaries bind only to dispatch nodes"),
+                NodeKind::MatMul(matmul) => {
+                    let handle = parcel.buffer_handle().expect("temporary backing is a buffer");
+                    match u.slot {
+                        0 => matmul.a.buffer = handle,
+                        1 => matmul.b.buffer = handle,
+                        2 => matmul.c.buffer = handle,
+                        _ => {}
+                    }
+                    &mut matmul.resource_slots
+                }
+                _ => unreachable!("temporaries bind only to dispatch or matmul nodes"),
             };
             slots[u.slot as usize] = parcel.resource_index(u.descriptor).ok_or_else(|| {
                 GoldyError::Validation(format!(
