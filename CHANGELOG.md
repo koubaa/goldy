@@ -301,6 +301,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Submits no longer scan every stamp for a narrowed view** — cross-submit sync looked
+  up a resource without a stamp of its own (a range of a buffer, as narrowed views
+  declare) by scanning the whole stamp registry, once per such resource on every submit.
+  It now scans only the stamps on the same buffer, indexed when the first lookup misses.
+  The sync plan is unchanged.
+
 - **Specialized semantic regions match their unfused dispatches** — specialization bakes a
   fused kernel's scalars as literals, and the device then combined constants across the
   operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into
