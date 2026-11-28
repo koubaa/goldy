@@ -24,6 +24,7 @@ pub mod frame_orchestrator;
 pub(crate) mod frame_table;
 pub(crate) mod handles;
 pub mod kernel;
+pub(crate) mod observer;
 pub mod ops;
 #[cfg(feature = "graphics")]
 pub mod pipeline;

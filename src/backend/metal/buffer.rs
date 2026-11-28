@@ -211,7 +211,6 @@ fn insert_buffer_common(
             texture_copy_footprint: None,
         },
     );
-    state.bump_residency_generation();
 
     Ok(())
 }
@@ -343,7 +342,7 @@ pub(super) fn set_logical_size(
     buffer_handle: BufferHandle,
     new_logical_size: u64,
 ) -> Result<()> {
-    let b = state.buffers.get_mut(&buffer_handle).context("Invalid buffer handle")?;
+    let b = state.buffers.get(&buffer_handle).context("Invalid buffer handle")?;
     if b.parent_for_view.is_some() {
         anyhow::bail!("cannot resize logical extent of buffer views");
     }
@@ -357,7 +356,11 @@ pub(super) fn set_logical_size(
     if new_logical_size == 0 {
         anyhow::bail!("buffer size must be non-zero");
     }
-    b.size = new_logical_size;
+    state.buffers.replace_with(&buffer_handle, |cur| {
+        let mut next = cur.clone();
+        next.size = new_logical_size;
+        next
+    });
     Ok(())
 }
 
@@ -466,7 +469,6 @@ pub(super) fn create_view(
             texture_copy_footprint: None,
         },
     );
-    state.bump_residency_generation();
 
     Ok(handle)
 }
@@ -565,22 +567,25 @@ pub(super) fn resize(
         },
     );
 
-    *state.buffers.get_mut(&buffer_handle).unwrap() = BufferState {
-        device_handle,
-        buffer: new_buffer,
-        size: new_size,
-        allocation_size: new_size,
-        is_device_allocated,
-        placement,
-        arg_buffer_index: old_state.arg_buffer_index,
-        flags: old_state.flags,
-        element_stride: old_state.element_stride,
-        parent_for_view: None,
-        access: old_state.access,
-        view_byte_offset: None,
-        is_withdraw_staging: false,
-        texture_copy_footprint: None,
-    };
+    state.buffers.insert(
+        buffer_handle,
+        BufferState {
+            device_handle,
+            buffer: new_buffer,
+            size: new_size,
+            allocation_size: new_size,
+            is_device_allocated,
+            placement,
+            arg_buffer_index: old_state.arg_buffer_index,
+            flags: old_state.flags,
+            element_stride: old_state.element_stride,
+            parent_for_view: None,
+            access: old_state.access,
+            view_byte_offset: None,
+            is_withdraw_staging: false,
+            texture_copy_footprint: None,
+        },
+    );
 
     let new_mtl = state.buffers.get(&buffer_handle).unwrap().buffer.clone();
 
@@ -607,9 +612,12 @@ pub(super) fn resize(
                 .set_argument_buffer(&logical_device.argument_buffer, ab_off);
             logical_device.argument_encoder.set_buffer(0, &new_mtl, mtl_off);
         }
-        state.buffers.get_mut(&vh).unwrap().buffer = new_mtl.clone();
+        state.buffers.replace_with(&vh, |cur| {
+            let mut next = cur.clone();
+            next.buffer = new_mtl.clone();
+            next
+        });
     }
-    state.bump_residency_generation();
 
     Ok(())
 }
@@ -624,9 +632,6 @@ pub(super) fn resize(
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
-        if !buffer.is_withdraw_staging {
-            state.bump_residency_generation();
-        }
         let device_handle = buffer.device_handle;
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);
@@ -903,9 +908,11 @@ pub(super) fn alloc_texture_readback_staging(
     layout: crate::backend::TextureCopyFootprint,
 ) -> Result<BufferHandle> {
     let handle = alloc_readback_buffer(state, device_handle, layout.staging_bytes)?;
-    if let Some(buf) = state.buffers.get_mut(&handle) {
-        buf.texture_copy_footprint = Some(layout);
-    }
+    state.buffers.replace_with(&handle, |cur| {
+        let mut next = cur.clone();
+        next.texture_copy_footprint = Some(layout);
+        next
+    });
     Ok(handle)
 }
 

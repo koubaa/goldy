@@ -99,7 +99,6 @@ pub(super) fn create(
             arg_buffer_index: local,
         },
     );
-    state.bump_residency_generation();
     let _ = max_vertices;
     Ok(handle)
 }
@@ -108,7 +107,6 @@ pub(super) fn destroy(state: &mut MetalState, handle: AccelerationStructureHandl
     let Some(accel) = state.accels.remove(&handle) else {
         return;
     };
-    state.bump_residency_generation();
     let gpu_idle = super::gpu_is_idle(state);
     let device_handle = accel.device_handle;
     let ctx_h = super::context::context_handle_for_thread(state, device_handle);
