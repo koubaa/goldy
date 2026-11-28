@@ -1224,7 +1224,8 @@ fn joined_label(ir: &GraphIR, nodes: Range<usize>) -> String {
 ///
 /// It keeps every binding of the constituents on a parcel the program names, so
 /// dependences and parcel stamps stay what the constituents declared; record-constant
-/// operands the synthesized kernel does not read are dropped.
+/// operands the synthesized kernel does not read are dropped, as are buffers private
+/// to a description that the kernel neither reads nor stores.
 fn semantic_node(
     ir: &GraphIR,
     described: &HashMap<u32, Description>,
@@ -1234,6 +1235,18 @@ fn semantic_node(
     arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
     let pipeline = kernel.pipeline_for(arithmetic)?;
+    let untouched = |buffer| {
+        nodes
+            .clone()
+            .filter_map(|i| described.get(&(i as u32)))
+            .flat_map(|d| &d.sites)
+            .any(|s| s.private.contains(&buffer))
+            && !program
+                .lowered
+                .parcels
+                .iter()
+                .any(|&(p, _)| program.parcels[p.0 as usize].buffer == buffer)
+    };
     let mut bindings: Vec<ResourceBinding> = Vec::new();
     for i in nodes.clone() {
         let describing = described.get(&(i as u32)).map_or(&[][..], |d| d.bindings.as_slice());
@@ -1242,7 +1255,7 @@ fn semantic_node(
                 ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
                 _ => continue,
             };
-            if !program.parcels.iter().any(|p| p.buffer == parent) {
+            if !program.parcels.iter().any(|p| p.buffer == parent) || untouched(parent) {
                 continue;
             }
             match bindings.iter_mut().find(|b| b.resource == binding.resource) {

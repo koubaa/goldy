@@ -661,4 +661,9 @@ pub mod test_support {
     pub fn wait_for_fusion_compiles(scheme: &mut crate::Scheme) {
         scheme.wait_for_fusion_compiles();
     }
+
+    /// Whether a node `scheme` executes binds `buffer`.
+    pub fn executed_binds(scheme: &crate::Scheme, buffer: &crate::Buffer) -> bool {
+        scheme.executed_binds(buffer)
+    }
 }

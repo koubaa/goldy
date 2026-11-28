@@ -15,7 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   region takes all of them or none; anywhere else the authored kernel runs. Buffers
   only the description writes are not stored by a fused region. A description that
   does not round as its kernel does (`exact = false`) joins regions only under
-  `ArithmeticPolicy::Relaxed` or when contractions may reassociate.
+  `ArithmeticPolicy::Relaxed` or when contractions may reassociate. The scheme binds
+  every buffer the description binds, whether or not a region runs it: dropping a
+  scratch buffer only the description uses makes the next submit return
+  `GoldyError::StaleResource`, and a fused node does not bind scratch its kernel never
+  touches. A node that loses its description (`set_node_pipeline`, a changed
+  `set_node_dispatch`) stops binding that scratch.
 
 - **Cyclic stores and window dots** — `TensorRecorder::cyclic_store_at` stores one
   value per row at `position % width` of a history's last axis, and
@@ -25,9 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window axis is outermost.
 
 - **`min_scalar_into` / `max_scalar_into`** — the `_into` forms of the scalar bounds.
-
-- **`Scheme::keep_alive`** — ties a value, such as a buffer only the scheme's nodes
-  use, to the scheme and every scheme that includes it.
 
 - **Cyclic row dots** — `TensorRecorder::cyclic_dot_at` records a position-addressed
   row history update and causal dot as generic tensor algebra. Automatic fusion can
@@ -135,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`FusedDefinition::elided`, `FusionRegion::elided`). `FUSION_ABI_VERSION` is 3.
 
 ### Removed
+
+- **Breaking (source):** `Scheme::keep_alive`. A scheme binds parcels and registers
+  their stamps; it does not own their lifetimes, and dropping a buffer a scheme still
+  binds makes its next submit return `GoldyError::StaleResource`. Scratch that only a
+  scheme's nodes or a described dispatch use belongs to the code that records them:
+  acquire it once from the runtime (`Runtime::acquire_buffer`, or `Tensor::zeros`),
+  hold it on the recording struct beside the schemes, write it with `_into` forms, and
+  bind it inside `Scheme::group` / `include` as any other parcel.
 
 - **Breaking:** `goldy::layout_validation_enabled()` (read `Runtime::validation().layout`)
   and `test_support::HostAccessOverride` (build the instance with

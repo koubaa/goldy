@@ -75,6 +75,34 @@ Allocating methods (`add`, `matmul`, `sum`, …) create packed outputs. `_into` 
 (`add_into`, `matmul_into`, `cast_into`, `fill`) use caller storage, including in-place
 work when the write layout is legal.
 
+### Who owns scratch
+
+A scheme binds the tensors it records over; it does not own them. Dropping a tensor a
+scheme still binds, including an allocating method's output or a buffer only a
+`TensorRecorder::describe` description uses, makes the next `submit` return
+`GoldyError::StaleResource`. Code that records reusable work owns its scratch: acquire
+it once (`Tensor::zeros`, which takes a retained buffer from `Runtime::acquire_buffer`),
+keep it on the recording struct beside the schemes, and write it with `_into` forms.
+
+```rust,ignore
+struct Unit {
+    scratch: Tensor,
+}
+
+impl Unit {
+    fn record(&self, scheme: &mut Scheme, kernels: &TensorKernels, x: TensorView<'_>, out: TensorView<'_>)
+        -> Result<(), GoldyError>
+    {
+        scheme.group("unit", |s| {
+            let mut rec = kernels.recorder(s);
+            rec.exp_into("exp", x, self.scratch.view())?;
+            rec.mul_into("scale", self.scratch.view(), x, out)
+        })?;
+        Ok(())
+    }
+}
+```
+
 Custom `#[goldy::compute]` kernels can take `gpu::Tensor<T>` parameters and
 index them as logical views, or bind `Tensor` / `TensorView` like any other
 parcel for physical indexing:

@@ -833,6 +833,16 @@ impl SchemeDesc {
         }
     }
 
+    /// Whether a recorded node or a description binds `resource`.
+    fn binds(&self, resource: ResourceId) -> bool {
+        self.ir
+            .nodes
+            .iter()
+            .flat_map(|n| &n.bindings)
+            .chain(self.descriptions.values().flat_map(|d| &d.bindings))
+            .any(|b| b.resource == resource)
+    }
+
     fn all_stamps_alive(&self) -> bool {
         self.resource_stamps.values().all(|s| s.is_alive()) && self.stamp_targets.iter().all(|s| s.is_alive())
     }
@@ -959,8 +969,6 @@ pub struct Scheme {
     temporary_storage: TemporaryStorage,
     /// Parameter buffers for gathered GEMVs. The node only stores the resource id.
     matmul_param_buffers: Vec<crate::Buffer>,
-    /// Values [`Scheme::keep_alive`] ties to this scheme and the schemes including it.
-    kept_alive: Vec<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// The IR a scheme submits: its promoted fusion plan, else what was recorded.
@@ -1019,16 +1027,7 @@ impl Scheme {
             yield_stats: HashMap::new(),
             temporary_storage: TemporaryStorage::default(),
             matmul_param_buffers: Vec::new(),
-            kept_alive: Vec::new(),
         }
-    }
-
-    /// Keep `value` alive as long as this scheme and every scheme that includes it.
-    ///
-    /// For resources the recorded nodes bind but nothing else owns, such as a buffer
-    /// that carries values from one node to the next.
-    pub fn keep_alive(&mut self, value: impl Send + Sync + 'static) {
-        self.kept_alive.push(Arc::new(value));
     }
 
     /// Declare a scheme-local temporary buffer of `len` elements of `T`.
@@ -1224,7 +1223,6 @@ impl Scheme {
                 .descriptions
                 .insert(node + node_offset as u32, description.clone());
         }
-        self.kept_alive.extend(child.kept_alive.iter().cloned());
         let offset = node_offset as u32;
         match child.fusion.plan() {
             None => self
@@ -2314,9 +2312,36 @@ impl Scheme {
         .map_err(|label| {
             GoldyError::Validation(format!("describe: `{label}` has no form automatic fusion can compose"))
         })?;
+        self.forget_description(node.index);
+        // The scheme binds what the description binds, whether or not a region runs it:
+        // dropping a buffer only the description uses makes the next submit stale.
+        for binding in &description.bindings {
+            let Some(key) = ResourceKey::from_resource_id(binding.resource) else {
+                continue;
+            };
+            if self.desc.resource_stamps.contains_key(&key) {
+                continue;
+            }
+            if let Some(stamp) = sketch.desc.resource_stamps.get(&key) {
+                self.desc.register_stamp_parts(binding.resource, Arc::clone(stamp));
+            }
+        }
         self.desc.descriptions.insert(node.index, description);
         self.mark_structure_dirty();
         Ok(())
+    }
+
+    /// Drop the description of recorded node `node`, and the stamps of buffers only it
+    /// bound.
+    fn forget_description(&mut self, node: u32) {
+        let Some(description) = self.desc.descriptions.remove(&node) else {
+            return;
+        };
+        for binding in &description.bindings {
+            if !self.desc.binds(binding.resource) {
+                self.desc.forget_stamp(binding.resource);
+            }
+        }
     }
 
     /// A scheme on this scheme's context that records as this one does, for operations
@@ -2455,7 +2480,7 @@ impl Scheme {
         self.desc.kernel_sites.remove(&(node.index() as u32));
         self.desc.arithmetic_sites.remove(&(node.index() as u32));
         self.desc.semantic_sites.remove(&(node.index() as u32));
-        self.desc.descriptions.remove(&(node.index() as u32));
+        self.forget_description(node.index);
         let (changed, slots) = match self.dispatch_node_mut(node, "set_node_pipeline")? {
             NodeKind::Dispatch {
                 pipeline: slot,
@@ -2641,6 +2666,19 @@ impl Scheme {
         executed_ir(&self.desc, &self.fusion).nodes.len()
     }
 
+    /// Whether an executed node binds `buffer`.
+    pub(crate) fn executed_binds(&self, buffer: &crate::Buffer) -> bool {
+        let handle = buffer.buffer_handle();
+        executed_ir(&self.desc, &self.fusion)
+            .nodes
+            .iter()
+            .flat_map(|n| &n.bindings)
+            .any(|b| match b.resource {
+                ResourceId::Buffer(h) | ResourceId::BufferRange { parent: h, .. } => Some(h) == handle,
+                _ => false,
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn specialization(&self) -> &crate::specialization::SchemePredictor {
         &self.specialization
@@ -2664,7 +2702,7 @@ impl Scheme {
             }
             // A site's region spans the grid it was recorded with.
             self.desc.semantic_sites.remove(&(node.index() as u32));
-            self.desc.descriptions.remove(&(node.index() as u32));
+            self.forget_description(node.index);
             let exec = self.executed_node(node.index());
             if let Some(plan) = self.fusion.plan_mut() {
                 if let NodeKind::Dispatch { dispatch, .. } = &mut plan.ir.nodes[exec].kind {
