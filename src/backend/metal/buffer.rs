@@ -944,3 +944,16 @@ pub(super) fn read_readback_buffer(state: &MetalState, buffer_handle: BufferHand
     }
     Ok(())
 }
+
+/// Persistent host mapping of a withdraw staging buffer.
+pub(super) fn readback_mapping(state: &MetalState, buffer_handle: BufferHandle) -> Option<crate::backend::HostMapping> {
+    let buffer = state.buffers.get(&buffer_handle)?;
+    if !buffer.is_withdraw_staging {
+        return None;
+    }
+    let ptr = buffer.buffer.contents() as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(crate::backend::HostMapping { ptr, len: buffer.size })
+}

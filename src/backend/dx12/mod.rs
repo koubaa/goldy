@@ -857,6 +857,10 @@ impl GpuBackend for Dx12Backend {
         buffer::destroy(&mut self.state, buffer);
     }
 
+    fn readback_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        buffer::readback_mapping(&self.state.buffers.read().unwrap().entries, buffer)
+    }
+
     fn query_texture_copy_footprint(
         &self,
         device: DeviceHandle,
