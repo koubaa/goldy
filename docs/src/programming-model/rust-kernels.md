@@ -182,7 +182,7 @@ DSL.
 The metadata parcel is interned on the scheme, read-only in GraphIR, and does
 not need an external `TensorKernels` keepalive. It is the universal program's
 source of layouts. Each tensor's element offset also travels as a launch word
-beyond the eight user scalars: `PushLayout` region C on DX12, Vulkan and Metal,
+beyond the eight user scalars and three frame-table routing words on DX12, Vulkan and Metal,
 or a trailing kernel argument on CUDA, for the first 13 tensors. The shape facts
 (rank, extents, strides, contiguity) are certain specialization facts. A node's
 first submit warms a variant with them baked, and the promoted program loads no

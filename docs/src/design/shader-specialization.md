@@ -78,7 +78,7 @@ defaults to the push-constant word:
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void cs_main(uniform uint _bw0, /* ... */ uniform uint _uw0, /* ... */) {
+void cs_main(uniform uint _uw0, /* ... */, uniform uint _rs0, /* ... */) {
     uint factor = _GOLDY_SPEC_CS_MAIN_UW0;   // was: _uw0
     // ...
 }
@@ -225,7 +225,7 @@ before its first data access. The layout is now split by how widely it is shared
 
 - **The element offset** differs per site, because each site binds a different placement of
   its parcel. It travels as a launch word: the words after the frame table in `PushLayout`
-  region C on DX12, Vulkan and Metal (13 of them), or trailing kernel arguments on CUDA.
+  on DX12, Vulkan and Metal (13 of them), or trailing kernel arguments on CUDA.
   WebGPU and the CPU backend keep reading the parcel, as does a kernel with more than 13
   tensors. Offsets never bake, so sites that differ only in placement share one variant.
 - **The shape facts** are rank, element count, four extents, four strides and flags. Each

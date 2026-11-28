@@ -30,43 +30,34 @@ use super::ShaderHandle;
 // Push-constant layout
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Maximum number of bindless resource indices in region A of [`PushLayout`].
-///
-/// Region A is unused: generated shaders resolve resources through the frame
-/// table. It stays 16 so user words and launch words keep their offsets and
-/// [`crate::KERNEL_ABI_VERSION`] stays 4. Removing it would free those 32 bytes
-/// for launch words and would be an ABI change.
-pub const MAX_BINDLESS_SLOTS: usize = 16;
-
 /// Resources one dispatch may bind. Independent of the push-layout size: the
-/// frame table holds the indices, not region A.
+/// frame table holds the indices, not push constants.
 pub const MAX_DISPATCH_RESOURCES: usize = 24;
-/// Maximum number of `u32` user parameters in region B of [`PushLayout`].
+/// Maximum number of `u32` user parameters in [`PushLayout`].
 pub const MAX_USER_SLOTS: usize = 8;
 /// Total size of [`PushLayout`] in bytes (must match the Slang `PushLayout` struct).
-pub const TOTAL_PUSH_BYTES: usize = 128;
+pub const TOTAL_PUSH_BYTES: usize = 96;
 /// Byte stride of one entry in a `DispatchBatch` argument buffer.
 ///
 /// Layout per entry: `[PushLayout (TOTAL_PUSH_BYTES)] [wg_x u32] [wg_y u32] [wg_z u32]`
 pub const DISPATCH_BATCH_STRIDE: usize = TOTAL_PUSH_BYTES + 3 * 4;
 
-/// Packed 128-byte push-constant / root-constant / `set_bytes` layout shared by
+/// Packed 96-byte push-constant / root-constant / `set_bytes` layout shared by
 /// all three GPU backends.
 ///
 /// ```text
-/// Bytes  0–31:  16 × u16  bindless resource indices  (region A)
-/// Bytes 32–63:  8  × u32  user parameters            (region B)
-/// Bytes 64–127: 64 × u8   reserved / future           (region C)
+/// Bytes  0–31:  8 × u32  user parameters
+/// Bytes 32–95: 16 × u32  routing, launch words, and reserved
 /// ```
 ///
-/// - Region A: bindless heap indices for `Scattered<T>`, `BufRO<T>`, textures, samplers, …
-/// - Region B: per-dispatch scalar user params (`uint`, `float`, `int` …).
-/// - Region C: words 0–2 route the frame table; words from [`LAUNCH_WORD_BASE`] carry
+/// - `user`: per-dispatch scalar params (`uint`, `float`, `int` …).
+/// - `_reserved`: words 0–2 route the frame table; words from [`LAUNCH_WORD_BASE`] carry
 ///   launch words (tensor element offsets); the rest are zero.
+///
+/// Resource descriptor indices live in the frame table and are not duplicated here.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 pub struct PushLayout {
-    pub bindless: [u16; MAX_BINDLESS_SLOTS],
     pub user: [u32; MAX_USER_SLOTS],
     pub _reserved: [u32; 16],
 }
@@ -96,7 +87,7 @@ impl PushLayout {
 
 /// First `PushLayout._reserved` word carrying a launch word (`_rs3` in generated wrappers).
 pub const LAUNCH_WORD_BASE: usize = 3;
-/// Launch words a dispatch can carry in region C.
+/// Launch words a dispatch can carry after the three frame-table routing words.
 pub const MAX_LAUNCH_WORDS: usize = 16 - LAUNCH_WORD_BASE;
 
 const _: () = assert!(MAX_LAUNCH_WORDS == goldy_shader_ir::TENSOR_LAUNCH_WORDS);
@@ -117,9 +108,9 @@ pub fn pack_bind_words(user: &[u32], launch: &[u32]) -> Vec<u32> {
     words
 }
 
-/// `(region B words, launch words)` of a [`pack_bind_words`] encoding.
+/// `(user words, launch words)` of a [`pack_bind_words`] encoding.
 ///
-/// When launch words are present the region B slice is padded to [`MAX_USER_SLOTS`].
+/// When launch words are present the user slice is padded to [`MAX_USER_SLOTS`].
 pub fn split_bind_words(words: &[u32]) -> (&[u32], &[u32]) {
     if words.len() > MAX_USER_SLOTS {
         words.split_at(MAX_USER_SLOTS)
@@ -131,7 +122,7 @@ pub fn split_bind_words(words: &[u32]) -> (&[u32], &[u32]) {
 /// Fill push layout for frame-table routing: indices live in the staging/table;
 /// `_reserved[0]` carries the dispatch base offset within the row.
 ///
-/// `user` is a [`pack_bind_words`] encoding; its launch words land in region C.
+/// `user` is a [`pack_bind_words`] encoding; its launch words land after routing.
 #[inline]
 pub fn fill_frame_table_dispatch(layout: &mut PushLayout, dispatch_base: u32, user: &[u32]) {
     layout._reserved[crate::frame_table::dispatch_table_base_word_index()] = dispatch_base;
@@ -170,8 +161,8 @@ pub fn set_frame_table_slots(layout: &mut PushLayout, selector_slot: u32, table_
 /// slot words zeroed; backends call this at record time for the submitting
 /// context.
 pub fn patch_dispatch_batch_frame_table_slots(arg_data: &mut [u8], count: usize, selector_slot: u32, table_slot: u32) {
-    let sel_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_SELECTOR_SLOT_WORD * 4;
-    let tab_off = (MAX_BINDLESS_SLOTS * 2) + (MAX_USER_SLOTS * 4) + FRAME_TABLE_TABLE_SLOT_WORD * 4;
+    let sel_off = (MAX_USER_SLOTS + FRAME_TABLE_SELECTOR_SLOT_WORD) * 4;
+    let tab_off = (MAX_USER_SLOTS + FRAME_TABLE_TABLE_SLOT_WORD) * 4;
     for i in 0..count {
         let base = i * DISPATCH_BATCH_STRIDE;
         if base + TOTAL_PUSH_BYTES > arg_data.len() {
@@ -521,6 +512,32 @@ pub fn align_up(x: u64, a: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_push_layout_keeps_user_routing_and_launch_words_disjoint() {
+        assert_eq!(std::mem::size_of::<PushLayout>(), 96);
+        assert_eq!(DISPATCH_BATCH_STRIDE, 108);
+
+        let mut layout = PushLayout::default();
+        let words = pack_bind_words(&[11, 12], &[21, 22]);
+        fill_frame_table_dispatch(&mut layout, 7, &words);
+        set_frame_table_slots(&mut layout, 8, 9);
+        assert_eq!(&layout.user[..2], &[11, 12]);
+        assert_eq!(&layout._reserved[..5], &[7, 8, 9, 21, 22]);
+
+        let mut batch = vec![0u8; DISPATCH_BATCH_STRIDE * 2];
+        for entry in 0..2 {
+            let base = entry * DISPATCH_BATCH_STRIDE;
+            batch[base..base + TOTAL_PUSH_BYTES].copy_from_slice(bytemuck::bytes_of(&layout));
+        }
+        patch_dispatch_batch_frame_table_slots(&mut batch, 2, 31, 32);
+        for entry in 0..2 {
+            let base = entry * DISPATCH_BATCH_STRIDE;
+            let patched: &PushLayout = bytemuck::from_bytes(&batch[base..base + TOTAL_PUSH_BYTES]);
+            assert_eq!(patched._reserved[FRAME_TABLE_SELECTOR_SLOT_WORD], 31);
+            assert_eq!(patched._reserved[FRAME_TABLE_TABLE_SLOT_WORD], 32);
+        }
+    }
 
     /// A minimal [`BeltChunk`] backed by a heap-allocated byte array.
     ///
