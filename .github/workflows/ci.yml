@@ -225,6 +225,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-metal-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Debug mesh_dispatch (Metal)
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
@@ -253,7 +256,10 @@ jobs:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
           # DYLD_LIBRARY_PATH for macOS dynamic library loading
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
-        run: cargo test
+        run: |
+          cargo nextest run --profile metal-ci
+          # nextest deliberately does not run doctests.
+          cargo test --doc
 
       - name: Run goldy-ffi integration tests
         env:

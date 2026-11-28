@@ -1,0 +1,21 @@
+[test-groups]
+serial-gpu = { max-threads = 1 }
+
+[profile.metal-ci]
+test-threads = 4
+
+# Keep GPU-bearing binaries in a single process lane. Only binaries whose tests
+# never create a GPU runtime may overlap that lane. The conservative fallback
+# means a newly added test binary is serialized until it is explicitly audited.
+[[profile.metal-ci.overrides]]
+filter = """
+not (
+  binary(activations_cpu)
+  | binary(cpu_backend)
+  | binary(cpu_host_callable)
+  | binary(cross_submit_mock)
+  | binary(deposit_exchange_lifecycle_mock)
+  | binary(yielding_cpu)
+)
+"""
+test-group = "serial-gpu"
