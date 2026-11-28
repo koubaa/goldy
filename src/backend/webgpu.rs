@@ -1745,9 +1745,8 @@ impl WebGpuBackend {
     }
 
     fn collect_webgpu_slots_from_gpu_command(command: &GpuCommand, slots: &mut Vec<u32>) {
-        match command {
-            GpuCommand::BindResourcesRaw { indices, .. } => slots.extend(indices.iter().copied()),
-            _ => {}
+        if let GpuCommand::BindResourcesRaw { indices, .. } = command {
+            slots.extend(indices.iter().copied());
         }
     }
 
