@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own scratch. Entries holding a reduction's identity (such as `-1e30` for a max next
   to zero weights) let a fixed-width reduction cover a partly filled axis.
 
+- **Integer casts fuse as the value they read** — a `cast_into` of one `u32` or `i32` into
+  f32 has a semantic site: the value is read when the kernel runs, as an index value. A
+  number derived from a position, such as a log-scaled factor, can then fuse with the
+  operations that use it, and one fused kernel serves every position. A `u32` is
+  described below 2^31, the domain the cyclic sites already assume of a position.
+
 - **Described dispatches** — `TensorRecorder::describe(node, exact, f)` states an
   authored dispatch as the tensor operations `f` records, without recording them.
   Automatic fusion composes the node with its neighbours as those operations, and a
@@ -321,6 +327,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declare) by scanning the whole stamp registry, once per such resource on every submit.
   It now scans only the stamps on the same buffer, indexed when the first lookup misses.
   The sync plan is unchanged.
+
+- **`i32::MIN` in generated kernels** — it was emitted as `-2147483648`, which negates a
+  literal no `int` holds; it is now `(-2147483647 - 1)`.
 
 - **Specialized semantic regions match their unfused dispatches** — specialization bakes a
   fused kernel's scalars as literals, and the device then combined constants across the

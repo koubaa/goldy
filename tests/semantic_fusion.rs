@@ -496,6 +496,54 @@ fn reductions_over_entries_that_hold_the_identity() {
 }
 
 #[test]
+fn an_integer_cast_fuses_as_the_value_it_reads() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let (rows, cols) = (4, 32);
+    let init = |count: Init| {
+        [
+            count,
+            Init::F32(TensorShape::matrix(rows, cols), data(3, rows * cols)),
+            Init::F32(TensorShape::vector(1), vec![0.0]),
+            Init::F32(TensorShape::matrix(rows, cols), vec![0.0; (rows * cols) as usize]),
+        ]
+    };
+    // The count is read when the kernel runs, so one region serves every value.
+    for count in [0, 6, 1000, (1 << 24) + 1, i32::MAX as u32] {
+        let scheme = fused_matches_unfused(
+            &device,
+            &init(Init::U32(TensorShape::vector(1), vec![count])),
+            |rec, t| {
+                let (count, x, factor, out) = (t[0].view(), t[1].view(), t[2].view(), t[3].view());
+                rec.cast_into("count", count, factor)?;
+                rec.add_scalar_into("next", factor, 1.0, factor)?;
+                rec.div_scalar_into("per", factor, 7.0, factor)?;
+                rec.max_scalar_into("at_least_one", factor, 1.0, factor)?;
+                rec.log_into("log", factor, factor)?;
+                rec.mul_into("scaled", x, factor, out)?;
+                Ok((Vec::new(), Vec::new()))
+            },
+            2,
+        );
+        assert_one_semantic_region(&scheme, 6);
+    }
+    for count in [-7, i32::MIN, 123_456_789] {
+        let scheme = fused_matches_unfused(
+            &device,
+            &init(Init::I32(TensorShape::vector(1), vec![count])),
+            |rec, t| {
+                let (count, x, factor, out) = (t[0].view(), t[1].view(), t[2].view(), t[3].view());
+                rec.cast_into("count", count, factor)?;
+                rec.mul_into("scaled", x, factor, out)?;
+                Ok((Vec::new(), Vec::new()))
+            },
+            2,
+        );
+        assert_one_semantic_region(&scheme, 2);
+    }
+}
+
+#[test]
 fn tanh_and_sigmoid_fuse() {
     let _gpu = gpu_lock();
     let device = runtime();
