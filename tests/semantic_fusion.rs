@@ -11,7 +11,7 @@ mod submission;
 use goldy::{
     compute, ArithmeticPolicy, BackendType, ContractionPrecision, FusionRegionStatus, FusionRejection, FusionSchedule,
     FusionTier, GoldyError, NodeId, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
-    TensorKernels, TensorRecorder, TensorShape,
+    TensorDType, TensorKernels, TensorRecorder, TensorShape,
 };
 use std::sync::Mutex;
 
@@ -1040,27 +1040,165 @@ fn describe_needs_composable_operations() {
     assert!(err.to_string().contains("flags"), "{err}");
 }
 
-/// What a scheme keeps alive lives as long as it and every scheme that includes it.
-#[test]
-fn kept_values_live_as_long_as_their_schemes() {
-    struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Flag {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+/// A recording unit that owns the scratch its description writes: a retained buffer
+/// held beside the schemes it records into, never by them.
+struct ShiftedProductUnit {
+    kernel: shifted_product::Kernel,
+    scratch: Tensor,
+}
+
+impl ShiftedProductUnit {
+    fn new(device: &Runtime) -> Self {
+        Self {
+            kernel: shifted_product::Kernel::prepare(device).expect("kernel"),
+            scratch: Tensor::zeros(device, TensorShape::vector(ROWS), TensorDType::F32).expect("scratch"),
         }
     }
+
+    /// Over `a, b, w, x, y, z`: `x = a + b`, then `shifted_product` described through
+    /// the unit's scratch, then `z = y * 0.5`.
+    fn record(&self, scheme: &mut Scheme, kernels: &TensorKernels, t: &[Tensor]) -> Result<NodeId, GoldyError> {
+        kernels
+            .recorder(scheme)
+            .add_into("sum", t[0].view(), t[1].view(), t[3].view())?;
+        let node = self
+            .kernel
+            .record(scheme, "shifted_product", t[3].view(), t[2].view(), t[4].view())?
+            .over_1d(ROWS)
+            .node();
+        let mut rec = kernels.recorder(scheme);
+        rec.describe(node, true, |d| {
+            d.add_scalar_into("shift", t[3].view(), 1.5, self.scratch.view())?;
+            d.mul_into("product", self.scratch.view(), t[2].view(), t[4].view())
+        })?;
+        rec.mul_scalar_into("halve", t[4].view(), 0.5, t[5].view())?;
+        Ok(node)
+    }
+}
+
+/// [`ShiftedProductUnit`]'s tensors: `a, b, w, x, y, z`.
+fn unit_init() -> Vec<Init> {
+    described_init().into_iter().take(6).collect()
+}
+
+/// Submit until `scheme` runs a promoted region.
+fn promote(scheme: &mut Scheme) {
+    for _ in 0..24 {
+        drop(scheme.submit().expect("submit"));
+        goldy::test_support::wait_for_fusion_compiles(scheme);
+        if scheme.executed_node_count() < scheme.ir_node_count() {
+            return;
+        }
+    }
+    panic!("fusion did not promote: {:?}", scheme.fusion_report());
+}
+
+/// `z`, as [`ShiftedProductUnit::record`] computes it from `t`.
+fn unit_reference() -> Vec<f32> {
+    let (a, b, w) = (data(1, ROWS), data(2, ROWS), data(3, ROWS));
+    (0..ROWS as usize).map(|i| ((a[i] + b[i]) + 1.5) * w[i] * 0.5).collect()
+}
+
+/// Scratch a description writes, owned by the unit that records it, serves fused and
+/// unfused schemes alike. The fused node does not bind scratch its kernel never touches.
+#[test]
+fn retained_scratch_held_by_its_owner_fuses() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let unit = ShiftedProductUnit::new(&device);
+    let mut twin = Twin::new(&device, &unit_init(), |rec, t| {
+        Ok((Vec::new(), vec![unit.record(rec.scheme(), &kernels, t)?]))
+    });
+    twin.frames(5, "steady");
+    assert_one_semantic_region(twin.fused(), 3);
+    for (scheme, _, _) in &twin.runs {
+        assert!(!goldy::test_support::executed_binds(scheme, unit.scratch.buffer()));
+    }
+}
+
+/// The scheme a group includes binds the description's scratch after the temporary
+/// child is gone; the owner keeps the scratch, and dropping it makes every scheme that
+/// binds it stale.
+#[test]
+fn retained_scratch_outlives_the_group_that_described_with_it() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    let unit = ShiftedProductUnit::new(&device);
+    let mut twin = Twin::new(&device, &unit_init(), |rec, t| {
+        rec.scheme().group("unit", |s| unit.record(s, &kernels, t).map(drop))?;
+        Ok((Vec::new(), Vec::new()))
+    });
+    twin.frames(5, "grouped");
+    assert_one_semantic_region(twin.fused(), 3);
+    drop(unit.scratch);
+    for (scheme, _, _) in &mut twin.runs {
+        assert!(matches!(scheme.submit(), Err(GoldyError::StaleResource)));
+    }
+}
+
+/// Dropping a described node's scratch before the scheme executes is a stale binding,
+/// fused or not, before or after a region promotes.
+#[test]
+fn dropping_description_scratch_is_stale() {
     let _gpu = gpu_lock();
     let device = runtime();
     let ctx = submission::submission_context(&device);
-    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut parent = Scheme::new(&ctx);
-    let mut child = Scheme::new(&ctx);
-    child.keep_alive(Flag(dropped.clone()));
-    parent.include("child", &child).expect("include").finish();
-    drop(child);
-    assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
-    drop(parent);
-    assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    for fusing in [false, true] {
+        for submitted in [false, true] {
+            let t = tensors(&device, &unit_init());
+            let unit = ShiftedProductUnit::new(&device);
+            let mut scheme = Scheme::new(&ctx);
+            scheme.set_automatic_fusion(fusing);
+            unit.record(&mut scheme, &kernels, &t).expect("record");
+            if submitted && fusing {
+                promote(&mut scheme);
+            } else if submitted {
+                drop(scheme.submit().expect("submit"));
+            }
+            drop(unit.scratch);
+            assert!(
+                matches!(scheme.submit(), Err(GoldyError::StaleResource)),
+                "fusing {fusing}, submitted {submitted}"
+            );
+        }
+    }
+}
+
+/// A node that loses its description no longer binds the description's scratch, so its
+/// owner may drop it.
+#[test]
+fn a_dropped_description_releases_its_scratch() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).expect("tensor kernels");
+    for fusing in [false, true] {
+        let t = tensors(&device, &unit_init());
+        let unit = ShiftedProductUnit::new(&device);
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(fusing);
+        let node = unit.record(&mut scheme, &kernels, &t).expect("record");
+        if fusing {
+            promote(&mut scheme);
+        }
+        // A grid change drops the description.
+        scheme
+            .set_node_dispatch(node, ROWS.div_ceil(64) + 1, 1, 1)
+            .expect("dispatch");
+        drop(unit.scratch);
+        let mut sub = scheme.submit().expect("submit without the scratch");
+        let got = (&mut sub >> t[5].buffer()).take::<f32>().expect("take").to_vec();
+        drop(sub);
+        for (i, (got, want)) in got.iter().zip(unit_reference()).enumerate() {
+            assert!(
+                (got - want).abs() <= want.abs() * 1e-6,
+                "fusing {fusing}, index {i}: {got} != {want}"
+            );
+        }
+    }
 }
 
 /// Turning fusion off after a plan has promoted must re-record, not resubmit a

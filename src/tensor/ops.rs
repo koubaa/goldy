@@ -156,8 +156,12 @@ impl<'a> TensorRecorder<'a> {
     /// order the operations do. Otherwise the description joins a region only when the
     /// scheme's [`crate::ContractionPrecision`] lets contractions reassociate.
     ///
-    /// A buffer only the operations use carries values between them; the scheme must
-    /// keep it alive ([`Scheme::keep_alive`]). Scalars are fixed at the values recorded.
+    /// The scheme binds every buffer the operations bind, as it binds a node's parcels,
+    /// whether or not a region runs them. A buffer only the operations use carries values
+    /// between them: the caller owns it, typically a retained buffer held beside the
+    /// scheme and written with `_into` forms, and must keep it alive while the scheme
+    /// submits. Dropping it first makes [`Scheme::submit`] return
+    /// [`GoldyError::StaleResource`]. Scalars are fixed at the values recorded.
     pub fn describe(
         &mut self,
         node: crate::NodeId,
