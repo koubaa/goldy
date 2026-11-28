@@ -266,11 +266,13 @@ impl<'a> TensorRecorder<'a> {
             }
             (TensorDType::I32, TensorDType::F32) => {
                 let node = ops.cast_i32_f32.record(self.scheme, label, src, dst)?.over_1d(n).node();
-                self.scheme.record_semantic_site(node, semantic::integer_value(src, dst));
+                self.scheme
+                    .record_semantic_site(node, semantic::integer_value(src, dst));
             }
             (TensorDType::U32, TensorDType::F32) => {
                 let node = ops.cast_u32_f32.record(self.scheme, label, src, dst)?.over_1d(n).node();
-                self.scheme.record_semantic_site(node, semantic::integer_value(src, dst));
+                self.scheme
+                    .record_semantic_site(node, semantic::integer_value(src, dst));
             }
             (TensorDType::I32, TensorDType::U32) | (TensorDType::U32, TensorDType::I32) => {
                 ops.copy

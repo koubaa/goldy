@@ -523,7 +523,7 @@ fn an_integer_cast_fuses_as_the_value_it_reads() {
                 rec.mul_into("scaled", x, factor, out)?;
                 Ok((Vec::new(), Vec::new()))
             },
-            2,
+            3,
         );
         assert_one_semantic_region(&scheme, 6);
     }
@@ -537,7 +537,7 @@ fn an_integer_cast_fuses_as_the_value_it_reads() {
                 rec.mul_into("scaled", x, factor, out)?;
                 Ok((Vec::new(), Vec::new()))
             },
-            2,
+            3,
         );
         assert_one_semantic_region(&scheme, 2);
     }
