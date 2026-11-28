@@ -211,6 +211,7 @@ fn insert_buffer_common(
             texture_copy_footprint: None,
         },
     );
+    state.bump_residency_generation();
 
     Ok(())
 }
@@ -465,6 +466,7 @@ pub(super) fn create_view(
             texture_copy_footprint: None,
         },
     );
+    state.bump_residency_generation();
 
     Ok(handle)
 }
@@ -607,6 +609,7 @@ pub(super) fn resize(
         }
         state.buffers.get_mut(&vh).unwrap().buffer = new_mtl.clone();
     }
+    state.bump_residency_generation();
 
     Ok(())
 }
@@ -621,6 +624,9 @@ pub(super) fn resize(
 pub(super) fn destroy(state: &mut MetalState, buffer_handle: BufferHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(buffer) = state.buffers.remove(&buffer_handle) {
+        if !buffer.is_withdraw_staging {
+            state.bump_residency_generation();
+        }
         let device_handle = buffer.device_handle;
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);

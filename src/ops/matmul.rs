@@ -428,14 +428,21 @@ pub(crate) struct MatMulTuning {
     pub stdlib_gemv: bool,
     /// GEMMs with `n` below this run on `matmul_f32` when its constraints hold.
     pub library_min_n: u32,
+    /// GEMMs with `m * n * k` below this run on `matmul_f32` when its constraints hold,
+    /// avoiding encoder-boundary splits and keeping low-rank decode projections fusable.
+    pub library_min_macs: u64,
 }
 
 /// Apple M1 (T8103), from `llama3.goldy/tools/gemv_bench`: `MPSMatrixMultiplication`
 /// costs about `n × 0.7 ms` at 768×768 for `n ≤ 3` (6–18× slower than `gemv_f32` at
 /// `n = 1`) and switches to a real GEMM at `n = 4`, where it beats `matmul_f32`.
+/// Tiny multi-row projections (`m * n * k < 128K`, such as per-head low-rank projections
+/// during decode) stay on `matmul_f32` so they neither split the Metal compute encoder
+/// nor block semantic fusion.
 const APPLE_M1: MatMulTuning = MatMulTuning {
     stdlib_gemv: true,
     library_min_n: 4,
+    library_min_macs: 131_072,
 };
 
 impl MatMulTuning {
@@ -446,6 +453,7 @@ impl MatMulTuning {
             MatMulHardware::Cuda => Self {
                 stdlib_gemv: true,
                 library_min_n: 1,
+                library_min_macs: 0,
             },
             MatMulHardware::AppleSilicon { generation: Some(1) } => APPLE_M1,
             // Unmeasured generations start from M1; retune with `tools/gemv_bench gemm`.
@@ -453,12 +461,13 @@ impl MatMulTuning {
             MatMulHardware::Other => Self {
                 stdlib_gemv: false,
                 library_min_n: 1,
+                library_min_macs: 0,
             },
         }
     }
 
-    /// Hardware defaults with `GOLDY_MATMUL_GEMV=stdlib|library` and
-    /// `GOLDY_MATMUL_LIBRARY_MIN_N=<n>` applied.
+    /// Hardware defaults with `GOLDY_MATMUL_GEMV=stdlib|library`,
+    /// `GOLDY_MATMUL_LIBRARY_MIN_N=<n>`, and `GOLDY_MATMUL_LIBRARY_MIN_MACS=<macs>` applied.
     pub(crate) fn resolve(hardware: MatMulHardware) -> Self {
         let mut tuning = Self::for_hardware(hardware);
         if let Ok(v) = std::env::var("GOLDY_MATMUL_GEMV") {
@@ -473,6 +482,12 @@ impl MatMulTuning {
             .and_then(|v| v.parse().ok())
         {
             tuning.library_min_n = n;
+        }
+        if let Some(macs) = std::env::var("GOLDY_MATMUL_LIBRARY_MIN_MACS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            tuning.library_min_macs = macs;
         }
         tuning
     }
@@ -510,7 +525,12 @@ fn use_native_with(
         MatMulPolicy::Library => true,
         MatMulPolicy::Default => match fallback {
             MatMulFallback::Gemv => !tuning.stdlib_gemv,
-            MatMulFallback::Gemm => !(stdlib_gemm_ok && desc.n < tuning.library_min_n),
+            MatMulFallback::Gemm => {
+                let macs = u64::from(desc.m)
+                    .saturating_mul(u64::from(desc.n))
+                    .saturating_mul(u64::from(desc.k));
+                !(stdlib_gemm_ok && (desc.n < tuning.library_min_n || macs < tuning.library_min_macs))
+            }
             MatMulFallback::GemvBf16
             | MatMulFallback::GemmBf16
             | MatMulFallback::GemvIndexed
@@ -1104,6 +1124,16 @@ mod tests {
         assert!(route(Library, metal, m1, 1, Gemv, true));
         assert!(!route(Fallback, cuda, "RTX", 64, Gemm, true));
         assert!(!route(Library, BackendType::Vulkan, "any", 64, Gemm, true));
+
+        let m1_tuning = MatMulTuning::for_hardware(MatMulHardware::detect(metal, m1));
+        assert!(
+            !use_native_with(Default, m1_tuning, metal, &MatMulDesc::gemm(18, 128, 16), Gemm, true),
+            "tiny low-rank decode projection stays on stdlib matmul_f32"
+        );
+        assert!(
+            use_native_with(Default, m1_tuning, metal, &MatMulDesc::gemm(18, 128, 16), Gemm, false),
+            "non-stdlib-eligible tiny GEMM still falls back to MPS"
+        );
     }
 
     #[test]

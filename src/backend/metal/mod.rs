@@ -235,6 +235,7 @@ impl MetalBackend {
                 next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
                 validation,
+                residency_generation: 1,
             },
         })
     }
