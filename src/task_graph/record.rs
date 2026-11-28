@@ -384,7 +384,7 @@ impl ComputeNodeRecord {
         self
     }
 
-    /// Append one scalar virtual-main parameter (region B).
+    /// Append one scalar virtual-main user parameter.
     pub fn with_param(&mut self, value: u32) -> &mut Self {
         use crate::backend::shared::MAX_USER_SLOTS;
         assert!(

@@ -140,26 +140,6 @@ fn collect_metal_slots_from_gpu_command(
                 }
             }
         }
-        GpuCommand::DispatchBatch { arg_data, count, .. } => {
-            if let Some(h) = *current_pipeline {
-                if let Some(p) = state.compute_pipelines.get(&h) {
-                    let layout_size = std::mem::size_of::<PushLayout>();
-                    for i in 0..*count as usize {
-                        let base = i * shared::DISPATCH_BATCH_STRIDE;
-                        if base + layout_size <= arg_data.len() {
-                            let layout: &PushLayout = bytemuck::from_bytes(&arg_data[base..base + layout_size]);
-                            for (slot_i, &idx) in layout.bindless.iter().enumerate() {
-                                if let Some(Some(cat)) = p.push_constant_categories.get(slot_i).copied() {
-                                    if let Some(key) = metal_slot_key_from_category(cat, idx as u32) {
-                                        slots.push(key);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         _ => {}
     }
 }
