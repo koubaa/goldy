@@ -1424,3 +1424,75 @@ fn cyclic_history_with_row_axes_fuses_exactly() {
     );
     assert_eq!(relaxed.executed_node_count(), 2, "{report:?}");
 }
+
+/// The cyclic entry points check every view before recording, and name the view at fault.
+#[test]
+fn cyclic_entry_points_validate_before_recording() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let zeros = |dims: &[u32], dtype| Tensor::zeros(&device, TensorShape::from_dims(dims).unwrap(), dtype).unwrap();
+    let f32s = |dims: &[u32]| zeros(dims, TensorDType::F32);
+    let (rows, width) = (2u32, 4u32);
+    let src = f32s(&[rows]);
+    let out = f32s(&[rows]);
+    let state = f32s(&[rows, width]);
+    let weight = f32s(&[rows, width]);
+    let position = zeros(&[1], TensorDType::U32);
+    let narrow_out = f32s(&[1]);
+    let narrow_state = f32s(&[1, width]);
+    let flat_state = f32s(&[width]);
+    let short = f32s(&[rows + 1]);
+    let wide_weight = f32s(&[rows, width + 1]);
+    let empty_state = f32s(&[rows, 0]);
+    let float_position = f32s(&[1]);
+    let two_positions = zeros(&[2], TensorDType::U32);
+    let broadcast_out = narrow_out.view().broadcast_to(out.shape()).unwrap();
+    let broadcast_state = narrow_state.view().broadcast_to(state.shape()).unwrap();
+
+    let mut scheme = Scheme::new(&ctx);
+    let mut rec = kernels.recorder(&mut scheme);
+    let rejects = |name: &str, result: Result<(), goldy::GoldyError>| match result {
+        Err(goldy::GoldyError::Validation(message)) => {
+            assert!(message.contains(name), "{message:?} names {name}")
+        }
+        other => panic!("expected a validation error naming {name}, got {other:?}"),
+    };
+    let (s, w, h, p, o) = (src.view(), weight.view(), state.view(), position.view(), out.view());
+    rejects("out", rec.cyclic_dot_at("window", s, w, h, p, broadcast_out));
+    rejects("state", rec.cyclic_dot_at("window", s, w, broadcast_state, p, o));
+    rejects("src", rec.cyclic_dot_at("window", short.view(), w, h, p, o));
+    rejects("out", rec.cyclic_dot_at("window", s, w, h, p, short.view()));
+    rejects("weight", rec.cyclic_dot_at("window", s, wide_weight.view(), h, p, o));
+    rejects("row axis", rec.cyclic_dot_at("window", s, w, flat_state.view(), p, o));
+    rejects(
+        "zero width",
+        rec.cyclic_dot_at("window", s, f32s(&[rows, 0]).view(), empty_state.view(), p, o),
+    );
+    rejects(
+        "position",
+        rec.cyclic_dot_at("window", s, w, h, float_position.view(), o),
+    );
+    rejects(
+        "position",
+        rec.cyclic_dot_at("window", s, w, h, two_positions.view(), o),
+    );
+
+    rejects("state", rec.cyclic_store_at("store", s, broadcast_state, p));
+    rejects("src", rec.cyclic_store_at("store", short.view(), h, p));
+    rejects(
+        "row axis",
+        rec.cyclic_store_at("store", narrow_out.view(), flat_state.view(), p),
+    );
+    rejects("position", rec.cyclic_store_at("store", s, h, two_positions.view()));
+
+    rejects("out", rec.cyclic_window_dot_at("dot", w, h, p, broadcast_out));
+    rejects("weight", rec.cyclic_window_dot_at("dot", wide_weight.view(), h, p, o));
+    rejects(
+        "zero width",
+        rec.cyclic_window_dot_at("dot", w, empty_state.view(), p, o),
+    );
+    drop(rec);
+    assert_eq!(scheme.ir_node_count(), 0, "a rejected call records nothing");
+}

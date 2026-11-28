@@ -172,6 +172,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[non_exhaustive]`. `algebra::contracted_output`, `Term::adds_unrounded_product`
   and `FusedDefinition::carried_float` report the patterns.
 
+- **Cyclic entry points validate before recording** — `cyclic_dot_at` checks every
+  view, including that `state` and `out` are writeable, before it records the store,
+  and the cyclic entry points name the view at fault (`src`, `out`, `weight`,
+  `state`, `position`).
+
 - `goldy_shader_ir::algebra::IndexSource` literals now specify `add` and
   `modulus` (`0` and `None` preserve the previous behavior).
 

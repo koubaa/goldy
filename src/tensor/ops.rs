@@ -623,7 +623,12 @@ impl<'a> TensorRecorder<'a> {
         position: TensorView<'_>,
         out: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        Self::cyclic_rows("cyclic_dot_at", weight, state, position, out)?;
+        const OP: &str = "cyclic_dot_at";
+        Self::cyclic_rows(OP, ("src", src), state, position)?;
+        Self::cyclic_rows(OP, ("out", out), state, position)?;
+        Self::cyclic_history(OP, "weight", weight, state)?;
+        state.layout().require_writeable(&format!("{OP} state"))?;
+        out.layout().require_writeable(&format!("{OP} out"))?;
         self.cyclic_store_at(&format!("{label}_store"), src, state, position)?;
         self.cyclic_window_dot_at(&format!("{label}_dot"), weight, state, position, out)
     }
@@ -637,8 +642,9 @@ impl<'a> TensorRecorder<'a> {
         state: TensorView<'_>,
         position: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        let rows = Self::cyclic_rows("cyclic_store_at", state, state, position, src)?;
-        state.layout().require_writeable(&format!("{label} state"))?;
+        const OP: &str = "cyclic_store_at";
+        let rows = Self::cyclic_rows(OP, ("src", src), state, position)?;
+        state.layout().require_writeable(&format!("{OP} state"))?;
         let node = self
             .kernels
             .ops
@@ -661,8 +667,10 @@ impl<'a> TensorRecorder<'a> {
         position: TensorView<'_>,
         out: TensorView<'_>,
     ) -> Result<(), GoldyError> {
-        let rows = Self::cyclic_rows("cyclic_window_dot_at", weight, state, position, out)?;
-        out.layout().require_writeable(&format!("{label} out"))?;
+        const OP: &str = "cyclic_window_dot_at";
+        let rows = Self::cyclic_rows(OP, ("out", out), state, position)?;
+        Self::cyclic_history(OP, "weight", weight, state)?;
+        out.layout().require_writeable(&format!("{OP} out"))?;
         let node = self
             .kernels
             .ops
@@ -675,32 +683,48 @@ impl<'a> TensorRecorder<'a> {
         Ok(())
     }
 
-    /// Checks a cyclic history `state` (`[rows.., width]`), a `peer` of its shape, and a
-    /// `row` view of `[rows..]`; returns the row count.
+    /// Checks a cyclic history `state` (`[rows.., width]`), its `position` and `row`, a
+    /// view of `[rows..]` named `name`; returns the row count.
     fn cyclic_rows(
         op: &str,
-        peer: TensorView<'_>,
+        (name, row): (&str, TensorView<'_>),
         state: TensorView<'_>,
         position: TensorView<'_>,
-        row: TensorView<'_>,
     ) -> Result<u32, GoldyError> {
-        for (name, view) in [("peer", peer), ("state", state), ("row", row)] {
-            view.dtype().require_f32(&format!("{op} {name}"))?;
-        }
+        state.dtype().require_f32(&format!("{op} state"))?;
+        row.dtype().require_f32(&format!("{op} {name}"))?;
         if position.dtype() != TensorDType::U32 || position.numel_u32() != 1 {
             return Err(GoldyError::Validation(format!("{op}: position must be one U32")));
         }
         let state_shape = state.shape();
-        let state_dims = state_shape.dims();
-        let Some((&width, rows)) = state_dims.split_last() else {
-            return Err(GoldyError::Validation(format!("{op}: state needs a width axis")));
+        let (&width, rows) = match state_shape.dims().split_last() {
+            Some((width, rows)) if !rows.is_empty() => (width, rows),
+            _ => {
+                return Err(GoldyError::Validation(format!(
+                    "{op}: state must be [rows.., width] with at least one row axis"
+                )))
+            }
         };
-        if rows.is_empty() || width == 0 || peer.shape().dims() != state_dims || row.shape().dims() != rows {
+        if width == 0 {
+            return Err(GoldyError::Validation(format!("{op}: state has a zero width")));
+        }
+        if row.shape().dims() != rows {
             return Err(GoldyError::Validation(format!(
-                "{op}: rows must be [rows..] and the history [rows.., width]"
+                "{op}: {name} must be [rows..] of state [rows.., width]"
             )));
         }
         Ok(row.numel_u32().max(1))
+    }
+
+    /// Checks that `view`, named `name`, is an f32 view of `state`'s shape.
+    fn cyclic_history(op: &str, name: &str, view: TensorView<'_>, state: TensorView<'_>) -> Result<(), GoldyError> {
+        view.dtype().require_f32(&format!("{op} {name}"))?;
+        if view.shape().dims() != state.shape().dims() {
+            return Err(GoldyError::Validation(format!(
+                "{op}: {name} must have the shape of state [rows.., width]"
+            )));
+        }
+        Ok(())
     }
 
     fn unary(&mut self, label: &str, src: TensorView<'_>, op: u32) -> Result<Tensor, GoldyError> {
