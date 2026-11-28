@@ -1366,30 +1366,31 @@ pub(super) fn record_commands_to_buffer<C: Borrow<GpuCommand>>(
                 textures: tex_entries,
                 ..
             } => {
-                if let Some(enc) = guard.compute {
-                    let mut resources: Vec<&mtl::ResourceRef> = Vec::new();
-                    for (handle, _) in buf_entries {
-                        if let Some(buf_state) = state.buffers.get(handle) {
-                            let buf_ref: &mtl::BufferRef = &buf_state.buffer;
-                            resources
-                                .push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
-                        }
+                let mut resources: Vec<&mtl::ResourceRef> = Vec::new();
+                for (handle, _) in buf_entries {
+                    if let Some(buf_state) = state.buffers.get(handle) {
+                        let buf_ref: &mtl::BufferRef = &buf_state.buffer;
+                        resources.push(unsafe { std::mem::transmute::<&mtl::BufferRef, &mtl::ResourceRef>(buf_ref) });
                     }
-                    for (handle, _) in tex_entries {
-                        if let Some(tex_state) = state.textures.get(handle) {
-                            let tex_ref: &mtl::TextureRef = &tex_state.texture;
-                            resources
-                                .push(unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) });
-                        }
+                }
+                for (handle, _) in tex_entries {
+                    if let Some(tex_state) = state.textures.get(handle) {
+                        let tex_ref: &mtl::TextureRef = &tex_state.texture;
+                        resources.push(unsafe { std::mem::transmute::<&mtl::TextureRef, &mtl::ResourceRef>(tex_ref) });
                     }
-                    if !resources.is_empty() {
-                        if super::api_log::enabled() {
-                            super::api_log::log_resource_barrier(buf_entries.len(), tex_entries.len());
-                        }
-                        let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
-                        let ptr = resources.as_ptr();
-                        let () = unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
+                }
+                if !resources.is_empty() {
+                    // Native operations such as MPS matmul close their compute encoder.
+                    // Open the consumer encoder before recording the graph barrier so
+                    // native writes participate in the following resource dependency.
+                    ensure_compute!();
+                    if super::api_log::enabled() {
+                        super::api_log::log_resource_barrier(buf_entries.len(), tex_entries.len());
                     }
+                    let count: mtl::NSUInteger = resources.len() as mtl::NSUInteger;
+                    let ptr = resources.as_ptr();
+                    let enc = guard.compute.expect("encoder must be set after ensure_compute!()");
+                    let () = unsafe { msg_send![enc, memoryBarrierWithResources: ptr count: count] };
                 }
             }
         }

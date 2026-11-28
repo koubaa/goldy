@@ -8,6 +8,14 @@ mod submission;
 use goldy::{BufferKind, MatMulDesc, MatMulView, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme};
 use std::sync::Mutex;
 
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn add_one(input: &[f32], output: &mut [f32]) {
+    let i = goldy::gpu::global_id().x;
+    if i < output.len() {
+        output[i] = input[i] + 1.0;
+    }
+}
+
 static GPU: Mutex<()> = Mutex::new(());
 
 fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -86,6 +94,38 @@ fn gemm_2x3_times_3x2() {
     let got = read_f32(&mut scheme, &c);
     // [1*7+2*9+3*11, 1*8+2*10+3*12; 4*7+5*9+6*11, 4*8+5*10+6*12]
     assert_eq!(got, vec![58.0, 64.0, 139.0, 154.0]);
+}
+
+#[test]
+fn native_matmul_is_visible_to_following_dispatch() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let a = device
+        .acquire_buffer_with_data(&[1.0f32, 0.0, 0.0, 1.0], BufferKind::Scattered)
+        .unwrap();
+    let b = device
+        .acquire_buffer_with_data(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], BufferKind::Scattered)
+        .unwrap();
+    let product = device
+        .acquire_buffer_with_data(&[0.0f32; 8], BufferKind::Scattered)
+        .unwrap();
+    let output = device
+        .acquire_buffer_with_data(&[0.0f32; 8], BufferKind::Scattered)
+        .unwrap();
+    let add = add_one::Kernel::prepare(&device).unwrap();
+    let mut scheme = Scheme::new(&ctx);
+    scheme
+        .matmul("native_gemm", MatMulDesc::gemm(2, 4, 2))
+        .a(&a, MatMulView::packed())
+        .b(&b, MatMulView::packed())
+        .out(&product, MatMulView::packed())
+        .record();
+    add.record(&mut scheme, "consumer", &product, &output).over_1d(8);
+    assert_eq!(
+        read_f32(&mut scheme, &output),
+        vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+    );
 }
 
 #[test]
