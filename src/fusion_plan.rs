@@ -631,7 +631,7 @@ impl FusionPlanner {
         temporaries: &[TemporaryUse],
     ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
-            let target = semantic_target(&device.capabilities());
+            let target = semantic_target(device);
             self.match_regions(ir, sites, semantic, described, temporaries, &target);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;

@@ -11,7 +11,9 @@
 //! association its recorded kernel uses and lowering reproduces it, so the synthesized
 //! kernel stores what the recorded sequence stores, bit for bit, unless the scheme
 //! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units,
-//! or selects [`crate::ArithmeticPolicy::Relaxed`].
+//! or selects [`crate::ArithmeticPolicy::Relaxed`]. Where the device's compiler
+//! contracts ([`Target::contracts`]), a composition that adds a product it does not
+//! round has no such kernel, and its run stays unfused.
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -679,11 +681,18 @@ impl SemanticProgram {
     }
 }
 
-/// What a device with `caps` offers semantic fusion.
-pub(crate) fn target(caps: &crate::runtime::RuntimeCapabilities) -> Target {
+/// What `device` offers semantic fusion.
+pub(crate) fn target(device: &crate::Runtime) -> Target {
+    let caps = device.capabilities();
     Target {
         subgroup: caps.subgroup_width,
         matrix: caps.matrix_multiply,
+        // The Metal and CUDA C++ compilers contract within an expression by default
+        // (`-ffp-contract=on`, `--fmad=true`), and Goldy compiles them that way.
+        contracts: matches!(
+            device.backend_type(),
+            crate::BackendType::Metal | crate::BackendType::Cuda
+        ),
     }
 }
 

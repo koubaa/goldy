@@ -50,7 +50,9 @@ scheme.set_arithmetic_policy(goldy::ArithmeticPolicy::Relaxed);
 ```
 
 `MatchRecorded` is the default and keeps fusion byte-equivalent to its recorded
-dispatches. `Relaxed` permits reassociation, contraction, and reciprocal transforms
+dispatches. On Metal and CUDA, whose compilers contract multiply-adds within an
+expression, it therefore leaves a region unfused when its terms add a product they do
+not round, such as the taps of a cyclic window dot. `Relaxed` permits reassociation, contraction, and reciprocal transforms
 within generated kernels and across boundaries fusion removes. It is suitable when the
 application accepts ordinary floating-point noise, as inference commonly does. This is
 not a determinism switch: either policy can be repeatable, and numerically sensitive

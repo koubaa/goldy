@@ -355,6 +355,31 @@ impl Term {
         });
     }
 
+    /// Whether a sum or difference somewhere in the term has an operand that is a
+    /// product, or a negated one, it does not round. A compiler that contracts may
+    /// fuse such a pair into one rounding.
+    pub fn adds_unrounded_product(&self) -> bool {
+        fn product(t: &Term) -> bool {
+            match t {
+                Term::Binary { op: BinaryOp::Mul, .. } => true,
+                Term::Unary { op: UnaryOp::Neg, arg } => product(arg),
+                _ => false,
+            }
+        }
+        let mut found = false;
+        self.visit(&mut |t| {
+            if let Term::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                lhs,
+                rhs,
+            } = t
+            {
+                found |= product(lhs) || product(rhs);
+            }
+        });
+        found
+    }
+
     /// Calls `f` for every read, in evaluation order.
     pub fn for_each_read(&self, f: &mut dyn FnMut(ValueId, &[Affine])) {
         self.visit(&mut |t| {

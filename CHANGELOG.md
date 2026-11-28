@@ -152,6 +152,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Exact fusion where compilers contract** — Metal and CUDA compilers contract a
+  multiply into the add that reads it within an expression, so a recorded kernel and a
+  synthesized one need not round the same pairs. Under `MatchRecorded` on those
+  backends, semantic fusion now leaves a region unfused when its terms add a product
+  they do not round, such as the taps of a cyclic window dot, and fused schemes store
+  the unfused bits there too. `Relaxed` still fuses them. In `goldy_shader_ir`,
+  `algebra::Target` gains `contracts` (`false` preserves the previous behavior),
+  `LowerError` gains `Contraction`, and `Term::adds_unrounded_product` reports the
+  pattern.
+
 - `goldy_shader_ir::algebra::IndexSource` literals now specify `add` and
   `modulus` (`0` and `None` preserve the previous behavior).
 
