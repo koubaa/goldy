@@ -212,6 +212,8 @@ jobs:
           echo "Slang libraries:"
           ls -la "$SLANG_DIR" || echo "Directory not found"
 
+      # Keep reusable dependency artifacts without archiving the full incremental
+      # workspace target tree; the Metal-specific key avoids cross-job churn.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
