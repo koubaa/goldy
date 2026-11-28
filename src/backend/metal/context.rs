@@ -82,6 +82,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
     let timeline_event = ld.device.new_shared_event();
     let signal_queue = Arc::new(crate::signal::SignalQueue::new());
     let timeline_waiter = TimelineWaiter::new_with_signals(std::sync::Arc::clone(&signal_queue));
+    let residency = super::residency::ContextResidencySlot::connect(&ld.residency);
 
     let id = state.next_context_id;
     state.next_context_id = state.next_context_id.saturating_add(1);
@@ -102,6 +103,7 @@ pub(super) fn create(state: &mut MetalState, device: DeviceHandle) -> Result<Con
             texture_staging_pool: TextureStagingPool::new(),
             deletion_queue: super::types::DeletionQueue::new(),
             retained_graphs: std::collections::HashMap::new(),
+            residency,
         })),
     );
     Ok(id)

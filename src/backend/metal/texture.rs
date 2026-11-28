@@ -257,7 +257,6 @@ pub(super) fn create(
             is_heap_allocated,
         },
     );
-    state.bump_residency_generation();
 
     tracing::debug!("Created texture {} ({}x{}, {:?})", handle, width, height, format);
     Ok(handle)
@@ -376,7 +375,6 @@ pub(super) fn write_region(
 pub(super) fn destroy(state: &mut MetalState, texture_handle: TextureHandle) {
     let gpu_idle = super::gpu_is_idle(state);
     if let Some(texture) = state.textures.remove(&texture_handle) {
-        state.bump_residency_generation();
         let device_handle = texture.device_handle;
         let ctx_h = super::context::context_handle_for_thread(state, device_handle);
         let base_barrier = super::context::reclamation_barrier(state, device_handle, gpu_idle);

@@ -811,7 +811,6 @@ fn register_surface_texture(
             is_heap_allocated: false,
         },
     );
-    state.bump_residency_generation();
 
     tracing::debug!(
         "Encoded surface drawable into texture {} ({}x{}, bindless storage local={}, global={})",
@@ -831,7 +830,6 @@ fn register_surface_texture(
 /// stays reserved across frames until the surface is destroyed.
 fn unregister_surface_texture(state: &mut MetalState, tex_handle: TextureHandle) {
     if let Some(tex_state) = state.textures.remove(&tex_handle) {
-        state.bump_residency_generation();
         if let Some(device) = state.devices.get(&tex_state.device_handle) {
             device
                 .descriptors

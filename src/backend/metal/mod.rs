@@ -27,6 +27,7 @@ mod pending_submit;
 mod pipeline;
 mod render_commands;
 mod render_target;
+mod residency;
 mod sampler;
 mod shader;
 pub(super) mod staging;
@@ -215,7 +216,7 @@ impl MetalBackend {
                 next_device_handle: 1,
                 contexts: std::collections::HashMap::new(),
                 next_context_id: 1,
-                buffers: std::collections::HashMap::new(),
+                buffers: crate::observer::ObservableTable::with_scope(|b| b.device_handle),
                 next_buffer_handle: 1,
                 shaders: std::collections::HashMap::new(),
                 next_shader_handle: 1,
@@ -227,15 +228,14 @@ impl MetalBackend {
                 next_render_target_handle: 1,
                 surfaces: std::collections::HashMap::new(),
                 next_surface_handle: 1,
-                textures: std::collections::HashMap::new(),
+                textures: crate::observer::ObservableTable::with_scope(|t| t.device_handle),
                 next_texture_handle: 1,
                 samplers: std::collections::HashMap::new(),
                 next_sampler_handle: 1,
-                accels: std::collections::HashMap::new(),
+                accels: crate::observer::ObservableTable::with_scope(|a| a.device_handle),
                 next_accel_handle: 1,
                 slang_compiler: Some(slang_compiler),
                 validation,
-                residency_generation: 1,
             },
         })
     }

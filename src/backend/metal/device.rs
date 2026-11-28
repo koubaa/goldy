@@ -235,7 +235,7 @@ pub(super) fn create(state: &mut MetalState, adapter_id: u32) -> Result<DeviceHa
         submission_worker: Arc::new(crate::backend::submission_worker::SubmissionWorker::new(
             crate::backend::submission_worker::SUBMISSION_QUEUE_CAPACITY,
         )),
-        residency_cache: Mutex::new(super::types::DeviceResidencyCache::default()),
+        residency: super::residency::DeviceResidency::connect(handle, &state.buffers, &state.textures, &state.accels),
     });
 
     super::frame_table::init_device(ld.as_ref());
@@ -434,7 +434,9 @@ pub(super) fn destroy(state: &mut MetalState, device_handle: DeviceHandle) {
         state.textures.retain(|_, t| t.device_handle != device_handle);
         state.samplers.retain(|_, s| s.device_handle != device_handle);
         state.accels.retain(|_, a| a.device_handle != device_handle);
-        state.bump_residency_generation();
+        state.buffers.remove_scope(&device_handle);
+        state.textures.remove_scope(&device_handle);
+        state.accels.remove_scope(&device_handle);
 
         tracing::info!("Destroyed Metal device {}", device_handle);
     }
