@@ -2,10 +2,10 @@
 //! budget is sensitive to: a retained worker that waits, two frames in flight,
 //! a new scheme every frame, and a dispatch size that changes every frame.
 //!
-//! Absolute times are lavapipe host times. The assertions reject the regression
+//! Absolute times are backend host times. The assertions reject the regression
 //! where building or copying a frame-table row costs tens of milliseconds.
 
-#![cfg(feature = "vulkan")]
+#![cfg(any(feature = "vulkan", feature = "metal"))]
 
 #[path = "common/submission.rs"]
 mod submission;
@@ -14,7 +14,10 @@ use goldy::{
     BackendType, Buffer, BufferKind, ComputePipeline, Context, Instance, NodeAccess, NodeId, RequestAdapterOptions,
     Runtime, RuntimeDescriptor, Scheme, ShaderModule,
 };
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
+
+static FRAME_RATE_LOCK: Mutex<()> = Mutex::new(());
 
 const COPY_SHADER: &str = r#"
 import goldy_exp;
@@ -50,6 +53,23 @@ fn buffers(device: &Runtime) -> (Buffer, Buffer) {
     (input, output)
 }
 
+fn supports_frame_rate_test(device: &Runtime) -> bool {
+    matches!(device.backend_type(), BackendType::Vulkan | BackendType::Metal)
+}
+
+fn serialize_frame_rate_test() -> MutexGuard<'static, ()> {
+    FRAME_RATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn timing_assertions_enabled(device: &Runtime) -> bool {
+    if device.backend_type() != BackendType::Metal {
+        return true;
+    }
+    !["MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION"]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|value| value == "1"))
+}
+
 fn record_worker(
     ctx: &Context,
     pipeline: &ComputePipeline,
@@ -80,10 +100,11 @@ fn percentile(mut samples: Vec<f64>, p: f64) -> f64 {
 /// Retained worker, host read every frame. Eight copies.
 #[test]
 fn retained_worker_wait_every_frame_stays_under_a_millisecond() {
+    let _serial = serialize_frame_rate_test();
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -105,17 +126,20 @@ fn retained_worker_wait_every_frame_stays_under_a_millisecond() {
         "case A retained+wait p50 {p50:.1} us p99 {p99:.1} us stats {:?}",
         worker.replay_stats()
     );
-    assert!(p50 < 2_000.0, "case A p50 {p50:.1} us");
+    if timing_assertions_enabled(&device) {
+        assert!(p50 < 2_000.0, "case A p50 {p50:.1} us");
+    }
     assert_eq!(worker.replay_stats().retained_evictions, 0);
 }
 
 /// Retained worker, two submits outstanding, then a wait.
 #[test]
 fn retained_worker_two_in_flight_keeps_its_rate() {
+    let _serial = serialize_frame_rate_test();
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -133,17 +157,20 @@ fn retained_worker_two_in_flight_keeps_its_rate() {
     let secs = start.elapsed().as_secs_f64();
     let hz = f64::from(FRAMES) / secs;
     eprintln!("case C two-in-flight {hz:.0} Hz stats {:?}", worker.replay_stats());
-    assert!(hz > 1_000.0, "case C {hz:.0} Hz");
+    if timing_assertions_enabled(&device) {
+        assert!(hz > 1_000.0, "case C {hz:.0} Hz");
+    }
     assert_eq!(worker.replay_stats().retained_evictions, 0);
 }
 
 /// A new scheme every frame pays record plus emission, not a full-table allocation.
 #[test]
 fn new_scheme_every_frame_stays_under_five_milliseconds() {
+    let _serial = serialize_frame_rate_test();
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -158,17 +185,20 @@ fn new_scheme_every_frame_stays_under_five_milliseconds() {
     }
     let p50 = percentile(samples, 0.50);
     eprintln!("case B new scheme p50 {p50:.1} us");
-    assert!(p50 < 5_000.0, "case B p50 {p50:.1} us");
+    if timing_assertions_enabled(&device) {
+        assert!(p50 < 5_000.0, "case B p50 {p50:.1} us");
+    }
 }
 
 /// Changing the dispatch size every frame re-records. It must not fill the
 /// persistent-row pool and then stall on one victim row.
 #[test]
 fn changing_dispatch_size_does_not_stall_on_row_eviction() {
+    let _serial = serialize_frame_rate_test();
     let _spec = goldy::test_support::SpecializationOverride::force_disabled();
     let _cb = goldy::test_support::CbReuseOverride::force_enabled();
     let device = device();
-    if device.backend_type() != BackendType::Vulkan {
+    if !supports_frame_rate_test(&device) {
         return;
     }
     let ctx = submission::submission_context(&device);
@@ -186,7 +216,9 @@ fn changing_dispatch_size_does_not_stall_on_row_eviction() {
     let p50 = percentile(samples, 0.50);
     let evictions = worker.replay_stats().retained_evictions;
     eprintln!("case D dispatch change p50 {p50:.1} us evictions {evictions}");
-    assert!(p50 < 5_000.0, "case D p50 {p50:.1} us");
+    if timing_assertions_enabled(&device) {
+        assert!(p50 < 5_000.0, "case D p50 {p50:.1} us");
+    }
     // One replacement per frame after the first record, not a 512-row cliff.
     assert!(
         evictions <= u64::from(FRAMES),

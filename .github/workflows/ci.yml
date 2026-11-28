@@ -255,6 +255,16 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test
 
+      - name: Report frame-rate regression timings
+        env:
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+          # Validation deliberately serializes and stalls Metal work; the full
+          # suite above keeps it enabled for correctness coverage.
+          MTL_DEBUG_LAYER: "0"
+          MTL_SHADER_VALIDATION: "0"
+        run: cargo test --test frame_rate -- --nocapture --test-threads=1
+
       - name: Run goldy-ffi integration tests
         env:
           GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
