@@ -94,6 +94,8 @@ pub(crate) struct MockBackend {
     pub fuse_upload_with_compute_partitions: bool,
     /// Reported as [`crate::RuntimeCapabilities::subgroup_width`].
     pub subgroup_width: Option<u32>,
+    /// Reported as [`crate::RuntimeCapabilities::fp_contraction`].
+    pub fp_contraction: crate::FpContraction,
     /// Runtime-global submission sequence (shared value space across contexts on one queue).
     device_retired_floor: HashMap<DeviceHandle, Arc<std::sync::atomic::AtomicU64>>,
     #[cfg(feature = "graphics")]
@@ -299,6 +301,7 @@ impl MockBackend {
             default_surface_format: TextureFormat::Bgra8UnormSrgb,
             fuse_upload_with_compute_partitions: false,
             subgroup_width: None,
+            fp_contraction: crate::FpContraction::Never,
             specialized_shader_creates: 0,
             fail_specialized_shader_creates: false,
             device_retired_floor: HashMap::new(),
@@ -670,6 +673,7 @@ impl GpuBackend for MockBackend {
             host_sidecar_on_submit_worker: true,
             fuse_upload_with_compute_partitions: self.fuse_upload_with_compute_partitions,
             subgroup_width: self.subgroup_width,
+            fp_contraction: self.fp_contraction,
             mesh_shaders: true,
             amplification_shaders: true,
             ray_query: true,

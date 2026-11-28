@@ -330,7 +330,7 @@ fn sibling_contractions_share_their_input() {
     let subgroup = Target {
         subgroup: Some(32),
         matrix: false,
-        contracts: false,
+        contraction: FpContraction::Never,
     };
     let shuffled = lower_on(graph.region(), &[], &subgroup).unwrap();
     assert!(matches!(
@@ -350,7 +350,7 @@ fn sibling_contractions_share_their_input() {
     let narrow = Target {
         subgroup: Some(16),
         matrix: false,
-        contracts: false,
+        contraction: FpContraction::Never,
     };
     assert!(matches!(
         lower_on(graph.region(), &[], &narrow).unwrap().schedule,
@@ -406,13 +406,16 @@ fn an_operation_ending_in_a_product_rounds_it_for_its_readers() {
 }
 
 #[test]
-fn a_contracting_target_declines_an_unrounded_product_in_a_sum() {
+fn a_contracting_target_declines_what_its_compiler_may_fuse() {
     let m = 9;
-    let contracts = Target {
-        contracts: true,
+    let at = |contraction| Target {
+        contraction,
         ..Target::default()
     };
     let lowers = |graph: &Graph, target: &Target| lower_graph(graph, &[], target, ContractionPrecision::Exact);
+    let relaxed =
+        |graph: &Graph, target: &Target| lower_graph_relaxed(graph, &[], target, ContractionPrecision::Exact).is_ok();
+    let contracting = [FpContraction::Expression, FpContraction::Unmarked];
 
     // Products rounded as operations' results, and those a contraction sums, contract
     // alike fused and unfused.
@@ -424,7 +427,19 @@ fn a_contracting_target_declines_an_unrounded_product_in_a_sum() {
         .push(map(&[("sq", 1), ("x", 0)], ("out", 2), m, Term::arg(0) + Term::arg(1)))
         .unwrap();
     rounded.push(gemv(["W", "h", "y"], [3, 4, 5], m, 40)).unwrap();
-    assert!(lowers(&rounded, &contracts).is_ok());
+    for c in contracting {
+        assert!(lowers(&rounded, &at(c)).is_ok(), "{c:?}");
+    }
+    // One kernel computing both maps as written adds the square unrounded.
+    assert_eq!(contracted_output(rounded.region(), FpContraction::Never, false), None);
+    assert_eq!(
+        contracted_output(rounded.region(), FpContraction::Expression, true),
+        None
+    );
+    assert_eq!(
+        contracted_output(rounded.region(), FpContraction::Expression, false).as_deref(),
+        Some("out")
+    );
 
     // A multiply-add inside one operation, as a recorded kernel would contract it.
     let mut inner = Graph::new();
@@ -440,11 +455,14 @@ fn a_contracting_target_declines_an_unrounded_product_in_a_sum() {
         ))
         .unwrap();
     assert!(lowers(&inner, &Target::default()).is_ok());
-    assert_eq!(
-        lowers(&inner, &contracts).unwrap_err(),
-        LowerError::Contraction { output: "out".into() }
-    );
-    assert!(lower_graph_relaxed(&inner, &[], &contracts, ContractionPrecision::Exact).is_ok());
+    for c in contracting {
+        assert_eq!(
+            lowers(&inner, &at(c)).unwrap_err(),
+            LowerError::Contraction { output: "out".into() },
+            "{c:?}"
+        );
+        assert!(relaxed(&inner, &at(c)), "{c:?}");
+    }
 
     // A negated product is not rounded as a result, so it reaches its reader's sum.
     let mut negated = Graph::new();
@@ -455,10 +473,20 @@ fn a_contracting_target_declines_an_unrounded_product_in_a_sum() {
         .push(map(&[("neg", 1), ("x", 0)], ("out", 2), m, Term::arg(0) + Term::arg(1)))
         .unwrap();
     assert!(lowers(&negated, &Target::default()).is_ok());
-    assert!(matches!(
-        lowers(&negated, &contracts),
-        Err(LowerError::Contraction { .. })
-    ));
+    for c in contracting {
+        assert_eq!(
+            lowers(&negated, &at(c)).unwrap_err(),
+            LowerError::Contraction { output: "out".into() },
+            "{c:?}"
+        );
+    }
+
+    // A compiler free to rewrite marked operations too leaves exact lowering nothing.
+    let anywhere = at(FpContraction::Anywhere);
+    for graph in [&rounded, &inner, &negated] {
+        assert!(matches!(lowers(graph, &anywhere), Err(LowerError::Contraction { .. })));
+        assert!(relaxed(graph, &anywhere));
+    }
 }
 
 #[test]
@@ -614,7 +642,7 @@ fn matrix_units_take_contractions_only_when_rounding_is_admitted() {
     let device = Target {
         subgroup: Some(32),
         matrix: true,
-        contracts: false,
+        contraction: FpContraction::Never,
     };
     let lowered = lower_graph(&graph, &[], &device, ContractionPrecision::F16Factors).unwrap();
     assert_eq!(lowered.schedule, Schedule::Matrix { subgroup: 32 });

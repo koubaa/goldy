@@ -4173,8 +4173,18 @@ impl GpuBackend for WebGpuBackend {
     }
 
     fn adapter_capabilities(&self, adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
-        let _ = adapter_id;
+        // WGSL cannot mark an operation exact, and wgpu builds Metal libraries with fast
+        // math. Only a software Vulkan rasterizer rounds each operation as written.
+        let fp_contraction = match self.adapters.get(adapter_id as usize).map(wgpu::Adapter::get_info) {
+            Some(wgpu::AdapterInfo {
+                backend: wgpu::Backend::Vulkan,
+                device_type: wgpu::DeviceType::Cpu,
+                ..
+            }) => crate::FpContraction::Never,
+            _ => crate::FpContraction::Anywhere,
+        };
         crate::runtime::RuntimeCapabilities {
+            fp_contraction,
             preferred_surface_format: TextureFormat::Bgra8Unorm,
             preferred_render_target_format: TextureFormat::Rgba8Unorm,
             supported_surface_formats: vec![

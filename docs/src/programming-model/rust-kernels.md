@@ -50,14 +50,29 @@ scheme.set_arithmetic_policy(goldy::ArithmeticPolicy::Relaxed);
 ```
 
 `MatchRecorded` is the default and keeps fusion byte-equivalent to its recorded
-dispatches. On Metal and CUDA, whose compilers contract multiply-adds within an
-expression, it therefore leaves a region unfused when its terms add a product they do
-not round, such as the taps of a cyclic window dot. `Relaxed` permits reassociation, contraction, and reciprocal transforms
+dispatches. `Relaxed` permits reassociation, contraction, and reciprocal transforms
 within generated kernels and across boundaries fusion removes. It is suitable when the
 application accepts ordinary floating-point noise, as inference commonly does. This is
 not a determinism switch: either policy can be repeatable, and numerically sensitive
 decisions such as near-tied selections can still amplify small differences.
 Hand-authored compute and graphics shaders keep their existing backend defaults.
+
+Shader compilers may contract a multiply into the add that reads it, rounding once
+where the source rounds twice, and a fused kernel need not contract the same pairs as
+the kernels it replaces. `RuntimeCapabilities::fp_contraction` says how far the
+device's compilers go, and under `MatchRecorded` automatic fusion declines what that
+exposes:
+
+| `FpContraction` | Devices | Exact fusion declines |
+|---|---|---|
+| `Never` | Vulkan and DX12 software rasterizers (lavapipe, WARP); WebGPU on lavapipe | nothing |
+| `Expression` | Metal; the CPU backend | a product added unrounded, such as a window dot's taps |
+| `Unmarked` | CUDA; hardware Vulkan and DX12 | that, and a float one composed stage reads from another |
+| `Anywhere` | other WebGPU adapters | every region |
+
+Goldy marks the roundings a fused kernel must keep (`NoContraction`, `precise`,
+`__fadd_rn`), but WGSL has no such marking and wgpu builds Metal libraries with fast
+math. `Relaxed` fuses on every device.
 
 ## Signature mapping
 

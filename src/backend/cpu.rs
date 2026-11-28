@@ -803,6 +803,8 @@ impl GpuBackend for CpuBackend {
     fn adapter_capabilities(&self, _adapter_id: u32) -> crate::runtime::RuntimeCapabilities {
         crate::runtime::RuntimeCapabilities {
             host_sidecar_on_submit_worker: true,
+            // Kernels build as C++ with Clang's default `-ffp-contract=on`.
+            fp_contraction: crate::FpContraction::Expression,
             ..crate::runtime::RuntimeCapabilities::default()
         }
     }

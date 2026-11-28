@@ -61,7 +61,7 @@ pub use op::{Contraction, Expanded, Factor, Map, Op, OpError, OpKind, Operand, P
 pub use region::{Definition, ParcelId, Region, RegionError, Role, Storage, Value};
 pub use rewrite::{Exactness, Law, RewriteError};
 pub use schedule::{
-    lower, lower_graph, lower_graph_relaxed, lower_on, lower_with, ContractionPrecision, Exchange, IndexSource,
-    LowerError, Lowered, Schedule, Target, LANE_WORKGROUP_THREADS, WORKGROUP_THREADS,
+    contracted_output, lower, lower_graph, lower_graph_relaxed, lower_on, lower_with, ContractionPrecision, Exchange,
+    FpContraction, IndexSource, LowerError, Lowered, Schedule, Target, LANE_WORKGROUP_THREADS, WORKGROUP_THREADS,
 };
 pub use term::{BinaryOp, CmpOp, Invariant, ReduceOp, ReduceOrder, ScalarParam, Term, UnaryOp, ValueId};

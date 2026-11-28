@@ -154,7 +154,13 @@ impl<'a> TensorRecorder<'a> {
     /// The operations must store what the dispatch stores. With `exact` they compute it
     /// bit for bit: the dispatch rounds wherever an operation stores and sums in the
     /// order the operations do. Otherwise the description joins a region only when the
-    /// scheme's [`crate::ContractionPrecision`] lets contractions reassociate.
+    /// scheme's [`crate::ContractionPrecision`] lets contractions reassociate or its
+    /// [`crate::ArithmeticPolicy`] is `Relaxed`.
+    ///
+    /// A device whose compiler contracts ([`crate::RuntimeCapabilities::fp_contraction`])
+    /// may compute a product the dispatch adds to a sum with one rounding, where the
+    /// operations round twice. Under `MatchRecorded` such a description joins no region
+    /// on that device, whether or not it is `exact`.
     ///
     /// A buffer only the operations use carries values between them; the scheme must
     /// keep it alive ([`Scheme::keep_alive`]). Scalars are fixed at the values recorded.

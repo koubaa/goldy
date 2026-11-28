@@ -3886,6 +3886,8 @@ impl GpuBackend for CudaBackend {
             subgroup_width: Some(32),
             // `mma.sync` m16n8k16 with f16 operands, as Slang emits for 16×16 tiles.
             matrix_multiply: major >= 8,
+            // NVRTC compiles with `--fmad=true`; `__fadd_rn`-style intrinsics hold.
+            fp_contraction: crate::FpContraction::Unmarked,
             ..crate::runtime::RuntimeCapabilities::default()
         }
     }

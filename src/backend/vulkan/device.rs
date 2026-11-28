@@ -130,6 +130,12 @@ pub(super) fn adapter_capabilities(
     caps.mesh_shaders = dev.mesh_shaders;
     caps.amplification_shaders = dev.amplification_shaders;
     caps.subgroup_width = dev.subgroup_width;
+    // Hardware drivers fuse a multiply into an add unless SPIR-V marks the result
+    // `NoContraction`; a software rasterizer rounds each operation as written.
+    caps.fp_contraction = match dev.properties.device_type {
+        vk::PhysicalDeviceType::CPU => crate::FpContraction::Never,
+        _ => crate::FpContraction::Unmarked,
+    };
     caps
 }
 

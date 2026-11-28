@@ -88,6 +88,9 @@ pub(super) fn adapter_capabilities(
         // Fuse upload blits with the following compute partition so Scheme matches
         // Classic's single-CB structure and avoids an extra commit + event wait.
         fuse_upload_with_compute_partitions: true,
+        // The Metal compiler contracts within an expression (`-ffp-contract=on`) even
+        // under safe math, which exact arithmetic selects.
+        fp_contraction: crate::FpContraction::Expression,
         ..crate::runtime::RuntimeCapabilities::default()
     };
     if let Some(entry) = adapters.iter().find(|a| a.adapter_id == adapter_id) {

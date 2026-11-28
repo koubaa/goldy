@@ -109,6 +109,7 @@ impl fmt::Display for ScalarOrigin {
 }
 
 /// Why a set of dispatch invocations cannot be lowered to one physical dispatch.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FusionRejection {
     /// No constituents were supplied.
@@ -187,6 +188,12 @@ pub enum FusionRejection {
         stage: usize,
         reason: String,
     },
+    /// Stage `stage`'s arithmetic may round differently in one kernel than as recorded,
+    /// because the device's compiler fuses floating-point operations
+    /// ([`crate::algebra::FpContraction`]) and the arithmetic must match the recording.
+    Contraction {
+        stage: usize,
+    },
     /// The run fuses, but its kernel is estimated to take longer than the dispatches
     /// it replaces, such as a product a native library runs faster, or a factor the
     /// kernel recomputes for every element that reads it.
@@ -238,6 +245,10 @@ impl fmt::Display for FusionRejection {
                 write!(f, "fused entry needs {bytes} workgroup-shared bytes, limit is {max}")
             }
             Self::Semantic { stage, reason } => write!(f, "stage {stage} does not fuse semantically: {reason}"),
+            Self::Contraction { stage } => write!(
+                f,
+                "stage {stage} may round differently fused: the device's compiler can contract its arithmetic unlike the recorded kernels"
+            ),
             Self::Cost { fused_ns, unfused_ns } => write!(
                 f,
                 "the fused kernel is estimated at {fused_ns} ns, the dispatches it replaces at {unfused_ns} ns"
@@ -389,6 +400,28 @@ impl FusedDefinition {
             }
         }
         h.finish()
+    }
+
+    /// The first stage that reads a non-integer element an earlier stage writes, or
+    /// `None`. In one kernel a compiler that contracts across statements may fuse the
+    /// writer's arithmetic into the reader's, which separate kernels keep apart.
+    pub fn carried_float(&self) -> Option<usize> {
+        let integral = |t: &str| ["uint", "int", "bool"].iter().any(|p| t.starts_with(p));
+        let uses: Vec<Vec<Use>> = self.stages.iter().map(|s| formal_uses(&s.definition)).collect();
+        let touches = |k: usize, j: usize, used: fn(&Use) -> bool| {
+            self.stages[k]
+                .args
+                .iter()
+                .zip(&uses[k])
+                .any(|(&a, u)| a == j && used(u))
+        };
+        (1..self.stages.len()).find(|&reader| {
+            (0..self.params.len()).any(|j| {
+                !integral(&self.params[j].slang_type)
+                    && touches(reader, j, |u| u.reads || u.whole)
+                    && (0..reader).any(|writer| touches(writer, j, |u| u.writes))
+            })
+        })
     }
 
     /// The same composition with no value forwarding: every constituent load and store
