@@ -3,7 +3,7 @@
 use super::dtype::TensorDType;
 use super::kernels::{
     BatchedMatMulKernel, BinaryF32Kernel, CastF32I32Kernel, CastF32U32Kernel, CastI32F32Kernel, CastU32F32Kernel,
-    CopyU32Kernel, CyclicDotF32Kernel, CyclicStoreF32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel,
+    CopyU32Kernel, CyclicDotF32Kernel, CyclicStoreF32Kernel, GatherF32Kernel, ReduceF32Kernel, ScatterF32Kernel, StoreAtF32Kernel,
     UnaryF32Kernel, OP_ABS, OP_ADD, OP_ADD_SCALAR, OP_COPY, OP_DIV, OP_DIV_SCALAR, OP_EXP, OP_FILL, OP_LOG, OP_MAX,
     OP_MAX_SCALAR, OP_MEAN, OP_MIN, OP_MIN_SCALAR, OP_MUL, OP_MUL_SCALAR, OP_NEG, OP_RECIP, OP_RMAX, OP_RMIN,
     OP_SCATTER_ADD, OP_SCATTER_MAX, OP_SCATTER_MIN, OP_SCATTER_SET, OP_SIGMOID, OP_SQRT, OP_SUB, OP_SUB_SCALAR, OP_SUM,
@@ -70,6 +70,7 @@ pub(crate) struct PreparedOps {
     pub gather: GatherF32Kernel,
     pub scatter: ScatterF32Kernel,
     pub cyclic_store: CyclicStoreF32Kernel,
+    pub store_at: StoreAtF32Kernel,
     pub cyclic_dot: CyclicDotF32Kernel,
     pub batched: BatchedMatMulKernel,
     pub cast_f32_i32: CastF32I32Kernel,
@@ -88,6 +89,7 @@ impl PreparedOps {
             gather: GatherF32Kernel::prepare_for_policy(runtime, policy)?,
             scatter: ScatterF32Kernel::prepare_for_policy(runtime, policy)?,
             cyclic_store: CyclicStoreF32Kernel::prepare_for_policy(runtime, policy)?,
+            store_at: StoreAtF32Kernel::prepare_for_policy(runtime, policy)?,
             cyclic_dot: CyclicDotF32Kernel::prepare_for_policy(runtime, policy)?,
             batched: BatchedMatMulKernel::prepare_for_policy(runtime, policy)?,
             cast_f32_i32: CastF32I32Kernel::prepare_for_policy(runtime, policy)?,
@@ -680,6 +682,32 @@ impl<'a> TensorRecorder<'a> {
             .node();
         self.scheme
             .record_semantic_site(node, semantic::cyclic_store(src, state, position));
+        Ok(())
+    }
+
+    /// Store `src` (`[rows..]`) at slot `position` of the last axis of `state`
+    /// (`[rows.., width]`); a position of `width` or more stores nothing. `position` is
+    /// one `u32`. Automatic fusion describes positions below 2^31, as for
+    /// [`Self::cyclic_store_at`].
+    pub fn store_at(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        state: TensorView<'_>,
+        position: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        const OP: &str = "store_at";
+        let rows = Self::cyclic_rows(OP, ("src", src), state, position)?;
+        state.layout().require_writeable(&format!("{OP} state"))?;
+        let node = self
+            .kernels
+            .ops
+            .store_at
+            .record(self.scheme, label, src, state, position)?
+            .over_1d(rows)
+            .node();
+        self.scheme
+            .record_semantic_site(node, semantic::bounded_store(src, state, position));
         Ok(())
     }
 

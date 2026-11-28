@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own scratch. Entries holding a reduction's identity (such as `-1e30` for a max next
   to zero weights) let a fixed-width reduction cover a partly filled axis.
 
+- **Bounded stores** — `TensorRecorder::store_at` stores one value per row at slot
+  `position` of a history's last axis, and nothing when the position is past the last
+  slot: the non-wrapping counterpart of `cyclic_store_at`, for a history that is
+  allocated once and not reused. Automatic fusion composes it with neighbouring tensor
+  algebra; a position past the history rewrites a slot with what it holds, so the fused
+  history keeps the recorded bits. Positions are described below 2^31, as for the
+  cyclic stores.
+
 - **Described dispatches** — `TensorRecorder::describe(node, exact, f)` states an
   authored dispatch as the tensor operations `f` records, without recording them.
   Automatic fusion composes the node with its neighbours as those operations, and a

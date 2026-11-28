@@ -72,6 +72,42 @@ pub(crate) fn cyclic_store(
     }))
 }
 
+/// `tensor_store_at_f32`: `state[rows.., position] = src` for a position inside the
+/// history. Past it the slot parameter clamps into the history, and the store writes
+/// back what the clamped slot holds, which leaves the history as the kernel does.
+pub(crate) fn bounded_store(
+    src: TensorView<'_>,
+    state: TensorView<'_>,
+    position: TensorView<'_>,
+) -> Option<SemanticSite> {
+    let state_shape = state.shape();
+    let (&width, rows) = state_shape.dims().split_last()?;
+    if src.shape().dims() != rows || width == 0 {
+        return None;
+    }
+    let mut s = SiteBuilder::default();
+    let raw_source = index_source(&mut s, position, 0, None)?;
+    let raw = s.index_param("position", 0..i64::from(i32::MAX) + 1, raw_source);
+    let slot_source = index_source(&mut s, position, 0, None)?;
+    let slot = s.index_param("slot", 0..i64::from(width), slot_source);
+    let input = operand(&mut s, "x", src)?;
+    let mut target = storage(&mut s, state)?;
+    let along = target.strides.pop()?;
+    target.offset = target.offset + Affine::sym(Sym::Param(slot)) * along;
+    let inside = Term::select(
+        Affine::sym(Sym::Param(raw)),
+        CmpOp::Lt,
+        i64::from(width),
+        Term::arg(0),
+        Term::arg(1),
+    );
+    s.finish(OpKind::Map(Map {
+        shape: rows.to_vec(),
+        inputs: vec![input, Operand::new("held", rows, target.clone())],
+        outputs: vec![(Operand::new("state", rows, target), inside)],
+    }))
+}
+
 pub(crate) fn cyclic_dot(
     state: TensorView<'_>,
     weight: TensorView<'_>,
