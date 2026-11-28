@@ -11,7 +11,7 @@ use super::kernels::{
     OP_SUB_SCALAR, OP_SUM, OP_TANH,
 };
 use super::view::TensorView;
-use crate::semantic_fusion::{SemanticSite, SiteBuilder, SiteParcel};
+use crate::semantic_fusion::{SemanticSite, SiteBuilder};
 use goldy_shader_ir::algebra::{
     Affine, BinaryOp, CmpOp, IndexSource, Map, OpKind, Operand, ReduceOp, ReduceOrder, Reduction, Storage, Sym, Term,
     UnaryOp,
@@ -22,7 +22,7 @@ use goldy_shader_ir::ElementType;
 const REDUCE_MAX_START: f32 = -3.402823e38;
 
 fn storage(s: &mut SiteBuilder, view: TensorView<'_>) -> Option<Storage> {
-    let parcel = s.parcel(SiteParcel::of(view.buffer().whole())?);
+    let parcel = s.parcel(view.site_parcel()?);
     let offset = i64::try_from(view.storage_offset()).ok()?;
     Some(Storage::strided(parcel, offset, view.layout().strides()))
 }
@@ -39,7 +39,7 @@ fn operand(s: &mut SiteBuilder, name: &str, view: TensorView<'_>) -> Option<Oper
 
 fn index_source(s: &mut SiteBuilder, view: TensorView<'_>, add: i64, modulus: Option<u32>) -> Option<IndexSource> {
     (view.dtype() == TensorDType::U32 && view.numel_u32() == 1).then_some(IndexSource {
-        parcel: s.parcel(SiteParcel::of(view.buffer().whole())?),
+        parcel: s.parcel(view.site_parcel()?),
         element: Affine::constant(i64::try_from(view.storage_offset()).ok()?),
         element_type: ElementType::U32,
         add,
@@ -259,7 +259,7 @@ pub(crate) fn scatter_slice(
     }
     let mut s = SiteBuilder::default();
     let source = IndexSource {
-        parcel: s.parcel(SiteParcel::of(index.buffer().whole())?),
+        parcel: s.parcel(index.site_parcel()?),
         element: Affine::constant(i64::try_from(index.storage_offset()).ok()?),
         // The kernel binds every index parcel as i32.
         element_type: ElementType::I32,

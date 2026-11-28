@@ -205,9 +205,18 @@ impl<'a> SchemeNodeStart<'a> {
         self
     }
 
-    pub fn bind_temporary(mut self, temporary: &crate::Temporary, access: NodeAccess) -> Self {
+    pub fn bind_temporary(self, temporary: &crate::Temporary, access: NodeAccess) -> Self {
+        self.bind_temporary_range(temporary, None, access)
+    }
+
+    pub fn bind_temporary_range(
+        mut self,
+        temporary: &crate::Temporary,
+        byte_range: Option<(u64, u64)>,
+        access: NodeAccess,
+    ) -> Self {
         self.note_resource_access(access);
-        self.builder = self.builder.with_temporary(temporary, access);
+        self.builder = self.builder.with_temporary_range(temporary, byte_range, access);
         self
     }
 

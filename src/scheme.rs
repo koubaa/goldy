@@ -852,7 +852,7 @@ impl SchemeDesc {
     }
 
     /// Conservative admission for [`Scheme::include`]: instance-state hybrids stay on the root.
-    fn validate_for_include(&self) -> Result<(), GoldyError> {
+    fn validate_for_include(&self, allow_parent_temporaries: bool) -> Result<(), GoldyError> {
         if !self.all_stamps_alive() {
             return Err(GoldyError::StaleResource);
         }
@@ -863,7 +863,7 @@ impl SchemeDesc {
                     .into(),
             ));
         }
-        if !self.temporary_uses.is_empty() {
+        if !allow_parent_temporaries && !self.temporary_uses.is_empty() {
             return Err(GoldyError::Validation(
                 "include: child scheme binds a scheme-local temporary. \
                  hint: temporaries belong to the scheme that declared them; declare and bind them on the parent"
@@ -917,6 +917,7 @@ impl SchemeDesc {
                                 .into(),
                         ));
                     }
+                    ResourceId::TransientBuffer(_) if allow_parent_temporaries => {}
                     ResourceId::TransientBuffer(_) | ResourceId::TransientTexture(_) => {
                         return Err(GoldyError::Validation(
                             "include: child scheme binds a transient parcel. \
@@ -1051,11 +1052,46 @@ impl Scheme {
         }
         let stride = u32::try_from(stride)
             .map_err(|_| GoldyError::Validation(format!("temporary_buffer: element stride {stride} exceeds u32")))?;
+        self.temporary_raw(len as u64, stride)
+    }
+
+    fn temporary_raw(&mut self, len: u64, stride: u32) -> Result<Temporary, GoldyError> {
         let id = u32::try_from(self.desc.temporaries.len())
             .map_err(|_| GoldyError::Validation("temporary_buffer: too many temporaries".into()))?;
-        let temporary = Temporary::new(self.scheme_id, id, len as u64, stride);
+        let temporary = Temporary::new(self.scheme_id, id, len, stride);
         self.desc.temporaries.push(temporary.decl());
         Ok(temporary)
+    }
+
+    pub(crate) fn scheme_id(&self) -> u64 {
+        self.scheme_id
+    }
+
+    /// Declare a scheme-local temporary tensor of `shape` and `dtype`.
+    ///
+    /// Like [`Self::temporary_buffer`], declaring a temporary tensor does not allocate:
+    /// fused regions whose constituents are its only users elide it into registers, and
+    /// any surviving uses pack onto buffers from the context's transient pool across
+    /// non-overlapping waves.
+    #[cfg(feature = "tensor")]
+    pub fn temporary_tensor(
+        &mut self,
+        shape: crate::tensor::TensorShape,
+        dtype: crate::tensor::TensorDType,
+    ) -> Result<crate::tensor::TensorView<'static>, GoldyError> {
+        let layout = crate::tensor::TensorLayout::packed(dtype, shape, 0)?;
+        let n = layout.numel()?;
+        let elem = dtype.size_bytes() as u64;
+        let mut bytes = n
+            .checked_mul(elem)
+            .ok_or_else(|| GoldyError::Validation("temporary_tensor: byte size overflow".into()))?;
+        if elem < 4 {
+            bytes = bytes.next_multiple_of(4);
+        }
+        let bytes = bytes.max(elem);
+        let stride = dtype.size_bytes() as u32;
+        let temporary = self.temporary_raw(bytes / u64::from(stride), stride)?;
+        crate::tensor::TensorView::from_temporary(temporary, layout)
     }
 
     /// Number of pool buffers backing this scheme's temporaries after its last
@@ -1110,7 +1146,7 @@ impl Scheme {
                     .into(),
             ));
         }
-        child.desc.validate_for_include()?;
+        child.desc.validate_for_include(false)?;
         // Drops a promoted fusion plan first: copied sites are keyed by recorded index.
         self.mark_structure_dirty();
         let id = self.copy_child_desc(label.into(), child);
@@ -1127,13 +1163,39 @@ impl Scheme {
         f: impl FnOnce(&mut Scheme) -> Result<(), GoldyError>,
     ) -> Result<GroupId, GoldyError> {
         let mut child = Scheme::new(&self.ctx);
+        child.scheme_id = self.scheme_id;
         child.automatic_fusion = self.automatic_fusion;
         child.fusion.set_arithmetic(self.fusion.arithmetic());
-        f(&mut child)?;
+        child.desc.temporaries = std::mem::take(&mut self.desc.temporaries);
+        let outcome = f(&mut child);
+        self.desc.temporaries = std::mem::take(&mut child.desc.temporaries);
+        outcome?;
         // Parameter buffers are owned by the scheme that recorded them. The child
         // is dropped at the end of this call, so the parent keeps them alive.
         let params = std::mem::take(&mut child.matmul_param_buffers);
-        let id = self.include(label, &child)?.finish();
+        let child_uses = std::mem::take(&mut child.desc.temporary_uses);
+        if let Some(msg) = child.record_errors.first() {
+            return Err(GoldyError::Validation(format!(
+                "include: child scheme has a pending record error: {msg}"
+            )));
+        }
+        if !child.yield_stats.is_empty() {
+            return Err(GoldyError::Validation(
+                "include: child scheme contains a yielding dispatch. \
+                 hint: yielding nodes are host-driven instance state and cannot be snapshotted"
+                    .into(),
+            ));
+        }
+        child.desc.validate_for_include(true)?;
+        self.mark_structure_dirty();
+        let node_offset = self.desc.ir.nodes.len() as u32;
+        let id = self.copy_child_desc(label.into(), &child);
+        self.desc
+            .temporary_uses
+            .extend(child_uses.into_iter().map(|u| TemporaryUse {
+                node: u.node + node_offset,
+                ..u
+            }));
         self.matmul_param_buffers.extend(params);
         Ok(id)
     }
@@ -2347,11 +2409,21 @@ impl Scheme {
     /// A scheme on this scheme's context that records as this one does, for operations
     /// that describe a node rather than run.
     #[cfg(feature = "tensor")]
-    pub(crate) fn sketch(&self) -> Scheme {
+    pub(crate) fn describe_with_sketch(
+        &mut self,
+        node: NodeId,
+        exact: bool,
+        describe: impl FnOnce(&mut Scheme) -> Result<(), GoldyError>,
+    ) -> Result<(), GoldyError> {
         let mut sketch = Scheme::new(&self.ctx);
+        sketch.scheme_id = self.scheme_id;
         sketch.automatic_fusion = self.automatic_fusion;
         sketch.fusion.set_arithmetic(self.fusion.arithmetic());
-        sketch
+        sketch.desc.temporaries = std::mem::take(&mut self.desc.temporaries);
+        let outcome = describe(&mut sketch);
+        self.desc.temporaries = std::mem::take(&mut sketch.desc.temporaries);
+        outcome?;
+        self.describe_node(node, &sketch, exact)
     }
 
     pub(crate) fn backend_type(&self) -> crate::types::BackendType {
@@ -2381,8 +2453,9 @@ impl Scheme {
         site: Option<crate::semantic_fusion::SemanticSite>,
     ) {
         self.mark_structure_dirty();
+        let node_idx = self.desc.ir.nodes.len() as u32;
         if let Some(site) = site {
-            self.desc.semantic_sites.insert(self.desc.ir.nodes.len() as u32, site);
+            self.desc.semantic_sites.insert(node_idx, site);
         }
         let mut bindings = vec![
             ResourceBinding {
@@ -2399,7 +2472,30 @@ impl Scheme {
             },
         ];
         let mut resource_slots = vec![a.slot, b.slot, c.slot];
+        for (idx, temp) in [a.temporary, b.temporary, c.temporary].into_iter().enumerate() {
+            if let Some(temp) = temp {
+                self.desc.temporary_uses.push(TemporaryUse {
+                    node: node_idx,
+                    binding: idx as u32,
+                    slot: idx as u32,
+                    descriptor: temp.descriptor,
+                    temporary: temp.temporary,
+                    byte_range: temp.byte_range,
+                });
+            }
+        }
         for extra in extras {
+            let idx = bindings.len() as u32;
+            if let Some(temp) = extra.temporary {
+                self.desc.temporary_uses.push(TemporaryUse {
+                    node: node_idx,
+                    binding: idx,
+                    slot: resource_slots.len() as u32,
+                    descriptor: temp.descriptor,
+                    temporary: temp.temporary,
+                    byte_range: temp.byte_range,
+                });
+            }
             bindings.push(ResourceBinding {
                 resource: extra.resource,
                 access: NodeAccess::Read,
@@ -4056,6 +4152,30 @@ pub(crate) trait SchemeBindable {
     fn resource_identity(&self) -> Option<ResourceId> {
         None
     }
+
+    /// Scheme-local [`Temporary`] this bindable refers to, if any.
+    fn temporary(&self) -> Option<Temporary> {
+        None
+    }
+
+    /// Optional `(offset, len)` byte sub-range when binding a narrowed view over a temporary.
+    fn temporary_byte_range(&self) -> Option<(u64, u64)> {
+        None
+    }
+}
+
+impl SchemeBindable for Temporary {
+    fn resolve(&self, _: &mut Scheme, _: ResourceAccess) -> SchemeBindResult {
+        (Some((self.resource_id(), None)), Some(TEMPORARY_SLOT_PLACEHOLDER))
+    }
+
+    fn resource_identity(&self) -> Option<ResourceId> {
+        Some(self.resource_id())
+    }
+
+    fn temporary(&self) -> Option<Temporary> {
+        Some(*self)
+    }
 }
 
 impl SchemeBindable for Parcel {
@@ -4249,6 +4369,9 @@ impl<'a> SchemeNodeBuilder<'a> {
     /// The nth call corresponds to the nth resource-kind parameter in the shader signature.
     #[allow(private_bounds)]
     pub fn with_parcel(mut self, bindable: &impl SchemeBindable, access: NodeAccess) -> Self {
+        if let Some(temp) = bindable.temporary() {
+            return self.with_temporary_range(&temp, bindable.temporary_byte_range(), access);
+        }
         // The graph `access` drives barriers; the *descriptor* (SRV vs UAV) is chosen
         // from the shader signature's reflected requirement for this slot, so a
         // `Scattered<T>` read still binds its UAV without the caller passing raw handles.
@@ -4296,7 +4419,16 @@ impl<'a> SchemeNodeBuilder<'a> {
 
     /// Declare that this node accesses a temporary of this scheme, as the next shader
     /// resource slot (see [`Scheme::temporary_buffer`]).
-    pub fn with_temporary(mut self, temporary: &Temporary, access: NodeAccess) -> Self {
+    pub fn with_temporary(self, temporary: &Temporary, access: NodeAccess) -> Self {
+        self.with_temporary_range(temporary, None, access)
+    }
+
+    pub(crate) fn with_temporary_range(
+        mut self,
+        temporary: &Temporary,
+        byte_range: Option<(u64, u64)>,
+        access: NodeAccess,
+    ) -> Self {
         let slot_idx = self.resource_slots.len();
         if temporary.scheme_id != self.scheme.scheme_id {
             self.scheme.record_errors.push(format!(
@@ -4324,6 +4456,7 @@ impl<'a> SchemeNodeBuilder<'a> {
             slot: slot_idx as u32,
             descriptor,
             temporary: temporary.id,
+            byte_range,
         });
         self.bindings.push(ResourceBinding { resource, access });
         self.resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);

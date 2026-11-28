@@ -1518,3 +1518,160 @@ fn cyclic_entry_points_validate_before_recording() {
     drop(rec);
     assert_eq!(scheme.ir_node_count(), 0, "a rejected call records nothing");
 }
+
+#[test]
+fn temporary_tensor_elides_in_fusion_and_packs_across_groups() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let n = 32u32;
+    let init_state: Vec<f32> = (0..n).map(|i| ((i as f32) - 15.5) * 0.05).collect();
+    let weight_host: Vec<f32> = (0..(n * n))
+        .map(|i| (((i * 17 + 5) % 29) as f32 - 14.0) * 0.01)
+        .collect();
+
+    let scale_kernel = scale_view::Kernel::prepare(&device).unwrap();
+    let weight = Tensor::from_f32(&device, TensorShape::matrix(n, n), &weight_host).unwrap();
+
+    // CPU reference across 3 sequential layer visits.
+    let mut expected = init_state.clone();
+    for _ in 0..3 {
+        let normed: Vec<f32> = expected.iter().map(|v| v * 0.5).collect();
+        for r in 0..n as usize {
+            let mut acc = 0.0f32;
+            for c in 0..n as usize {
+                acc += weight_host[r * (n as usize) + c] * normed[c];
+            }
+            expected[r] += acc.tanh();
+        }
+    }
+
+    let record_layers = |scheme: &mut Scheme, state: &Tensor| {
+        let mut rec = kernels.recorder(scheme);
+        for visit in 0..3 {
+            rec.group(format!("layer_{visit}"), |r| {
+                let normed = r.temporary(TensorShape::vector(n), TensorDType::F32)?;
+                let node = scale_kernel
+                    .record(r.scheme(), "scale", state.view(), normed, 0.5)?
+                    .over_1d(n);
+                r.describe(node.node(), true, |d| {
+                    let mid = d.temporary(TensorShape::vector(n), TensorDType::F32)?;
+                    d.mul_scalar_into("quarter", state.view(), 0.25, mid)?;
+                    d.add_into("double_quarter", mid, mid, normed)
+                })?;
+                let proj = r.temporary(TensorShape::vector(n), TensorDType::F32)?;
+                let act = r.temporary(TensorShape::vector(n), TensorDType::F32)?;
+                r.matmul_into("proj", weight.view(), normed, proj)?;
+                r.tanh_into("tanh", proj, act)?;
+                r.add_into("res", state.view(), act, state.view())
+            })
+            .unwrap();
+        }
+    };
+
+    // Unfused run: private `describe` temporaries never materialize, and surviving
+    // temporaries pack across the 3 sequential groups onto <=3 transient buffers.
+    let state_unfused = Tensor::from_f32(&device, TensorShape::vector(n), &init_state).unwrap();
+    let mut unfused = Scheme::new(&ctx);
+    unfused.set_automatic_fusion(false);
+    record_layers(&mut unfused, &state_unfused);
+    let got_unfused = read_f32(&mut unfused, state_unfused.buffer());
+    assert!(
+        unfused.temporary_storage_count() <= 3,
+        "expected sequential layer temporaries to pack onto <=3 transient buffers, got {}",
+        unfused.temporary_storage_count()
+    );
+    for (i, (&g, &e)) in got_unfused.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-4, "unfused[{i}]: got {g}, expected {e}");
+    }
+
+    // Relaxed fused run: `act` (`silu -> res`) elides into registers and sequential groups
+    // pack `normed` + `proj` onto <=2 transient buffers across all 3 layers.
+    let state_fused = Tensor::from_f32(&device, TensorShape::vector(n), &init_state).unwrap();
+    let reset = Tensor::from_f32(&device, TensorShape::vector(n), &init_state).unwrap();
+    let mut fused = Scheme::new(&ctx);
+    fused.set_arithmetic_policy(goldy::ArithmeticPolicy::Relaxed);
+    fused.set_automatic_fusion(true);
+    kernels
+        .recorder(&mut fused)
+        .copy("reset", reset.view(), state_fused.view())
+        .unwrap();
+    record_layers(&mut fused, &state_fused);
+    settle_fusion(&mut fused);
+    let report = fused.fusion_report();
+    let total_elided: usize = report.regions.iter().map(|r| r.elided).sum();
+    assert!(
+        total_elided >= 3,
+        "expected intra-region temporary `act` to elide in each layer: {report:?}"
+    );
+    assert!(
+        fused.temporary_storage_count() <= 2,
+        "expected fused 3-layer graph to need <=2 transient buffers, got {}",
+        fused.temporary_storage_count()
+    );
+    let got_fused = read_f32(&mut fused, state_fused.buffer());
+    for (i, (&g, &e)) in got_fused.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-4, "fused[{i}]: got {g}, expected {e}");
+    }
+}
+
+#[test]
+fn temporary_tensor_narrow_slice_works_with_tensor_ops_and_matmul() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+
+    let x_host: Vec<f32> = (0..16).map(|i| (i as f32 + 1.0) * 0.1).collect();
+    let w_right_host: Vec<f32> = (0..(32 * 16))
+        .map(|i| (((i * 11 + 3) % 19) as f32 - 9.0) * 0.02)
+        .collect();
+    let w_out_host: Vec<f32> = (0..(8 * 48))
+        .map(|i| (((i * 7 + 1) % 23) as f32 - 11.0) * 0.03)
+        .collect();
+
+    let x = Tensor::from_f32(&device, TensorShape::vector(16), &x_host).unwrap();
+    let w_right = Tensor::from_f32(&device, TensorShape::matrix(32, 16), &w_right_host).unwrap();
+    let w_out = Tensor::from_f32(&device, TensorShape::matrix(8, 48), &w_out_host).unwrap();
+    let out = Tensor::zeros(&device, TensorShape::vector(8), TensorDType::F32).unwrap();
+
+    let mut cat_expected = vec![0.0f32; 48];
+    for i in 0..16 {
+        cat_expected[i] = x_host[i] + 0.5;
+    }
+    for r in 0..32 {
+        let mut acc = 0.0f32;
+        for c in 0..16 {
+            acc += w_right_host[r * 16 + c] * x_host[c];
+        }
+        cat_expected[16 + r] = acc;
+    }
+    let mut expected = vec![0.0f32; 8];
+    for r in 0..8 {
+        let mut acc = 0.0f32;
+        for c in 0..48 {
+            acc += w_out_host[r * 48 + c] * cat_expected[c];
+        }
+        expected[r] = acc;
+    }
+
+    let mut scheme = Scheme::new(&ctx);
+    scheme.set_arithmetic_policy(goldy::ArithmeticPolicy::Relaxed);
+    scheme.set_automatic_fusion(true);
+    {
+        let mut rec = kernels.recorder(&mut scheme);
+        let cat = rec.temporary(TensorShape::vector(48), TensorDType::F32).unwrap();
+        let left = cat.narrow(0, 0, 16).unwrap();
+        let right = cat.narrow(0, 16, 32).unwrap();
+        rec.add_scalar_into("left", x.view(), 0.5, left).unwrap();
+        rec.matmul_into("right", w_right.view(), x.view(), right).unwrap();
+        rec.matmul_into("out", w_out.view(), cat, out.view()).unwrap();
+    }
+    settle_fusion(&mut scheme);
+    assert_eq!(scheme.temporary_storage_count(), 1);
+    let got = read_f32(&mut scheme, out.buffer());
+    for (i, (&g, &e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-4, "out[{i}]: got {g}, expected {e}");
+    }
+}

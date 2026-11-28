@@ -162,21 +162,35 @@ impl<'a> TensorRecorder<'a> {
     /// operations round twice. Under `MatchRecorded` such a description joins no region
     /// on that device, whether or not it is `exact`.
     ///
-    /// The scheme binds every buffer the operations bind, as it binds a node's parcels,
-    /// whether or not a region runs them. A buffer only the operations use carries values
-    /// between them: the caller owns it, typically a retained buffer held beside the
-    /// scheme and written with `_into` forms, and must keep it alive while the scheme
-    /// submits. Dropping it first makes [`Scheme::submit`] return
-    /// [`GoldyError::StaleResource`]. Scalars are fixed at the values recorded.
+    /// The scheme binds every retained buffer the operations bind, as it binds a node's
+    /// parcels, whether or not a region runs them; scratch used only inside `describe`
+    /// may instead be declared with [`Self::temporary`] so no buffer is allocated.
+    /// Scalars are fixed at the values recorded.
     pub fn describe(
         &mut self,
         node: crate::NodeId,
         exact: bool,
         describe: impl FnOnce(&mut TensorRecorder<'_>) -> Result<(), GoldyError>,
     ) -> Result<(), GoldyError> {
-        let mut sketch = self.scheme.sketch();
-        describe(&mut self.kernels.recorder(&mut sketch))?;
-        self.scheme.describe_node(node, &sketch, exact)
+        let kernels = &self.kernels;
+        self.scheme
+            .describe_with_sketch(node, exact, |sketch| describe(&mut kernels.recorder(sketch)))
+    }
+
+    /// Declare a scheme-local temporary tensor of `shape` and `dtype` (see
+    /// [`Scheme::temporary_tensor`]).
+    pub fn temporary(&mut self, shape: TensorShape, dtype: TensorDType) -> Result<TensorView<'static>, GoldyError> {
+        self.scheme.temporary_tensor(shape, dtype)
+    }
+
+    /// Record `f` onto a labeled group on the underlying scheme (see [`Scheme::group`]).
+    pub fn group(
+        &mut self,
+        label: impl Into<crate::SchemeLabel>,
+        f: impl FnOnce(&mut TensorRecorder<'_>) -> Result<(), GoldyError>,
+    ) -> Result<crate::GroupId, GoldyError> {
+        let kernels = &self.kernels;
+        self.scheme.group(label, |child| f(&mut kernels.recorder(child)))
     }
 
     pub fn zeros(&mut self, shape: TensorShape, dtype: TensorDType) -> Result<Tensor, GoldyError> {
