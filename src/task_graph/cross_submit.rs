@@ -81,6 +81,14 @@ impl ResourceKey {
             ResourceId::Accel(h) => Some(Self::Accel(h)),
         }
     }
+
+    /// The buffer a buffer key or range addresses; other keys alias only themselves.
+    fn buffer(self) -> Option<BufferHandle> {
+        match self {
+            Self::Buffer(h) | Self::BufferRange { parent: h, .. } => Some(h),
+            _ => None,
+        }
+    }
 }
 
 /// FxHash-backed map keyed by [`ResourceKey`] (hot-path lookups use integer handles).
@@ -495,16 +503,59 @@ pub fn compute_cross_submit_sync_into(
     out.cpu_waits.sort_by_key(|e| (e.context, e.value));
 }
 
+/// Registry positions grouped by the buffer their key addresses, built on first use.
+#[derive(Default)]
+pub(crate) struct BufferKeyIndex {
+    built: bool,
+    /// The last position on each buffer; `next` chains to the one before it.
+    last: FxHashMap<BufferHandle, usize>,
+    next: Vec<usize>,
+}
+
+impl BufferKeyIndex {
+    fn clear(&mut self) {
+        self.built = false;
+        self.last.clear();
+        self.next.clear();
+    }
+
+    /// Positions in `registry` of the keys on `buffer`.
+    fn of(
+        &mut self,
+        buffer: BufferHandle,
+        registry: &[(ResourceKey, Arc<ParcelStamp>)],
+    ) -> impl Iterator<Item = usize> + '_ {
+        if !self.built {
+            self.built = true;
+            for (i, (key, _)) in registry.iter().enumerate() {
+                let before = key.buffer().and_then(|b| self.last.insert(b, i));
+                self.next.push(before.unwrap_or(usize::MAX));
+            }
+        }
+        let mut at = self.last.get(&buffer).copied().unwrap_or(usize::MAX);
+        std::iter::from_fn(move || {
+            let i = at;
+            (i != usize::MAX).then(|| {
+                at = self.next[i];
+                i
+            })
+        })
+    }
+}
+
 /// [`compute_cross_submit_sync_into`] over live stamps instead of a [`LedgerSnapshot`].
 ///
 /// Each key's hazards are derived under that stamp's sync lock, so no ledger is cloned.
-/// `index` is scratch mapping each registry key to its position.
+/// `index` is scratch mapping each registry key to its position; `by_buffer` is
+/// scratch for the keys that only alias a registered one, such as a range of a
+/// registered buffer, so each is matched against its own buffer's keys alone.
 #[allow(clippy::too_many_arguments)]
 fn compute_cross_submit_sync_from_stamps_into(
     out: &mut SubmitSync,
     wait_map: &mut HashMap<ContextHandle, u64>,
     cpu_wait_map: &mut HashMap<ContextHandle, u64>,
     index: &mut ResourceKeyMap<usize>,
+    by_buffer: &mut BufferKeyIndex,
     net: &ResourceKeyMap<NetAccess>,
     registry: &[(ResourceKey, Arc<ParcelStamp>)],
     submitting_ctx: ContextHandle,
@@ -516,6 +567,7 @@ fn compute_cross_submit_sync_from_stamps_into(
     wait_map.clear();
     cpu_wait_map.clear();
     index.clear();
+    by_buffer.clear();
     for (i, (key, _)) in registry.iter().enumerate() {
         index.entry(*key).or_insert(i);
     }
@@ -535,8 +587,12 @@ fn compute_cross_submit_sync_from_stamps_into(
             );
             continue;
         }
-        let aliasing: LedgerSnapshot = registry
-            .iter()
+        let Some(buffer) = key.buffer() else {
+            continue;
+        };
+        let aliasing: LedgerSnapshot = by_buffer
+            .of(buffer, registry)
+            .map(|i| &registry[i])
             .filter(|(k, _)| resource_keys_alias(*k, *key))
             .map(|(k, stamp)| {
                 (
@@ -670,6 +726,7 @@ pub(crate) struct CrossSubmitScratch {
     registry: Vec<(ResourceKey, Arc<ParcelStamp>)>,
     seen: FxHashSet<ResourceKey>,
     registry_index: ResourceKeyMap<usize>,
+    registry_by_buffer: BufferKeyIndex,
     wait_map: HashMap<ContextHandle, u64>,
     cpu_wait_map: HashMap<ContextHandle, u64>,
     submit_sync: SubmitSync,
@@ -694,6 +751,7 @@ impl Default for CrossSubmitScratch {
                 m.reserve(32);
                 m
             },
+            registry_by_buffer: BufferKeyIndex::default(),
             wait_map: HashMap::with_capacity(4),
             cpu_wait_map: HashMap::with_capacity(4),
             submit_sync: SubmitSync::default(),
@@ -711,6 +769,7 @@ impl CrossSubmitScratch {
         self.registry.clear();
         self.seen.clear();
         self.registry_index.clear();
+        self.registry_by_buffer.clear();
         self.wait_map.clear();
         self.cpu_wait_map.clear();
         self.submit_sync.prologue.buffers.clear();
@@ -745,6 +804,7 @@ impl CrossSubmitScratch {
                 &mut self.wait_map,
                 &mut self.cpu_wait_map,
                 &mut self.registry_index,
+                &mut self.registry_by_buffer,
                 &self.net,
                 &self.registry,
                 submitting_ctx,
@@ -773,6 +833,7 @@ impl CrossSubmitScratch {
                 &mut self.wait_map,
                 &mut self.cpu_wait_map,
                 &mut self.registry_index,
+                &mut self.registry_by_buffer,
                 net,
                 registry,
                 submitting_ctx,
@@ -1301,6 +1362,12 @@ mod tests {
         net.insert(buf_key(12), write);
         net.insert(buf_key(20), read);
         net.insert(buf_key(99), write);
+        // Ranges of stamped whole buffers, and of a stamped range, have no stamp of their own.
+        let part = |parent, offset| ResourceKey::BufferRange { parent, offset, len: 4 };
+        net.insert(part(10, 4), write);
+        net.insert(part(12, 0), read);
+        net.insert(part(20, 20), write);
+        net.insert(part(99, 0), read);
 
         let ledger = build_ledger_snapshot(&registry);
         for separate_graphics in [false, true] {
