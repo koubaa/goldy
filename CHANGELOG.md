@@ -343,6 +343,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`i32::MIN` in generated kernels** — it was emitted as `-2147483648`, which negates a
   literal no `int` holds; it is now `(-2147483647 - 1)`.
+
 - **Specialized semantic regions match their unfused dispatches** — specialization bakes a
   fused kernel's scalars as literals, and the device then combined constants across the
   operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into
