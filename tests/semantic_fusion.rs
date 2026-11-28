@@ -982,8 +982,8 @@ fn described_dispatch_fuses_as_its_description() {
     assert!(labels.iter().any(|l| l.to_string() == "shifted_product"), "{labels:?}");
 }
 
-/// A description that does not round as its kernel does stays out of regions unless
-/// contractions may reassociate; its kernel runs as recorded.
+/// Under recorded arithmetic, a description that does not round as its kernel does
+/// stays out of regions unless contractions may reassociate; its kernel runs as recorded.
 #[test]
 fn inexact_description_needs_reassociation() {
     let _gpu = gpu_lock();
@@ -998,6 +998,21 @@ fn inexact_description_needs_reassociation() {
         "{report:?}"
     );
     assert_eq!(scheme.executed_node_count(), 3);
+}
+
+/// Relaxed arithmetic permits the reassociation an inexact description declares.
+#[test]
+fn relaxed_arithmetic_admits_an_inexact_description() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let mut twin = Twin::new(&device, &described_init(), |rec, t| record_described(rec, t, false));
+    for (scheme, _, _) in &mut twin.runs {
+        scheme.set_arithmetic_policy(ArithmeticPolicy::Relaxed);
+    }
+    twin.frames(5, "relaxed");
+    assert_one_semantic_region(twin.fused(), 3);
+    let labels = &twin.fused().fusion_report().regions[0].labels;
+    assert!(labels.iter().any(|l| l.to_string() == "shifted_product"), "{labels:?}");
 }
 
 #[test]

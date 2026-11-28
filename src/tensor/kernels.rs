@@ -280,7 +280,8 @@ fn tensor_scatter_f32(
     }
 }
 
-/// Store one vector in the position-addressed slot of a row-major cyclic matrix.
+/// Store one value per row in the position-addressed slot of a row-major cyclic history
+/// whose last axis is the window.
 #[goldy::compute(workgroup_size = [256, 1, 1])]
 fn tensor_cyclic_store_f32(
     src: goldy::gpu::Tensor<f32>,
@@ -289,7 +290,7 @@ fn tensor_cyclic_store_f32(
 ) {
     let row = goldy::gpu::global_id().x;
     if row < src.len() {
-        let width = state.dim(1);
+        let width = state.len() / src.len();
         state[row * width + (position[0] % width)] = src[row];
     }
 }
@@ -307,7 +308,7 @@ fn tensor_cyclic_dot_f32(
 ) {
     let row = goldy::gpu::global_id().x;
     if row < dst.len() {
-        let width = state.dim(1);
+        let width = state.len() / dst.len();
         let pos = position[0];
         let base = row * width;
         let mut acc = 0.0;

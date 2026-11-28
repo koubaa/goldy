@@ -128,6 +128,24 @@ fn settle_fusion(scheme: &mut Scheme) {
     }
 }
 
+/// Whether `device`'s compiler contracts multiply-adds, so exact fusion declines a
+/// window dot: its taps add products they do not round.
+fn contracts(device: &Runtime) -> bool {
+    matches!(
+        device.backend_type(),
+        goldy::BackendType::Metal | goldy::BackendType::Cuda
+    )
+}
+
+/// Whether fusion declined a run through the node labelled `label` because the device
+/// could contract its arithmetic.
+fn declined_for_contraction(report: &goldy::FusionReport, label: &str) -> bool {
+    report.rejected.iter().any(|rejection| {
+        rejection.labels.iter().any(|l| *l == label)
+            && matches!(&rejection.reason, goldy::FusionRejection::Semantic { reason, .. } if reason.contains("contract"))
+    })
+}
+
 #[test]
 fn add_and_broadcast_and_replay() {
     let _gpu = gpu_lock();
@@ -1227,14 +1245,17 @@ fn cyclic_dot_and_neighboring_algebra_fuse_exactly() {
     settle_fusion(&mut plain);
 
     let report = fused.fusion_report();
+    // A contracting device runs the dot as recorded; the skip and scale still fuse.
+    let contracts = contracts(&device);
+    let joined = if contracts { 2 } else { 3 };
     assert!(
-        report
-            .regions
-            .iter()
-            .any(|region| { region.labels.len() == 3 && matches!(region.status, goldy::FusionRegionStatus::Promoted) }),
+        report.regions.iter().any(|region| {
+            region.labels.len() == joined && matches!(region.status, goldy::FusionRegionStatus::Promoted)
+        }),
         "{report:?}"
     );
-    assert_eq!(fused.executed_node_count(), 2, "{report:?}");
+    assert_eq!(declined_for_contraction(&report, "window_dot"), contracts, "{report:?}");
+    assert_eq!(fused.executed_node_count(), 2 + contracts as usize, "{report:?}");
     assert_eq!(plain.executed_node_count(), 4);
 
     let fused_bits = read_f32(&mut fused, fused_out.buffer())
@@ -1262,4 +1283,123 @@ fn cyclic_dot_and_neighboring_algebra_fuse_exactly() {
         read_f32(&mut fused, fused_state.buffer()),
         vec![2.0, 0.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0]
     );
+}
+
+/// A cyclic history may carry several row axes and live in any strides: here the
+/// window axis is outermost, as in a cache of whole rows. Per-tap weight sums recorded
+/// between the store and the dot fuse with them, and the result is clamped.
+///
+/// Matching the recorded arithmetic, the fused scheme stores the unfused bits on every
+/// device; a device that contracts runs the dot as recorded. Relaxed arithmetic fuses
+/// the dot everywhere and stays within rounding of the reference.
+#[test]
+fn cyclic_history_with_row_axes_fuses_exactly() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let (groups, per, width) = (2u32, 3u32, 4u32);
+    let rows = [groups, per];
+    let n = (groups * per) as usize;
+    let base: Vec<f32> = (0..width as usize * n).map(|i| (i as f32 * 0.37).sin()).collect();
+    let bias: Vec<f32> = (0..(groups * width) as usize).map(|i| 0.25 * i as f32 - 1.0).collect();
+    let source_at = |position: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as u32 + 7 * position) as f32 * 0.61).cos())
+            .collect()
+    };
+
+    let record = |automatic: bool, arithmetic: goldy::ArithmeticPolicy| {
+        let source = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
+        let position = Tensor::from_u32(&device, TensorShape::vector(1), &[0]).unwrap();
+        let taps = TensorShape::from_dims(&[width, groups, per]).unwrap();
+        let base = Tensor::from_f32(&device, taps, &base).unwrap();
+        let bias = Tensor::from_f32(&device, TensorShape::matrix(groups, width), &bias).unwrap();
+        let weight = Tensor::zeros(&device, taps, TensorDType::F32).unwrap();
+        let state = Tensor::zeros(&device, taps, TensorDType::F32).unwrap();
+        let dot = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
+        let out = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
+        let mut scheme = Scheme::new(&ctx);
+        scheme.set_automatic_fusion(automatic);
+        scheme.set_arithmetic_policy(arithmetic);
+        let mut rec = kernels.recorder(&mut scheme);
+        let history = state.view().permute(&[1, 2, 0]).unwrap();
+        rec.cyclic_store_at("store", source.view(), history, position.view())
+            .unwrap();
+        for tap in 0..width {
+            let column = weight.view().narrow(0, tap, 1).unwrap().reshape(&rows).unwrap();
+            let fixed = base.view().narrow(0, tap, 1).unwrap().reshape(&rows).unwrap();
+            let shift = bias.view().narrow(1, tap, 1).unwrap();
+            rec.add_into("weight", fixed, shift, column).unwrap();
+        }
+        let window = weight.view().permute(&[1, 2, 0]).unwrap();
+        rec.cyclic_window_dot_at("dot", window, history, position.view(), dot.view())
+            .unwrap();
+        rec.max_scalar_into("floor", dot.view(), -0.75, out.view()).unwrap();
+        rec.min_scalar_into("ceiling", out.view(), 0.75, out.view()).unwrap();
+        (scheme, source, position, state, out, vec![base, bias, weight, dot])
+    };
+
+    let mut runs = [
+        record(true, goldy::ArithmeticPolicy::MatchRecorded),
+        record(false, goldy::ArithmeticPolicy::MatchRecorded),
+        record(true, goldy::ArithmeticPolicy::Relaxed),
+    ];
+    let mut history = vec![0.0f32; width as usize * n];
+    for position in 0..2 * width + 1 {
+        let input = source_at(position);
+        let slot = (position % width) as usize;
+        history[slot * n..(slot + 1) * n].copy_from_slice(&input);
+        let mut bits = Vec::new();
+        for (scheme, source, at, state, out, _) in &mut runs {
+            source.buffer().write(0, bytemuck::cast_slice(&input)).unwrap();
+            at.buffer().write(0, bytemuck::bytes_of(&position)).unwrap();
+            if position == 0 && scheme.automatic_fusion() {
+                while scheme.replay_stats().clean_submits == 0 {
+                    drop(scheme.submit().expect("submit"));
+                }
+                settle_fusion(scheme);
+            }
+            let got = read_f32(scheme, out.buffer());
+            assert_eq!(read_f32(scheme, state.buffer()), history, "position {position}");
+            bits.push(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+            for (i, &got) in got.iter().enumerate() {
+                let (g, r) = (i / per as usize, i % per as usize);
+                let mut want = 0.0f32;
+                for lag in 0..width.min(position + 1) {
+                    let tap = (width - 1 - lag) as usize;
+                    let w = base[tap * n + i] + bias[g * width as usize + tap];
+                    let slot = ((position - lag) % width) as usize;
+                    want += w * history[slot * n + g * per as usize + r];
+                }
+                let want = want.clamp(-0.75, 0.75);
+                assert!(
+                    (got - want).abs() < 1e-5,
+                    "position {position} row {i}: {got} != {want}"
+                );
+            }
+        }
+        assert_eq!(bits[0], bits[1], "position {position}");
+    }
+    let contracts = contracts(&device);
+    let [(exact, ..), (plain, ..), (relaxed, ..)] = &runs;
+    let promoted = |scheme: &Scheme, label: &str| {
+        scheme
+            .fusion_report()
+            .regions
+            .iter()
+            .filter(|region| matches!(region.status, goldy::FusionRegionStatus::Promoted))
+            .flat_map(|region| region.labels.clone())
+            .filter(|l| *l == label)
+            .count()
+    };
+    let report = exact.fusion_report();
+    assert_eq!(promoted(exact, "weight"), width as usize, "{report:?}");
+    assert_eq!(promoted(exact, "dot"), !contracts as usize, "{report:?}");
+    assert_eq!(declined_for_contraction(&report, "dot"), contracts, "{report:?}");
+    assert_eq!(plain.executed_node_count(), 4 + width as usize);
+    assert_eq!(exact.executed_node_count(), 2 + contracts as usize, "{report:?}");
+    let report = relaxed.fusion_report();
+    assert_eq!(promoted(relaxed, "dot"), 1, "{report:?}");
+    assert_eq!(relaxed.executed_node_count(), 2, "{report:?}");
 }

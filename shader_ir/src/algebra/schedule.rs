@@ -77,6 +77,12 @@ pub struct Target {
     /// Whether a subgroup multiplies [`MATRIX_TILE`](crate::MATRIX_TILE)-square f16 tiles into f32
     /// accumulators ([`crate::MatrixOp`]).
     pub matrix: bool,
+    /// Whether the device's compiler may contract a product into the sum or difference
+    /// that reads it, rounding once where the source writes two operations. The
+    /// recorded kernels and a synthesized one need not contract the same pairs, so
+    /// [`lower_on`] declines an output whose term adds a product it does not round
+    /// ([`Term::adds_unrounded_product`]).
+    pub contracts: bool,
 }
 
 /// The rounding a lowering may add to contractions beyond what their terms state.
@@ -180,6 +186,10 @@ pub enum LowerError {
     GatheredRead {
         param: String,
     },
+    /// An output adds a product it does not round, on a target that contracts.
+    Contraction {
+        output: String,
+    },
 }
 
 impl fmt::Display for LowerError {
@@ -204,6 +214,12 @@ impl fmt::Display for LowerError {
                     "a read needs another element of index parameter `{param}` than its thread loads"
                 )
             }
+            LowerError::Contraction { output } => {
+                write!(
+                    f,
+                    "`{output}` adds an unrounded product, which the device may contract unlike the recorded kernels"
+                )
+            }
         }
     }
 }
@@ -225,7 +241,8 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// prefix of the part's domain reuses the lane reductions of the outputs spanning all
 /// of it, since lane groups reduce over the whole domain; otherwise it starts a part.
 /// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
-/// one element per thread.
+/// one element per thread. On a target that [contracts](Target::contracts), an output
+/// whose term adds a product it does not round is [`LowerError::Contraction`].
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
     lower_on_with_rounding(region, sources, target, true)
 }
@@ -241,6 +258,13 @@ fn lower_on_with_rounding(
     } else {
         Prepared::new(region)?
     };
+    if round_results && target.contracts {
+        if let Some((id, _)) = prepared.bodies.iter().find(|(_, body)| body.adds_unrounded_product()) {
+            return Err(LowerError::Contraction {
+                output: prepared.name(*id).to_string(),
+            });
+        }
+    }
     let mut lanes = None;
     for (_, body) in &prepared.bodies {
         for r in top_reductions(body) {

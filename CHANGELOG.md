@@ -14,8 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Automatic fusion composes the node with its neighbours as those operations, and a
   region takes all of them or none; anywhere else the authored kernel runs. Buffers
   only the description writes are not stored by a fused region. A description that
-  does not round as its kernel does (`exact = false`) joins regions only when
-  contractions may reassociate.
+  does not round as its kernel does (`exact = false`) joins regions only under
+  `ArithmeticPolicy::Relaxed` or when contractions may reassociate.
+
+- **Cyclic stores and window dots** — `TensorRecorder::cyclic_store_at` stores one
+  value per row at `position % width` of a history's last axis, and
+  `cyclic_window_dot_at` computes the causal row dot over a history that already
+  holds the current value; `cyclic_dot_at` is the two in order. Histories may carry
+  several row axes and any strides, so a permuted view can address a history whose
+  window axis is outermost.
+
+- **`min_scalar_into` / `max_scalar_into`** — the `_into` forms of the scalar bounds.
 
 - **`Scheme::keep_alive`** — ties a value, such as a buffer only the scheme's nodes
   use, to the scheme and every scheme that includes it.
@@ -142,6 +151,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Runtime::acquire_texture(..., init)`.
 
 ### Changed
+
+- **Exact fusion where compilers contract** — Metal and CUDA compilers contract a
+  multiply into the add that reads it within an expression, so a recorded kernel and a
+  synthesized one need not round the same pairs. Under `MatchRecorded` on those
+  backends, semantic fusion now leaves a region unfused when its terms add a product
+  they do not round, such as the taps of a cyclic window dot, and fused schemes store
+  the unfused bits there too. `Relaxed` still fuses them. In `goldy_shader_ir`,
+  `algebra::Target` gains `contracts` (`false` preserves the previous behavior),
+  `LowerError` gains `Contraction`, and `Term::adds_unrounded_product` reports the
+  pattern.
 
 - `goldy_shader_ir::algebra::IndexSource` literals now specify `add` and
   `modulus` (`0` and `None` preserve the previous behavior).

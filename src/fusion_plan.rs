@@ -631,7 +631,7 @@ impl FusionPlanner {
         temporaries: &[TemporaryUse],
     ) -> Option<Plan> {
         if self.phase == Phase::Unplanned {
-            let target = semantic_target(&device.capabilities());
+            let target = semantic_target(device);
             self.match_regions(ir, sites, semantic, described, temporaries, &target);
             if self.regions.is_empty() {
                 self.phase = Phase::Settled;
@@ -807,16 +807,14 @@ impl FusionPlanner {
             .collect();
         let reassociates = self.precision != ContractionPrecision::Exact;
         let admitted = |s: &SemanticSite| s.exact || reassociates;
+        // An author states a description up to reassociation, which relaxed arithmetic permits.
+        let relaxed = self.arithmetic == ArithmeticPolicy::Relaxed;
         let semantic = |i: usize| -> Option<Vec<&SemanticSite>> {
             if let Some(site) = semantic.get(&(i as u32)) {
                 return admitted(site).then(|| vec![site]);
             }
             let description = described.get(&(i as u32))?;
-            description
-                .sites
-                .iter()
-                .all(admitted)
-                .then(|| description.sites.iter().collect())
+            (relaxed || description.sites.iter().all(admitted)).then(|| description.sites.iter().collect())
         };
         let site = |i: usize| semantic(i).or_else(|| lifted.get(&i).map(|s| vec![s]));
         let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic(i).is_some());

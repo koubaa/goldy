@@ -11,7 +11,9 @@
 //! association its recorded kernel uses and lowering reproduces it, so the synthesized
 //! kernel stores what the recorded sequence stores, bit for bit, unless the scheme
 //! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units,
-//! or selects [`crate::ArithmeticPolicy::Relaxed`].
+//! or selects [`crate::ArithmeticPolicy::Relaxed`]. Where the device's compiler
+//! contracts ([`Target::contracts`]), a composition that adds a product it does not
+//! round has no such kernel, and its run stays unfused.
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -19,7 +21,9 @@
 //!
 //! An authored dispatch can be stated as the operations that compute what it stores (a
 //! [`Description`]). A region takes every one of its sites or none, and does not store
-//! the buffers only the description writes.
+//! the buffers only the description writes. A description that reassociates what the
+//! dispatch computes joins a region under [`crate::ArithmeticPolicy::Relaxed`] or a
+//! reassociating [`ContractionPrecision`].
 
 use crate::backend::BufferHandle;
 use crate::fusion_plan::{KernelSite, SiteArg};
@@ -108,7 +112,8 @@ impl Description {
     /// The operations `ir` records, each with its site in `semantic`, describing
     /// `described`. `Err` names the first node without a site. Buffers `described` does
     /// not bind are private to the description. Without `exact`, the sites join a region
-    /// only under a [`ContractionPrecision`] that lets contractions reassociate.
+    /// only under [`crate::ArithmeticPolicy::Relaxed`] or a [`ContractionPrecision`] that
+    /// lets contractions reassociate.
     pub(crate) fn of(
         described: &TaskNode,
         ir: &crate::task_graph::GraphIR,
@@ -676,11 +681,18 @@ impl SemanticProgram {
     }
 }
 
-/// What a device with `caps` offers semantic fusion.
-pub(crate) fn target(caps: &crate::runtime::RuntimeCapabilities) -> Target {
+/// What `device` offers semantic fusion.
+pub(crate) fn target(device: &crate::Runtime) -> Target {
+    let caps = device.capabilities();
     Target {
         subgroup: caps.subgroup_width,
         matrix: caps.matrix_multiply,
+        // The Metal and CUDA C++ compilers contract within an expression by default
+        // (`-ffp-contract=on`, `--fmad=true`), and Goldy compiles them that way.
+        contracts: matches!(
+            device.backend_type(),
+            crate::BackendType::Metal | crate::BackendType::Cuda
+        ),
     }
 }
 
