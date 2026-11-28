@@ -330,6 +330,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It now scans only the stamps on the same buffer, indexed when the first lookup misses.
   The sync plan is unchanged.
 
+- **Non-finite generated constants under relaxed arithmetic** — algebraic
+  reductions emit infinity and NaN through their IEEE-754 bit patterns and
+  `asfloat`, rather than division by zero that an optimizing shader compiler may
+  rewrite.
 - **Specialized semantic regions match their unfused dispatches** — specialization bakes a
   fused kernel's scalars as literals, and the device then combined constants across the
   operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into
