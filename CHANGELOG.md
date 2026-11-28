@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history keeps the recorded bits. Positions are described below 2^31, as for the
   cyclic stores.
 
+- **Integer casts fuse as the value they read** — a `cast_into` of one `u32` or `i32` into
+  f32 has a semantic site: the value is read when the kernel runs, as an index value. A
+  number derived from a position, such as a log-scaled factor, can then fuse with the
+  operations that use it, and one fused kernel serves every position. A `u32` is
+  described below 2^31, the domain the cyclic sites already assume of a position.
+
 - **Described dispatches** — `TensorRecorder::describe(node, exact, f)` states an
   authored dispatch as the tensor operations `f` records, without recording them.
   Automatic fusion composes the node with its neighbours as those operations, and a
@@ -334,6 +340,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reductions emit infinity and NaN through their IEEE-754 bit patterns and
   `asfloat`, rather than division by zero that an optimizing shader compiler may
   rewrite.
+
+- **`i32::MIN` in generated kernels** — it was emitted as `-2147483648`, which negates a
+  literal no `int` holds; it is now `(-2147483647 - 1)`.
 - **Specialized semantic regions match their unfused dispatches** — specialization bakes a
   fused kernel's scalars as literals, and the device then combined constants across the
   operations the region joined: a divisor of 25 into a multiply, or `(x + a) + b` into

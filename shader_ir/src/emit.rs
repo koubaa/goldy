@@ -630,6 +630,8 @@ fn emit_workgroup_softmax(
 fn emit_expr(expr: &Expr, builtins: &BuiltinMask, tensor_slots: &TensorSlots) -> String {
     match expr {
         Expr::LitU32(v) => format!("{v}u"),
+        // `2147483648` is no int literal, so its negation is not one either.
+        Expr::LitI32(i32::MIN) => format!("({} - 1)", i32::MIN + 1),
         Expr::LitI32(v) => format!("{v}"),
         Expr::LitF32(v) => {
             let mut s = format!("{v}");
@@ -1323,5 +1325,13 @@ mod tests {
         assert!(slang.contains("        uint _goldy_k0_i = _goldy_gid.x;\n"));
         assert!(slang.contains("            output[_goldy_k0_i] = (input[_goldy_k0_i] * 2.0);\n"));
         assert!(slang.contains("            result[_goldy_k1_i] = (output[_goldy_k1_i] + 1.0);\n"));
+    }
+
+    #[test]
+    fn the_least_int_is_emitted_as_a_difference() {
+        let emit = |v| emit_expr(&Expr::LitI32(v), &BuiltinMask::default(), &TensorSlots::new());
+        assert_eq!(emit(i32::MIN), "(-2147483647 - 1)");
+        assert_eq!(emit(-7), "-7");
+        assert_eq!(emit(i32::MAX), "2147483647");
     }
 }

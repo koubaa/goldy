@@ -216,6 +216,39 @@ pub(crate) fn copy(src: TensorView<'_>, dst: TensorView<'_>) -> Option<SemanticS
     elementwise(&[src], dst, false, |_| Some(Term::arg(0)))
 }
 
+/// A `tensor_cast_{i32,u32}_f32` of one integer: the f32 nearest it, as an index value.
+///
+/// An index parameter holds an `int`, so a u32 source is described for values below
+/// 2^31 only, the domain the cyclic sites assume of a position; an i32 source is
+/// described over its whole range.
+pub(crate) fn integer_value(src: TensorView<'_>, dst: TensorView<'_>) -> Option<SemanticSite> {
+    let (element_type, range) = match src.dtype() {
+        TensorDType::U32 => (ElementType::U32, 0..i64::from(i32::MAX) + 1),
+        TensorDType::I32 => (ElementType::I32, i64::from(i32::MIN)..i64::from(i32::MAX) + 1),
+        _ => return None,
+    };
+    if src.numel_u32() != 1 {
+        return None;
+    }
+    let shape = dims(dst)?;
+    let mut s = SiteBuilder::default();
+    let source = IndexSource {
+        parcel: s.parcel(SiteParcel::of(src.buffer().whole())?),
+        element: Affine::constant(i64::try_from(src.storage_offset()).ok()?),
+        element_type,
+        add: 0,
+        modulus: None,
+        zero_if_outside: false,
+    };
+    let value = s.index_param("value", range, source);
+    let out = operand(&mut s, "out", dst)?;
+    s.finish(OpKind::Map(Map {
+        shape,
+        inputs: Vec::new(),
+        outputs: vec![(out, Term::index_value(Affine::sym(Sym::Param(value))))],
+    }))
+}
+
 /// `tensor_binary_f32` with `op`. Scalar ops read only `a`.
 pub(crate) fn binary(op: u32, a: TensorView<'_>, b: TensorView<'_>, out: TensorView<'_>) -> Option<SemanticSite> {
     let (op, scalar) = match op {
