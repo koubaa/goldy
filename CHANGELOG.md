@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`max_reduce_into` / `min_reduce_into`** — the `_into` forms of the max and min
+  reductions, with or without the reduced axis, so a description can reduce into its
+  own scratch. Entries holding a reduction's identity (such as `-1e30` for a max next
+  to zero weights) let a fixed-width reduction cover a partly filled axis.
+
 - **Described dispatches** — `TensorRecorder::describe(node, exact, f)` states an
   authored dispatch as the tensor operations `f` records, without recording them.
   Automatic fusion composes the node with its neighbours as those operations, and a

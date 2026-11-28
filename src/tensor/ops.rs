@@ -513,6 +513,28 @@ impl<'a> TensorRecorder<'a> {
         let kept = Self::kept(src, axis, out)?;
         self.reduce_into(label, src, axis, kept, OP_SUM)
     }
+    /// [`Self::max_reduce`] into `out`, with or without the reduced axis.
+    pub fn max_reduce_into(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        axis: usize,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let kept = Self::kept(src, axis, out)?;
+        self.reduce_into(label, src, axis, kept, OP_RMAX)
+    }
+    /// [`Self::min_reduce`] into `out`, with or without the reduced axis.
+    pub fn min_reduce_into(
+        &mut self,
+        label: &str,
+        src: TensorView<'_>,
+        axis: usize,
+        out: TensorView<'_>,
+    ) -> Result<(), GoldyError> {
+        let kept = Self::kept(src, axis, out)?;
+        self.reduce_into(label, src, axis, kept, OP_RMIN)
+    }
     /// [`Self::mean`] into `out`, with or without the reduced axis.
     pub fn mean_into(
         &mut self,
