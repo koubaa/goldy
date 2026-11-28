@@ -858,6 +858,10 @@ impl GpuBackend for VulkanBackend {
         buffer::destroy(&self.state, buffer);
     }
 
+    fn readback_mapping(&self, buffer: BufferHandle) -> Option<crate::backend::HostMapping> {
+        buffer::readback_mapping(&self.state.buffers, buffer)
+    }
+
     fn query_texture_copy_footprint(
         &self,
         _device: DeviceHandle,

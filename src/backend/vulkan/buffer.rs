@@ -1832,3 +1832,17 @@ pub(super) fn read_readback_buffer(
     }
     Ok(())
 }
+
+/// Persistent host mapping of a withdraw staging buffer.
+pub(super) fn readback_mapping(
+    buffers: &SharedBufferTable,
+    buffer_handle: BufferHandle,
+) -> Option<crate::backend::HostMapping> {
+    let buffers_guard = buffers.read().unwrap();
+    let buffer = buffers_guard.entries.get(&buffer_handle)?;
+    if !buffer.is_withdraw_staging {
+        return None;
+    }
+    let ptr = buffer.host_mapped? as *const u8;
+    Some(crate::backend::HostMapping { ptr, len: buffer.size })
+}

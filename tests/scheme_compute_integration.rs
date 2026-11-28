@@ -5049,6 +5049,47 @@ mod imp {
         );
     }
 
+    fn scheme_host_sink_realizes_zero_copy_mapped_view_and_gates_replay(device: &Runtime) {
+        let ctx = device.create_context().expect("create_context");
+        let initial = [17u32, 29, 43, 71];
+        let buffer = device
+            .acquire_buffer_with_data(&initial, BufferKind::Scattered)
+            .expect("source buffer");
+        let exchange = goldy::MemoryExchange::new(&ctx);
+        let mut scheme = Scheme::new(&ctx);
+        let sink = exchange
+            .bind_host_sink(&mut scheme, buffer.whole())
+            .expect("bind_host_sink");
+
+        let mut sub = scheme.submit().expect("first submit");
+        let view = (&mut sub >> &sink).take::<u32>().expect("take sink");
+        assert_eq!(&*view, &initial);
+        if matches!(
+            device.backend_type(),
+            BackendType::Vulkan | BackendType::Metal | BackendType::Dx12
+        ) {
+            assert!(
+                view.is_mapped(),
+                "HostSink view on {:?} should borrow persistently mapped staging without allocating",
+                device.backend_type()
+            );
+        }
+
+        let busy = scheme.submit().expect_err("live HostView must gate replay");
+        assert!(busy.to_string().contains("host view is live"), "{busy}");
+        drop(view);
+
+        let replay = scheme.submit().expect("replay after dropping view");
+        let second = sink.claim(&replay).take::<u32>().expect("take second");
+        drop(replay);
+        drop(sink);
+        drop(scheme);
+        assert_eq!(
+            &*second, &initial,
+            "mapped HostView keeps staging alive after sink/scheme drop"
+        );
+    }
+
     /// Compute integration gate for all shipped backends, including CUDA-only builds:
     /// `cargo test --no-default-features --features cuda --test scheme_compute_integration`
     pub fn run() {
@@ -5203,6 +5244,7 @@ mod imp {
         trial!(scheme_cpu_dispatch_on_lease);
         trial!(scheme_cpu_dispatch_only_scheme);
         trial_retain!(scheme_include_child_dispatch_retains);
+        trial_retain!(scheme_host_sink_realizes_zero_copy_mapped_view_and_gates_replay);
 
         let mut args = libtest_mimic::Arguments::from_args();
         crate::submission::clamp_test_threads(&mut args, &device);

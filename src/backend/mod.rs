@@ -1265,6 +1265,11 @@ pub(crate) trait GpuBackend:
     fn read_readback_buffer(&self, buffer: BufferHandle, output: &mut [u8]) -> Result<()>;
     /// Release a host-read staging buffer.
     fn free_readback_buffer(&mut self, buffer: BufferHandle);
+    /// Persistent host mapping of a staging buffer created by [`Self::alloc_readback_buffer`].
+    fn readback_mapping(&self, buffer: BufferHandle) -> Option<HostMapping> {
+        let _ = buffer;
+        None
+    }
     /// Persistent host mapping of a parcel buffer, if the medium is host-coherent.
     fn host_read_mapping(&self, buffer: BufferHandle) -> Option<HostMapping> {
         let _ = buffer;

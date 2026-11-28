@@ -40,11 +40,8 @@ pub struct PendingHostSinkRead {
 }
 
 struct HostSinkReadRequest {
-    ctx: Context,
+    sink: Arc<crate::exchange::HostSinkInner>,
     ready_after: TimelineValue,
-    handle: crate::backend::BufferHandle,
-    byte_size: u64,
-    stamp: Arc<ParcelStamp>,
     claimed: bool,
 }
 
@@ -105,11 +102,8 @@ impl PendingHostSinkRead {
             }
             sink.inner.stamp.acquire_host_claim();
             Ok(HostSinkReadRequest {
-                ctx: sink.inner.ctx.clone(),
+                sink: Arc::clone(&sink.inner),
                 ready_after: submission.timeline_value(),
-                handle: sink.inner.handle,
-                byte_size: sink.inner.byte_size,
-                stamp: Arc::clone(&sink.inner.stamp),
                 claimed: true,
             })
         })();
@@ -138,27 +132,51 @@ impl std::fmt::Debug for PendingHostSinkRead {
 impl HostSinkReadRequest {
     fn realize<T: bytemuck::Pod>(mut self) -> Result<HostView<T>, GoldyError> {
         let elem = std::mem::size_of::<T>();
-        if elem == 0 || !(self.byte_size as usize).is_multiple_of(elem) {
+        let byte_size = self.sink.byte_size;
+        if elem == 0 || !(byte_size as usize).is_multiple_of(elem) {
             return Err(GoldyError::Backend(anyhow::anyhow!(
-                "host sink byte size {} is not a multiple of {elem}",
-                self.byte_size
+                "host sink byte size {byte_size} is not a multiple of {elem}"
             )));
         }
-        self.ctx.wait_until(self.ready_after)?;
-        let last_write = self.stamp.sync.lock().unwrap().last_write.clone();
+        self.sink.ctx.wait_until(self.ready_after)?;
+        let last_write = self.sink.stamp.sync.lock().unwrap().last_write.clone();
         for (context, value) in last_write.iter() {
-            self.ctx.wait_until_epoch(Epoch { context, value })?;
+            self.sink.ctx.wait_until_epoch(Epoch { context, value })?;
         }
-        let mut values = zeroed_elements::<T>(self.byte_size as usize);
+        let mapping = {
+            let backend = self.sink.ctx.runtime().inner.backend.lock().unwrap();
+            backend.readback_mapping(self.sink.handle)
+        };
+        if let Some(mapping) = mapping {
+            if byte_size > mapping.len {
+                return Err(GoldyError::Backend(anyhow::anyhow!(
+                    "host sink byte size {byte_size} exceeds mapped staging length {}",
+                    mapping.len
+                )));
+            }
+            self.claimed = false;
+            return Ok(HostView {
+                stamp: Arc::clone(&self.sink.stamp),
+                ctx: None,
+                mapped_handle: None,
+                backing: HostViewBacking::Mapped {
+                    ptr: mapping.ptr,
+                    len: (byte_size as usize) / elem,
+                    _keepalive: Arc::clone(&self.sink) as Arc<dyn Send + Sync>,
+                },
+                _ty: PhantomData,
+            });
+        }
+        let mut values = zeroed_elements::<T>(byte_size as usize);
         {
-            let backend = self.ctx.runtime().inner.backend.lock().unwrap();
+            let backend = self.sink.ctx.runtime().inner.backend.lock().unwrap();
             backend
-                .read_readback_buffer(self.handle, bytemuck::cast_slice_mut(&mut values))
-                .map_err(|e| self.ctx.classify(e))?;
+                .read_readback_buffer(self.sink.handle, bytemuck::cast_slice_mut(&mut values))
+                .map_err(|e| self.sink.ctx.classify(e))?;
         }
         self.claimed = false;
         Ok(HostView {
-            stamp: Arc::clone(&self.stamp),
+            stamp: Arc::clone(&self.sink.stamp),
             ctx: None,
             mapped_handle: None,
             backing: HostViewBacking::Owned(values),
@@ -170,7 +188,7 @@ impl HostSinkReadRequest {
 impl Drop for HostSinkReadRequest {
     fn drop(&mut self) {
         if self.claimed {
-            self.stamp.release_host_claim();
+            self.sink.stamp.release_host_claim();
         }
     }
 }
@@ -529,7 +547,7 @@ enum HostViewBacking<T> {
     Mapped {
         ptr: *const u8,
         len: usize,
-        _keepalive: Arc<Allocation>,
+        _keepalive: Arc<dyn Send + Sync>,
     },
 }
 
@@ -546,6 +564,12 @@ unsafe impl<T: bytemuck::Pod + Send> Send for HostView<T> {}
 unsafe impl<T: bytemuck::Pod + Sync> Sync for HostView<T> {}
 
 impl<T: bytemuck::Pod> HostView<T> {
+    /// Whether this view borrows persistently mapped staging rather than an owned `Vec`.
+    #[doc(hidden)]
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.backing, HostViewBacking::Mapped { .. })
+    }
+
     /// Owned copy of the view contents.
     pub fn to_vec(&self) -> Vec<T> {
         self.deref().to_vec()
