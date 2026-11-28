@@ -163,6 +163,12 @@ pub(super) fn adapter_capabilities(
     caps.mesh_shaders = adapter.mesh_shaders;
     caps.amplification_shaders = adapter.amplification_shaders;
     caps.subgroup_width = adapter.subgroup_width;
+    // Hardware drivers fuse a multiply into an add unless HLSL marks it `precise`;
+    // WARP rounds each operation as written.
+    caps.fp_contraction = match utils::device_type_from_flags(DXGI_ADAPTER_FLAG(adapter.desc.Flags as i32)) {
+        crate::types::DeviceType::Cpu => crate::FpContraction::Never,
+        _ => crate::FpContraction::Unmarked,
+    };
     caps
 }
 

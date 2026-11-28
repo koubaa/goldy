@@ -9,8 +9,9 @@
 mod submission;
 
 use goldy::{
-    compute, AccessKind, BackendType, Buffer, BufferKind, FusedKernel, FusionError, FusionRegionStatus,
-    FusionRejection, Instance, Invocation, RequestAdapterOptions, Runtime, RuntimeDescriptor, Scheme,
+    compute, AccessKind, ArithmeticPolicy, BackendType, Buffer, BufferKind, FpContraction, FusedKernel, FusionError,
+    FusionRegionStatus, FusionRejection, Instance, Invocation, RequestAdapterOptions, Runtime, RuntimeDescriptor,
+    Scheme,
 };
 use std::sync::Arc;
 
@@ -123,6 +124,14 @@ fn bias_wide(input: &[f32], output: goldy::gpu::Scattered<f32>, count: u32, bias
     let i = goldy::gpu::global_id().x;
     if i < count {
         output[i] = input[i] + bias;
+    }
+}
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn multiply_add(a: &[f32], b: &[f32], c: &[f32], output: goldy::gpu::Scattered<f32>, count: u32) {
+    let i = goldy::gpu::global_id().x;
+    if i < count {
+        output[i] = a[i] * b[i] + c[i];
     }
 }
 
@@ -369,10 +378,26 @@ fn auto_fusion_pins() -> (
 }
 
 /// A scheme that fuses automatically whatever `GOLDY_FUSION` says.
+///
+/// Matching the recorded rounding, a device that contracts across statements runs
+/// these float chains unfused, so there the scheme relaxes its arithmetic. The data
+/// are small integers, which round alike either way.
 fn fusing(ctx: &goldy::Context) -> Scheme {
     let mut scheme = Scheme::new(ctx);
     scheme.set_automatic_fusion(true);
+    if !keeps_statements_apart(ctx.runtime()) {
+        scheme.set_arithmetic_policy(ArithmeticPolicy::Relaxed);
+    }
     scheme
+}
+
+/// Whether `device` rounds each statement as written, so exact fusion may carry a
+/// float from one stage to the next.
+fn keeps_statements_apart(device: &Runtime) -> bool {
+    matches!(
+        device.capabilities().fp_contraction,
+        FpContraction::Never | FpContraction::Expression
+    )
 }
 
 /// `((input * 2 + 1) * 3 + 1)` for the first `stages` of that sequence, past `N` the sentinel.
@@ -736,6 +761,61 @@ fn main() {
                 let stats = scheme.replay_stats();
                 assert_eq!(stats.records, 2, "the promoted plan replays");
                 assert_eq!(stats.clean_submits, 6, "frame 2 and frames 4..=8");
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("matched_rounding_follows_the_device_contraction_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                let _pins = auto_fusion_pins();
+                let k = Chain {
+                    scale: scale::Kernel::prepare(&device)?,
+                    bias: bias::Kernel::prepare(&device)?,
+                };
+                let p = buffers(&device, &[input_data(), sentinel(), sentinel()])?;
+                let want = chain_reference(1.0, false);
+                let ctx = device.create_context()?;
+                let mut scheme = Scheme::new(&ctx);
+                scheme.set_automatic_fusion(true);
+                record_chain(&mut scheme, &k, &p)?;
+                for f in 1..=4 {
+                    submit_and_check(&mut scheme, &p, &want, &format!("frame {f}"))?;
+                }
+                let fuses = keeps_statements_apart(&device);
+                assert_eq!(scheme.executed_node_count(), 2 - fuses as usize);
+                let report = scheme.fusion_report();
+                let declined = report
+                    .rejected
+                    .iter()
+                    .any(|r| r.reason == FusionRejection::Contraction { stage: 1 } && r.labels == ["scale", "bias"]);
+                assert_eq!(declined, !fuses, "{:?}", report.rejected);
+                Ok(())
+            }
+        }),
+        libtest_mimic::Trial::test("a_device_that_never_contracts_rounds_a_multiply_add_twice_gpu", {
+            let device = Arc::clone(&device);
+            move || {
+                if device.capabilities().fp_contraction != FpContraction::Never {
+                    return Ok(());
+                }
+                // (1 + 2^-12)^2 = 1 + 2^-11 + 2^-24 rounds to 1 + 2^-11, so the sum is
+                // zero; a fused multiply-add keeps 2^-24.
+                let a = 1.0 + f32::powi(2.0, -12);
+                let c = -(1.0 + f32::powi(2.0, -11));
+                let k = multiply_add::Kernel::prepare(&device)?;
+                let p = buffers(&device, &[vec![a; LEN], vec![a; LEN], vec![c; LEN], sentinel()])?;
+                let ctx = device.create_context()?;
+                let mut scheme = Scheme::new(&ctx);
+                k.invoke(&p[0], &p[1], &p[2], &p[3], N)
+                    .over_1d(N)
+                    .record(&mut scheme, "multiply_add")?;
+                let mut frame = scheme.submit()?;
+                let got: Vec<f32> = (&mut frame >> &p[3])
+                    .take::<u8>()?
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                assert!(got[..N as usize].iter().all(|&v| v == 0.0), "{:?}", &got[..4]);
                 Ok(())
             }
         }),

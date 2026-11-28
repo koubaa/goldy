@@ -19,6 +19,13 @@
 //! that no node outside the region binds elides it: the temporary lives only in
 //! registers and the fused dispatch does not bind it.
 //!
+//! Under [`crate::ArithmeticPolicy::MatchRecorded`], a run whose fused kernel the
+//! device's compiler may round differently than the recorded ones
+//! ([`crate::RuntimeCapabilities::fp_contraction`]) ends before the stage it would
+//! expose: one that reads a floating-point value an earlier stage writes, where the
+//! compiler contracts unmarked operations across statements, and every stage, where
+//! it may rewrite anything.
+//!
 //! Nodes that record what they compute in index notation (`semantic_fusion.rs`) are
 //! matched first. A maximal run of adjacent ones whose regions compose and lower to one
 //! kernel runs as that synthesized kernel ([`FusionTier::Semantic`]); this reaches
@@ -33,7 +40,8 @@ use crate::kernel::{
 use crate::runtime::Runtime;
 use crate::scheme::NodeId;
 use crate::semantic_fusion::{
-    lift_kernel, synthesize, target as semantic_target, Description, SemanticProgram, SemanticSite, SiteScalar,
+    description_contracts, lift_kernel, synthesize, target as semantic_target, Description, SemanticProgram,
+    SemanticSite, SiteScalar,
 };
 use crate::shader::ShaderProvenance;
 use crate::task_graph::{
@@ -42,7 +50,7 @@ use crate::task_graph::{
 use crate::temporary::{TemporaryUse, TEMPORARY_SLOT_PLACEHOLDER};
 use crate::types::ResourceAccess;
 use crate::SchemeLabel;
-use goldy_shader_ir::algebra::{ContractionPrecision, Target};
+use goldy_shader_ir::algebra::{ContractionPrecision, FpContraction, Target};
 use goldy_shader_ir::{FusedDefinition, FusionRejection, KernelDef, KernelId};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -753,7 +761,18 @@ impl FusionPlanner {
             while end < n && ir.nodes[end].group == ir.nodes[start].group {
                 let Some(next) = view(end) else { break };
                 stages.push(next);
-                match admit(&stages, &self.limits()) {
+                let admitted = admit(&stages, &self.limits()).and_then(|definition| {
+                    let exposed = match (self.arithmetic, target.contraction) {
+                        (ArithmeticPolicy::Relaxed, _) | (_, FpContraction::Never | FpContraction::Expression) => None,
+                        (_, FpContraction::Unmarked) => definition.carried_float(),
+                        _ => Some(stages.len() - 1),
+                    };
+                    match exposed {
+                        Some(stage) => Err(FusionRejection::Contraction { stage }),
+                        None => Ok(definition),
+                    }
+                });
+                match admitted {
                     Ok(definition) => {
                         best = Some(definition);
                         end += 1;
@@ -807,21 +826,42 @@ impl FusionPlanner {
             .collect();
         let reassociates = self.precision != ContractionPrecision::Exact;
         let admitted = |s: &SemanticSite| s.exact || reassociates;
-        // An author states a description up to reassociation, which relaxed arithmetic permits.
+        // An author states a description up to reassociation, which relaxed arithmetic
+        // permits; its sites follow the rule they would recorded on their own.
         let relaxed = self.arithmetic == ArithmeticPolicy::Relaxed;
+        let mut contracted = HashSet::new();
+        if !relaxed {
+            for (&i, description) in described {
+                if description_contracts(description, target) {
+                    contracted.insert(i as usize);
+                    self.rejected.push(Rejection {
+                        nodes: i as usize..i as usize + 1,
+                        reason: FusionRejection::Contraction { stage: 0 },
+                    });
+                }
+            }
+        }
         let semantic = |i: usize| -> Option<Vec<&SemanticSite>> {
             if let Some(site) = semantic.get(&(i as u32)) {
                 return admitted(site).then(|| vec![site]);
             }
             let description = described.get(&(i as u32))?;
-            (relaxed || description.sites.iter().all(admitted)).then(|| description.sites.iter().collect())
+            ((description.exact || relaxed || reassociates)
+                && !contracted.contains(&i)
+                && description.sites.iter().all(admitted))
+            .then(|| description.sites.iter().collect())
         };
         let site = |i: usize| semantic(i).or_else(|| lifted.get(&i).map(|s| vec![s]));
         let recorded = |nodes: Range<usize>| nodes.into_iter().any(|i| semantic(i).is_some());
-        // Each node as recorded, priced once.
+        // Each node as recorded, priced once. The estimate prices the recorded kernel,
+        // so whether its compiler contracts does not bear on it.
         let mut alone: HashMap<usize, f64> = HashMap::new();
         let cost = self.cost;
         let resource_limit = self.resource_limit;
+        let recorded_target = Target {
+            contraction: FpContraction::Never,
+            ..*target
+        };
         let mut alone_ns = |i: usize, s: &[&SemanticSite]| {
             *alone.entry(i).or_insert_with(|| {
                 let estimate = s
@@ -831,7 +871,7 @@ impl FusionPlanner {
                         let run: Vec<(usize, &SemanticSite)> = s.iter().map(|&s| (0, s)).collect();
                         synthesize(
                             &run,
-                            target,
+                            &recorded_target,
                             ContractionPrecision::Exact,
                             ArithmeticPolicy::MatchRecorded,
                             resource_limit,

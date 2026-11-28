@@ -1005,6 +1005,8 @@ fn inexact_description_needs_reassociation() {
 fn relaxed_arithmetic_admits_an_inexact_description() {
     let _gpu = gpu_lock();
     let device = runtime();
+    // `Twin` compares bytes, which relaxed arithmetic does not promise; this chain
+    // (`(a + b + 1.5) * w * 0.5`) leaves a compiler nothing to reassociate or contract.
     let mut twin = Twin::new(&device, &described_init(), |rec, t| record_described(rec, t, false));
     for (scheme, _, _) in &mut twin.runs {
         scheme.set_arithmetic_policy(ArithmeticPolicy::Relaxed);
@@ -1013,6 +1015,66 @@ fn relaxed_arithmetic_admits_an_inexact_description() {
     assert_one_semantic_region(twin.fused(), 3);
     let labels = &twin.fused().fusion_report().regions[0].labels;
     assert!(labels.iter().any(|l| l.to_string() == "shifted_product"), "{labels:?}");
+}
+
+#[goldy::compute(workgroup_size = [64, 1, 1])]
+fn multiply_add(
+    #[tensor(shape = [n])] x: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] w: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] b: goldy::gpu::Tensor<f32>,
+    #[tensor(shape = [n])] y: goldy::gpu::TensorWrite<f32>,
+) {
+    let i = goldy::gpu::global_id().x;
+    if i < y.len() {
+        y[i] = x[i] * w[i] + b[i];
+    }
+}
+
+/// `x = a + b`, then `multiply_add(x, w, a)` described exactly as a product and a sum
+/// through `scratch`, then `z = y * 0.5`.
+fn record_multiply_add(rec: &mut TensorRecorder<'_>, t: &[Tensor]) -> Recorded {
+    rec.add_into("sum", t[0].view(), t[1].view(), t[3].view())?;
+    let device = rec.scheme().context().runtime().clone();
+    let kernel = multiply_add::Kernel::prepare(&device)?;
+    let node = kernel
+        .record(
+            rec.scheme(),
+            "multiply_add",
+            t[3].view(),
+            t[2].view(),
+            t[0].view(),
+            t[4].view(),
+        )?
+        .over_1d(ROWS)
+        .node();
+    rec.describe(node, true, |d| {
+        d.mul_into("product", t[3].view(), t[2].view(), t[6].view())?;
+        d.add_into("bias", t[6].view(), t[0].view(), t[4].view())
+    })?;
+    rec.mul_scalar_into("halve", t[4].view(), 0.5, t[5].view())?;
+    Ok((Vec::new(), vec![node]))
+}
+
+/// A compiler that contracts may compute an exactly described `x * w + a` with one
+/// rounding where its operations round twice, so under recorded arithmetic the
+/// description joins a region only on a device that never contracts.
+#[test]
+fn a_described_multiply_add_fuses_only_where_nothing_contracts() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let never = device.capabilities().fp_contraction == goldy::FpContraction::Never;
+    let scheme = fused_matches_unfused(&device, &described_init(), record_multiply_add, 5);
+    let report = scheme.fusion_report();
+    let joined = report
+        .regions
+        .iter()
+        .any(|r| r.status == FusionRegionStatus::Promoted && r.labels.iter().any(|l| *l == "multiply_add"));
+    assert_eq!(joined, never, "{report:?}");
+    let declined = report
+        .rejected
+        .iter()
+        .any(|r| r.reason == FusionRejection::Contraction { stage: 0 } && r.labels == ["multiply_add"]);
+    assert_eq!(declined, !never, "{report:?}");
 }
 
 #[test]

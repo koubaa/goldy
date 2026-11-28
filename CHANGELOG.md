@@ -152,15 +152,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Exact fusion where compilers contract** — Metal and CUDA compilers contract a
-  multiply into the add that reads it within an expression, so a recorded kernel and a
-  synthesized one need not round the same pairs. Under `MatchRecorded` on those
-  backends, semantic fusion now leaves a region unfused when its terms add a product
-  they do not round, such as the taps of a cyclic window dot, and fused schemes store
-  the unfused bits there too. `Relaxed` still fuses them. In `goldy_shader_ir`,
-  `algebra::Target` gains `contracts` (`false` preserves the previous behavior),
-  `LowerError` gains `Contraction`, and `Term::adds_unrounded_product` reports the
-  pattern.
+- **Exact fusion where compilers contract** (breaking) — a compiler that contracts a
+  multiply into the add that reads it need not contract the same pairs in a fused
+  kernel as in the kernels it replaces. `RuntimeCapabilities::fp_contraction` reports
+  how far each device's compilers go (`FpContraction::Never`, `Expression`,
+  `Unmarked`, `Anywhere`; software Vulkan and DX12 rasterizers never contract, Metal
+  and the CPU backend within an expression, CUDA and hardware Vulkan and DX12 outside
+  exact-marked operations, other WebGPU adapters anywhere). Under `MatchRecorded`,
+  automatic fusion declines what that exposes: a product added unrounded (such as the
+  taps of a cyclic window dot), an exact description whose operations add a product,
+  a float carried between composed stages where unmarked operations contract, and
+  every region where nothing is guaranteed. The declined run is reported as
+  `FusionRejection::Contraction { stage }`, naming the node whose arithmetic is
+  exposed. `Relaxed` still fuses them. Source-breaking additions:
+  `RuntimeCapabilities` gains the public field `fp_contraction`;
+  `goldy_shader_ir::algebra::Target` gains `contraction`
+  (`FpContraction::Never` preserves the previous behavior); `FusionRejection` gains
+  `Contraction` and `LowerError` gains `Contraction`, and both are now
+  `#[non_exhaustive]`. `algebra::contracted_output`, `Term::adds_unrounded_product`
+  and `FusedDefinition::carried_float` report the patterns.
+
+- **Cyclic entry points validate before recording** — `cyclic_dot_at` checks every
+  view, including that `state` and `out` are writeable, before it records the store,
+  and the cyclic entry points name the view at fault (`src`, `out`, `weight`,
+  `state`, `position`).
 
 - `goldy_shader_ir::algebra::IndexSource` literals now specify `add` and
   `modulus` (`0` and `None` preserve the previous behavior).

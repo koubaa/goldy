@@ -77,12 +77,52 @@ pub struct Target {
     /// Whether a subgroup multiplies [`MATRIX_TILE`](crate::MATRIX_TILE)-square f16 tiles into f32
     /// accumulators ([`crate::MatrixOp`]).
     pub matrix: bool,
-    /// Whether the device's compiler may contract a product into the sum or difference
-    /// that reads it, rounding once where the source writes two operations. The
-    /// recorded kernels and a synthesized one need not contract the same pairs, so
-    /// [`lower_on`] declines an output whose term adds a product it does not round
-    /// ([`Term::adds_unrounded_product`]).
-    pub contracts: bool,
+    /// Where the device's compiler may fuse arithmetic the source writes as separate
+    /// roundings. The recorded kernels and a synthesized one need not fuse the same
+    /// operations, so [`lower_on`] declines what this exposes ([`contracted_output`]).
+    pub contraction: FpContraction,
+}
+
+/// Where a device's compiler may contract a product into the sum or difference that
+/// reads it, rounding once where the source writes two roundings, or otherwise
+/// rewrite floating-point arithmetic.
+///
+/// A level holds for every kernel the device compiles, authored or synthesized.
+/// Operations marked exact are [`UnaryOp::Round`] results, which kernels emit as
+/// SPIR-V `NoContraction`, HLSL `precise` or CUDA `__fadd_rn`-style intrinsics.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum FpContraction {
+    /// Every operation rounds as the source writes it.
+    #[default]
+    Never,
+    /// Within one source expression only: separate statements, separate functions and
+    /// operations marked exact round as written (C `-ffp-contract=on`).
+    Expression,
+    /// Anywhere, except operations marked exact.
+    Unmarked,
+    /// Anywhere, marked operations included; the compiler may also reassociate.
+    Anywhere,
+}
+
+/// The first output of `region` that a compiler contracting at `contraction` may
+/// compute differently in one kernel than in the operations' own kernels, or `None`.
+///
+/// With `rounded`, the kernel rounds every operation's result as [`lower_on`] does,
+/// so only a product an operation adds without rounding is exposed
+/// ([`Term::adds_unrounded_product`]). Without it, the region is one kernel's
+/// arithmetic as written, so any product added across operations is too. Under
+/// [`FpContraction::Anywhere`] every output is.
+pub fn contracted_output(region: &Region, contraction: FpContraction, rounded: bool) -> Option<String> {
+    if contraction == FpContraction::Never {
+        return None;
+    }
+    let prepared = match rounded {
+        true => Prepared::rounded(region),
+        false => Prepared::new(region),
+    }
+    .ok()?;
+    prepared.contracted(contraction)
 }
 
 /// The rounding a lowering may add to contractions beyond what their terms state.
@@ -148,6 +188,7 @@ pub struct Lowered {
 }
 
 /// Why a region cannot run as one kernel.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerError {
     Invalid(RegionError),
@@ -186,7 +227,8 @@ pub enum LowerError {
     GatheredRead {
         param: String,
     },
-    /// An output adds a product it does not round, on a target that contracts.
+    /// The target's compiler may fuse an output's arithmetic unlike the recorded
+    /// kernels; see [`contracted_output`].
     Contraction {
         output: String,
     },
@@ -215,10 +257,7 @@ impl fmt::Display for LowerError {
                 )
             }
             LowerError::Contraction { output } => {
-                write!(
-                    f,
-                    "`{output}` adds an unrounded product, which the device may contract unlike the recorded kernels"
-                )
+                write!(f, "the device may contract `{output}` unlike the recorded kernels")
             }
         }
     }
@@ -241,8 +280,8 @@ pub fn lower(region: &Region, sources: &[IndexSource]) -> Result<Lowered, LowerE
 /// prefix of the part's domain reuses the lane reductions of the outputs spanning all
 /// of it, since lane groups reduce over the whole domain; otherwise it starts a part.
 /// Under [`Schedule::Lanes`], a part whose outputs have no lane-ordered reduction runs
-/// one element per thread. On a target that [contracts](Target::contracts), an output
-/// whose term adds a product it does not round is [`LowerError::Contraction`].
+/// one element per thread. An output the target's [contraction](Target::contraction)
+/// exposes ([`contracted_output`]) is [`LowerError::Contraction`].
 pub fn lower_on(region: &Region, sources: &[IndexSource], target: &Target) -> Result<Lowered, LowerError> {
     lower_on_with_rounding(region, sources, target, true)
 }
@@ -258,11 +297,9 @@ fn lower_on_with_rounding(
     } else {
         Prepared::new(region)?
     };
-    if round_results && target.contracts {
-        if let Some((id, _)) = prepared.bodies.iter().find(|(_, body)| body.adds_unrounded_product()) {
-            return Err(LowerError::Contraction {
-                output: prepared.name(*id).to_string(),
-            });
+    if round_results {
+        if let Some(output) = prepared.contracted(target.contraction) {
+            return Err(LowerError::Contraction { output });
         }
     }
     let mut lanes = None;
@@ -555,6 +592,19 @@ impl Prepared {
 
     fn name(&self, id: ValueId) -> &str {
         &self.region.value(id).expect("live").name
+    }
+
+    /// See [`contracted_output`].
+    fn contracted(&self, contraction: FpContraction) -> Option<String> {
+        let exposed = |body: &Term| match contraction {
+            FpContraction::Never => false,
+            FpContraction::Expression | FpContraction::Unmarked => body.adds_unrounded_product(),
+            FpContraction::Anywhere => true,
+        };
+        self.bodies
+            .iter()
+            .find(|(_, body)| exposed(body))
+            .map(|(id, _)| self.name(*id).to_string())
     }
 
     fn storage(&self, id: ValueId) -> &Storage {

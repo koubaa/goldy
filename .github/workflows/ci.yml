@@ -652,6 +652,16 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --no-default-features --features webgpu --test '*'
 
+      # Exact fusion against the adapter's contraction level. The rest of the tensor
+      # suite records in-place views, which WebGPU cannot bind.
+      - name: Run cyclic tensor tests
+        env:
+          GOLDY_BACKEND: webgpu
+          WGPU_BACKEND: vulkan
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          LD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --no-default-features --features webgpu,tensor --test tensor cyclic
+
       - name: Run goldy-ffi integration tests
         env:
           GOLDY_BACKEND: webgpu
@@ -717,6 +727,16 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
         run: cargo test --no-default-features --features webgpu --test '*'
 
+      # Exact fusion against the adapter's contraction level. The rest of the tensor
+      # suite records in-place views, which WebGPU cannot bind.
+      - name: Run cyclic tensor tests
+        env:
+          GOLDY_BACKEND: webgpu
+          WGPU_BACKEND: metal
+          GOLDY_SLANG_PATH: ${{ env.GOLDY_SLANG_PATH }}
+          DYLD_LIBRARY_PATH: ${{ env.SLANG_LIB_DIR }}
+        run: cargo test --no-default-features --features webgpu,tensor --test tensor cyclic
+
       - name: Run goldy-ffi integration tests
         env:
           GOLDY_BACKEND: webgpu
@@ -773,6 +793,15 @@ jobs:
           WGPU_BACKEND: dx12
           WGPU_FORCE_FALLBACK_ADAPTER: "1"
         run: cargo nextest run --no-default-features --features webgpu --test-threads=1
+
+      # Exact fusion against the adapter's contraction level. The rest of the tensor
+      # suite records in-place views, which WebGPU cannot bind.
+      - name: Run cyclic tensor tests (WebGPU + WARP)
+        env:
+          GOLDY_BACKEND: webgpu
+          WGPU_BACKEND: dx12
+          WGPU_FORCE_FALLBACK_ADAPTER: "1"
+        run: cargo nextest run --no-default-features --features webgpu,tensor --test tensor --test-threads=1 cyclic
 
       - name: Run goldy-ffi integration tests (WebGPU + WARP)
         env:

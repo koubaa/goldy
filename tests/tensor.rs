@@ -6,8 +6,8 @@
 mod submission;
 
 use goldy::{
-    BufferKind, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor, TensorDType,
-    TensorKernels, TensorLayout, TensorScalar, TensorShape, TensorView,
+    BufferKind, FpContraction, RequestAdapterOptions, Runtime, RuntimeDescriptor, ScatterMode, Scheme, Tensor,
+    TensorDType, TensorKernels, TensorLayout, TensorScalar, TensorShape, TensorView,
 };
 use std::sync::Mutex;
 
@@ -107,6 +107,7 @@ fn read_f32(scheme: &mut Scheme, buf: &goldy::Buffer) -> Vec<f32> {
     bytemuck::cast_slice(&bytes).to_vec()
 }
 
+/// Submit until fusion has planned (after a clean submit) and every compile settled.
 fn settle_fusion(scheme: &mut Scheme) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
@@ -116,7 +117,8 @@ fn settle_fusion(scheme: &mut Scheme) {
             .regions
             .iter()
             .any(|region| matches!(region.status, goldy::FusionRegionStatus::Compiling));
-        if !scheme.compiles_pending() && !compiling {
+        let planned = scheme.replay_stats().clean_submits > 0;
+        if planned && !scheme.compiles_pending() && !compiling {
             return;
         }
         assert!(
@@ -128,22 +130,23 @@ fn settle_fusion(scheme: &mut Scheme) {
     }
 }
 
-/// Whether `device`'s compiler contracts multiply-adds, so exact fusion declines a
-/// window dot: its taps add products they do not round.
-fn contracts(device: &Runtime) -> bool {
-    matches!(
-        device.backend_type(),
-        goldy::BackendType::Metal | goldy::BackendType::Cuda
-    )
-}
-
-/// Whether fusion declined a run through the node labelled `label` because the device
-/// could contract its arithmetic.
+/// Whether fusion declined a run because the device could contract the arithmetic of
+/// the node labelled `label`.
 fn declined_for_contraction(report: &goldy::FusionReport, label: &str) -> bool {
     report.rejected.iter().any(|rejection| {
-        rejection.labels.iter().any(|l| *l == label)
-            && matches!(&rejection.reason, goldy::FusionRejection::Semantic { reason, .. } if reason.contains("contract"))
+        matches!(rejection.reason, goldy::FusionRejection::Contraction { stage }
+            if rejection.labels.get(stage).is_some_and(|l| *l == label))
     })
+}
+
+/// The labels of each promoted region, in recorded order.
+fn promoted_regions(report: &goldy::FusionReport) -> Vec<Vec<String>> {
+    report
+        .regions
+        .iter()
+        .filter(|region| matches!(region.status, goldy::FusionRegionStatus::Promoted))
+        .map(|region| region.labels.iter().map(|l| l.to_string()).collect())
+        .collect()
 }
 
 #[test]
@@ -1245,17 +1248,22 @@ fn cyclic_dot_and_neighboring_algebra_fuse_exactly() {
     settle_fusion(&mut plain);
 
     let report = fused.fusion_report();
-    // A contracting device runs the dot as recorded; the skip and scale still fuse.
-    let contracts = contracts(&device);
-    let joined = if contracts { 2 } else { 3 };
-    assert!(
-        report.regions.iter().any(|region| {
-            region.labels.len() == joined && matches!(region.status, goldy::FusionRegionStatus::Promoted)
-        }),
+    // The store stays apart: the dot reads history rows it only partly writes. A
+    // device that may contract the dot's multiply-adds runs it as recorded, and one
+    // that may rewrite any arithmetic fuses nothing exactly.
+    let level = device.capabilities().fp_contraction;
+    let (regions, executed): (&[&[&str]], usize) = match level {
+        FpContraction::Never => (&[&["window_dot", "skip", "scale"]], 2),
+        FpContraction::Expression | FpContraction::Unmarked => (&[&["skip", "scale"]], 3),
+        _ => (&[], 4),
+    };
+    assert_eq!(promoted_regions(&report), regions, "{report:?}");
+    assert_eq!(
+        declined_for_contraction(&report, "window_dot"),
+        level != FpContraction::Never,
         "{report:?}"
     );
-    assert_eq!(declined_for_contraction(&report, "window_dot"), contracts, "{report:?}");
-    assert_eq!(fused.executed_node_count(), 2 + contracts as usize, "{report:?}");
+    assert_eq!(fused.executed_node_count(), executed, "{report:?}");
     assert_eq!(plain.executed_node_count(), 4);
 
     let fused_bits = read_f32(&mut fused, fused_out.buffer())
@@ -1287,11 +1295,12 @@ fn cyclic_dot_and_neighboring_algebra_fuse_exactly() {
 
 /// A cyclic history may carry several row axes and live in any strides: here the
 /// window axis is outermost, as in a cache of whole rows. Per-tap weight sums recorded
-/// between the store and the dot fuse with them, and the result is clamped.
+/// between the store and the dot fuse with the store; the dot reads history rows the
+/// store only partly writes, so it starts a second region with the clamps.
 ///
 /// Matching the recorded arithmetic, the fused scheme stores the unfused bits on every
-/// device; a device that contracts runs the dot as recorded. Relaxed arithmetic fuses
-/// the dot everywhere and stays within rounding of the reference.
+/// device; one that may contract the dot's multiply-adds runs it as recorded. Relaxed
+/// arithmetic fuses the dot everywhere and stays within rounding of the reference.
 #[test]
 fn cyclic_history_with_row_axes_fuses_exactly() {
     let _gpu = gpu_lock();
@@ -1318,6 +1327,7 @@ fn cyclic_history_with_row_axes_fuses_exactly() {
         let weight = Tensor::zeros(&device, taps, TensorDType::F32).unwrap();
         let state = Tensor::zeros(&device, taps, TensorDType::F32).unwrap();
         let dot = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
+        let floored = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
         let out = Tensor::zeros(&device, TensorShape::from_dims(&rows).unwrap(), TensorDType::F32).unwrap();
         let mut scheme = Scheme::new(&ctx);
         scheme.set_automatic_fusion(automatic);
@@ -1335,9 +1345,17 @@ fn cyclic_history_with_row_axes_fuses_exactly() {
         let window = weight.view().permute(&[1, 2, 0]).unwrap();
         rec.cyclic_window_dot_at("dot", window, history, position.view(), dot.view())
             .unwrap();
-        rec.max_scalar_into("floor", dot.view(), -0.75, out.view()).unwrap();
-        rec.min_scalar_into("ceiling", out.view(), 0.75, out.view()).unwrap();
-        (scheme, source, position, state, out, vec![base, bias, weight, dot])
+        rec.max_scalar_into("floor", dot.view(), -0.75, floored.view()).unwrap();
+        rec.min_scalar_into("ceiling", floored.view(), 0.75, out.view())
+            .unwrap();
+        (
+            scheme,
+            source,
+            position,
+            state,
+            out,
+            vec![base, bias, weight, dot, floored],
+        )
     };
 
     let mut runs = [
@@ -1381,25 +1399,100 @@ fn cyclic_history_with_row_axes_fuses_exactly() {
         }
         assert_eq!(bits[0], bits[1], "position {position}");
     }
-    let contracts = contracts(&device);
     let [(exact, ..), (plain, ..), (relaxed, ..)] = &runs;
-    let promoted = |scheme: &Scheme, label: &str| {
-        scheme
-            .fusion_report()
-            .regions
-            .iter()
-            .filter(|region| matches!(region.status, goldy::FusionRegionStatus::Promoted))
-            .flat_map(|region| region.labels.clone())
-            .filter(|l| *l == label)
-            .count()
+    let stored = ["store", "weight", "weight", "weight", "weight"];
+    let level = device.capabilities().fp_contraction;
+    let (regions, executed): (&[&[&str]], usize) = match level {
+        FpContraction::Never => (&[&stored, &["dot", "floor", "ceiling"]], 2),
+        FpContraction::Expression | FpContraction::Unmarked => (&[&stored, &["floor", "ceiling"]], 3),
+        _ => (&[], 4 + width as usize),
     };
     let report = exact.fusion_report();
-    assert_eq!(promoted(exact, "weight"), width as usize, "{report:?}");
-    assert_eq!(promoted(exact, "dot"), !contracts as usize, "{report:?}");
-    assert_eq!(declined_for_contraction(&report, "dot"), contracts, "{report:?}");
+    assert_eq!(promoted_regions(&report), regions, "{report:?}");
+    assert_eq!(
+        declined_for_contraction(&report, "dot"),
+        level != FpContraction::Never,
+        "{report:?}"
+    );
+    assert_eq!(exact.executed_node_count(), executed, "{report:?}");
     assert_eq!(plain.executed_node_count(), 4 + width as usize);
-    assert_eq!(exact.executed_node_count(), 2 + contracts as usize, "{report:?}");
     let report = relaxed.fusion_report();
-    assert_eq!(promoted(relaxed, "dot"), 1, "{report:?}");
+    assert_eq!(
+        promoted_regions(&report),
+        [&stored[..], &["dot", "floor", "ceiling"][..]],
+        "{report:?}"
+    );
     assert_eq!(relaxed.executed_node_count(), 2, "{report:?}");
+}
+
+/// The cyclic entry points check every view before recording, and name the view at fault.
+#[test]
+fn cyclic_entry_points_validate_before_recording() {
+    let _gpu = gpu_lock();
+    let device = runtime();
+    let ctx = submission::submission_context(&device);
+    let kernels = TensorKernels::new(&device).unwrap();
+    let zeros = |dims: &[u32], dtype| Tensor::zeros(&device, TensorShape::from_dims(dims).unwrap(), dtype).unwrap();
+    let f32s = |dims: &[u32]| zeros(dims, TensorDType::F32);
+    let (rows, width) = (2u32, 4u32);
+    let src = f32s(&[rows]);
+    let out = f32s(&[rows]);
+    let state = f32s(&[rows, width]);
+    let weight = f32s(&[rows, width]);
+    let position = zeros(&[1], TensorDType::U32);
+    let narrow_out = f32s(&[1]);
+    let narrow_state = f32s(&[1, width]);
+    let flat_state = f32s(&[width]);
+    let short = f32s(&[rows + 1]);
+    let wide_weight = f32s(&[rows, width + 1]);
+    let empty_state = f32s(&[rows, 0]);
+    let float_position = f32s(&[1]);
+    let two_positions = zeros(&[2], TensorDType::U32);
+    let broadcast_out = narrow_out.view().broadcast_to(out.shape()).unwrap();
+    let broadcast_state = narrow_state.view().broadcast_to(state.shape()).unwrap();
+
+    let mut scheme = Scheme::new(&ctx);
+    let mut rec = kernels.recorder(&mut scheme);
+    let rejects = |name: &str, result: Result<(), goldy::GoldyError>| match result {
+        Err(goldy::GoldyError::Validation(message)) => {
+            assert!(message.contains(name), "{message:?} names {name}")
+        }
+        other => panic!("expected a validation error naming {name}, got {other:?}"),
+    };
+    let (s, w, h, p, o) = (src.view(), weight.view(), state.view(), position.view(), out.view());
+    rejects("out", rec.cyclic_dot_at("window", s, w, h, p, broadcast_out));
+    rejects("state", rec.cyclic_dot_at("window", s, w, broadcast_state, p, o));
+    rejects("src", rec.cyclic_dot_at("window", short.view(), w, h, p, o));
+    rejects("out", rec.cyclic_dot_at("window", s, w, h, p, short.view()));
+    rejects("weight", rec.cyclic_dot_at("window", s, wide_weight.view(), h, p, o));
+    rejects("row axis", rec.cyclic_dot_at("window", s, w, flat_state.view(), p, o));
+    rejects(
+        "zero width",
+        rec.cyclic_dot_at("window", s, f32s(&[rows, 0]).view(), empty_state.view(), p, o),
+    );
+    rejects(
+        "position",
+        rec.cyclic_dot_at("window", s, w, h, float_position.view(), o),
+    );
+    rejects(
+        "position",
+        rec.cyclic_dot_at("window", s, w, h, two_positions.view(), o),
+    );
+
+    rejects("state", rec.cyclic_store_at("store", s, broadcast_state, p));
+    rejects("src", rec.cyclic_store_at("store", short.view(), h, p));
+    rejects(
+        "row axis",
+        rec.cyclic_store_at("store", narrow_out.view(), flat_state.view(), p),
+    );
+    rejects("position", rec.cyclic_store_at("store", s, h, two_positions.view()));
+
+    rejects("out", rec.cyclic_window_dot_at("dot", w, h, p, broadcast_out));
+    rejects("weight", rec.cyclic_window_dot_at("dot", wide_weight.view(), h, p, o));
+    rejects(
+        "zero width",
+        rec.cyclic_window_dot_at("dot", w, empty_state.view(), p, o),
+    );
+    drop(rec);
+    assert_eq!(scheme.ir_node_count(), 0, "a rejected call records nothing");
 }

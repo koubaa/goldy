@@ -9861,6 +9861,14 @@ mod fusion_plan_tests {
         }
     }
 
+    #[goldy::compute(workgroup_size = [64, 1, 1])]
+    fn offset(input: &[u32], output: goldy::gpu::Scattered<u32>, count: u32, by: u32) {
+        let i = goldy::gpu::global_id().x;
+        if i < count {
+            output[i] = input[i] + by;
+        }
+    }
+
     struct Pins {
         _cb: CbReuseOverride,
         _spec: SpecializationOverride,
@@ -10044,6 +10052,60 @@ mod fusion_plan_tests {
             "{}",
             rejected.reason
         );
+    }
+
+    #[test]
+    fn matched_rounding_declines_what_the_device_may_contract() {
+        use crate::FpContraction::{Anywhere, Expression, Never, Unmarked};
+        let _pins = pins(false);
+        for (contraction, floats, integers) in [
+            (Never, true, true),
+            (Expression, true, true),
+            (Unmarked, false, true),
+            (Anywhere, false, false),
+        ] {
+            let mut backend = crate::backend::mock::MockBackend::new();
+            backend.fp_contraction = contraction;
+            let device = Runtime::from_backend(Box::new(backend)).unwrap();
+            let k = kernels(&device);
+            let p = parcels(&device, 3);
+            let ctx = device.create_context().unwrap();
+
+            let mut scheme = fusing(&ctx);
+            record_chain(&mut scheme, &k, &p);
+            frames(&mut scheme, 3);
+            assert_eq!(scheme.executed_node_count(), 2 - floats as usize, "{contraction:?}");
+            let report = scheme.fusion_report();
+            let declined = matches!(
+                &report.rejected[..],
+                [r] if r.reason == FusionRejection::Contraction { stage: 1 } && r.labels == ["scale", "bias"]
+            );
+            assert_eq!(declined, !floats, "{contraction:?}: {:?}", report.rejected);
+
+            scheme.set_arithmetic_policy(crate::ArithmeticPolicy::Relaxed);
+            frames(&mut scheme, 3);
+            assert_eq!(scheme.executed_node_count(), 1, "{contraction:?} relaxed");
+
+            // An integer carried between stages rounds nowhere.
+            let offset = offset::Kernel::prepare(&device).unwrap();
+            let mut scheme = fusing(&ctx);
+            offset
+                .invoke(&p[0], &p[1], 64, 1)
+                .over_1d(64)
+                .record(&mut scheme, "a")
+                .unwrap();
+            offset
+                .invoke(&p[1], &p[2], 64, 2)
+                .over_1d(64)
+                .record(&mut scheme, "b")
+                .unwrap();
+            frames(&mut scheme, 3);
+            assert_eq!(
+                scheme.executed_node_count(),
+                2 - integers as usize,
+                "{contraction:?} integers"
+            );
+        }
     }
 
     #[test]

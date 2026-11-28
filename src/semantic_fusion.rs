@@ -11,9 +11,10 @@
 //! association its recorded kernel uses and lowering reproduces it, so the synthesized
 //! kernel stores what the recorded sequence stores, bit for bit, unless the scheme
 //! admits [`ContractionPrecision::F16Factors`] and a contraction runs on matrix units,
-//! or selects [`crate::ArithmeticPolicy::Relaxed`]. Where the device's compiler
-//! contracts ([`Target::contracts`]), a composition that adds a product it does not
-//! round has no such kernel, and its run stays unfused.
+//! or selects [`crate::ArithmeticPolicy::Relaxed`]. Where the device's compiler may
+//! fuse operations the recorded kernels round apart ([`Target::contraction`], from
+//! [`crate::RuntimeCapabilities::fp_contraction`]), a composition it exposes has no
+//! such kernel, and its run stays unfused.
 //!
 //! Sites name whole buffers. A view's offset and strides are relative to its buffer, and
 //! the kernel binds the buffer's own descriptor, as the recorded kernels do. Nothing
@@ -23,7 +24,9 @@
 //! [`Description`]). A region takes every one of its sites or none, and does not store
 //! the buffers only the description writes. A description that reassociates what the
 //! dispatch computes joins a region under [`crate::ArithmeticPolicy::Relaxed`] or a
-//! reassociating [`ContractionPrecision`].
+//! reassociating [`ContractionPrecision`]. One that the device may compute with fewer
+//! roundings than its operations state ([`description_contracts`]) joins none under
+//! [`crate::ArithmeticPolicy::MatchRecorded`].
 
 use crate::backend::BufferHandle;
 use crate::fusion_plan::{KernelSite, SiteArg};
@@ -105,6 +108,9 @@ pub(crate) struct Description {
     /// What the operations' dispatches bind on the sites' parcels, so a fused node also
     /// declares the buffers only the description uses.
     pub(crate) bindings: Vec<ResourceBinding>,
+    /// Whether the dispatch computes the operations bit for bit; a site's own
+    /// exactness is separate.
+    pub(crate) exact: bool,
 }
 
 #[cfg(feature = "tensor")]
@@ -114,6 +120,12 @@ impl Description {
     /// not bind are private to the description. Without `exact`, the sites join a region
     /// only under [`crate::ArithmeticPolicy::Relaxed`] or a [`ContractionPrecision`] that
     /// lets contractions reassociate.
+    ///
+    /// With `exact`, the dispatch must also round where the operations store, so a
+    /// compiler that may contract a product into a sum ([`Target::contraction`]) must
+    /// not see one written in it: a description whose operations, composed, add a
+    /// product joins no region on such a device under
+    /// [`crate::ArithmeticPolicy::MatchRecorded`] ([`description_contracts`]).
     pub(crate) fn of(
         described: &TaskNode,
         ir: &crate::task_graph::GraphIR,
@@ -137,7 +149,6 @@ impl Description {
                     *scalar = SiteScalar::Bits(*user_slots.get(slot).ok_or_else(|| node.label.to_string())?);
                 }
             }
-            site.exact &= exact;
             site.private = site.parcels.iter().map(|p| p.buffer).filter(|&b| !bound(b)).collect();
             for binding in &node.bindings {
                 let parent = match binding.resource {
@@ -150,7 +161,7 @@ impl Description {
             }
             sites.push(site);
         }
-        Ok(Self { sites, bindings })
+        Ok(Self { sites, bindings, exact })
     }
 }
 
@@ -687,29 +698,27 @@ pub(crate) fn target(device: &crate::Runtime) -> Target {
     Target {
         subgroup: caps.subgroup_width,
         matrix: caps.matrix_multiply,
-        // The Metal and CUDA C++ compilers contract within an expression by default
-        // (`-ffp-contract=on`, `--fmad=true`), and Goldy compiles them that way.
-        contracts: matches!(
-            device.backend_type(),
-            crate::BackendType::Metal | crate::BackendType::Cuda
-        ),
+        contraction: caps.fp_contraction,
     }
 }
 
-/// Compose `sites`, in execution order, and lower the composition to one kernel for
-/// `target`, rounding contractions no more than `precision` admits. Each site comes with
-/// the position of the node it describes in the run.
-pub(crate) fn synthesize(
-    sites: &[(usize, &SemanticSite)],
-    target: &Target,
-    precision: ContractionPrecision,
-    arithmetic: crate::ArithmeticPolicy,
-    resource_limit: usize,
-) -> Result<SemanticProgram, FusionRejection> {
+/// `sites`, in execution order, composed into one graph.
+struct Composition {
+    graph: Graph,
+    /// `ParcelId(i)` of the graph is `parcels[i]`.
+    parcels: Vec<SiteParcel>,
+    sources: Vec<IndexSource>,
+    scalars: Vec<(usize, SiteScalar)>,
+    /// Each site's operation on the graph's parcels.
+    ops: Vec<algebra::Op>,
+}
+
+fn compose(sites: &[(usize, &SemanticSite)]) -> Result<Composition, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
     let mut graph = Graph::default();
     let mut sources = Vec::new();
     let mut scalars = Vec::new();
+    let mut ops = Vec::with_capacity(sites.len());
     for (k, &(node, site)) in sites.iter().enumerate() {
         let map: Vec<ParcelId> = site
             .parcels
@@ -743,10 +752,11 @@ pub(crate) fn synthesize(
             zero_if_outside: s.zero_if_outside,
         }));
         scalars.extend(site.scalars.iter().map(|&scalar| (node, scalar)));
-        graph.push(op).map_err(|e| FusionRejection::Semantic {
+        graph.push(op.clone()).map_err(|e| FusionRejection::Semantic {
             stage: k,
             reason: e.to_string(),
         })?;
+        ops.push(op);
     }
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
@@ -756,13 +766,63 @@ pub(crate) fn synthesize(
             graph.demote(ParcelId(at as u32));
         }
     }
+    Ok(Composition {
+        graph,
+        parcels,
+        sources,
+        scalars,
+        ops,
+    })
+}
+
+/// The first site whose own arithmetic `contraction` exposes when every operation
+/// rounds its result; the last site when only the composition does.
+fn contracted_stage(ops: &[algebra::Op], contraction: algebra::FpContraction) -> usize {
+    ops.iter()
+        .position(|op| {
+            let mut alone = Graph::default();
+            alone.push(op.clone()).is_ok() && algebra::contracted_output(alone.region(), contraction, true).is_some()
+        })
+        .unwrap_or(ops.len().saturating_sub(1))
+}
+
+/// Whether one kernel computing all of `description` as written may contract it on
+/// `target`, unlike the composition fusion would round. Products its sites round as
+/// results are kernel-internal there, so they count as unrounded.
+pub(crate) fn description_contracts(description: &Description, target: &Target) -> bool {
+    let sites: Vec<(usize, &SemanticSite)> = description.sites.iter().map(|s| (0, s)).collect();
+    compose(&sites).is_ok_and(|c| algebra::contracted_output(c.graph.region(), target.contraction, false).is_some())
+}
+
+/// Compose `sites`, in execution order, and lower the composition to one kernel for
+/// `target`, rounding contractions no more than `precision` admits. Each site comes with
+/// the position of the node it describes in the run.
+pub(crate) fn synthesize(
+    sites: &[(usize, &SemanticSite)],
+    target: &Target,
+    precision: ContractionPrecision,
+    arithmetic: crate::ArithmeticPolicy,
+    resource_limit: usize,
+) -> Result<SemanticProgram, FusionRejection> {
+    let Composition {
+        graph,
+        parcels,
+        sources,
+        scalars,
+        ops,
+    } = compose(sites)?;
     let lowered = match arithmetic {
         crate::ArithmeticPolicy::MatchRecorded => algebra::lower_graph(&graph, &sources, target, precision),
         crate::ArithmeticPolicy::Relaxed => algebra::lower_graph_relaxed(&graph, &sources, target, precision),
     }
-    .map_err(|e| FusionRejection::Semantic {
-        stage: sites.len() - 1,
-        reason: e.to_string(),
+    .map_err(|e| match e {
+        algebra::LowerError::Contraction { .. } => FusionRejection::Contraction {
+            stage: sites[contracted_stage(&ops, target.contraction)].0,
+        },
+        e => FusionRejection::Semantic {
+            stage: sites.len() - 1,
+            reason: e.to_string(),
+        },
     })?;
     if lowered.parcels.len() > resource_limit {
         return Err(FusionRejection::ResourceLimit {

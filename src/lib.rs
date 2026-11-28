@@ -98,6 +98,7 @@ pub use fusion_plan::{
 };
 pub use goldy_shader_ir::algebra::ContractionPrecision;
 pub use goldy_shader_ir::algebra::Estimate as FusionEstimate;
+pub use goldy_shader_ir::algebra::FpContraction;
 pub use host_claim::{HostView, PendingHostRead, PendingHostSinkRead};
 pub use parcel::{field, ordinal, Buffer, Init, Parcel, RecordField, Texture};
 pub use petition::{Backpressure, Petition, Promised, YieldPoint, YieldStats};

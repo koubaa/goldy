@@ -533,6 +533,14 @@ pub struct RuntimeCapabilities {
     /// Automatic fusion uses them only for schemes that admit
     /// [`crate::ContractionPrecision::F16Factors`].
     pub matrix_multiply: bool,
+
+    /// Where the device's shader compilers may fuse floating-point operations the
+    /// source rounds separately, such as a product into the sum that reads it.
+    ///
+    /// Under [`crate::ArithmeticPolicy::MatchRecorded`], automatic fusion declines
+    /// whatever this exposes, so fused results stay bit-identical to the recorded
+    /// dispatches. Unknown devices report [`crate::FpContraction::Anywhere`].
+    pub fp_contraction: crate::FpContraction,
 }
 
 impl Default for RuntimeCapabilities {
@@ -562,6 +570,7 @@ impl Default for RuntimeCapabilities {
             amplification_shaders: false,
             subgroup_width: None,
             matrix_multiply: false,
+            fp_contraction: crate::FpContraction::Anywhere,
         }
     }
 }
