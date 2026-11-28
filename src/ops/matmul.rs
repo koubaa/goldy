@@ -642,12 +642,21 @@ pub struct MatMulBuilder<'a> {
     extras: Vec<BoundOperand>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct BoundTemporaryUse {
+    pub temporary: u32,
+    pub descriptor: crate::types::ResourceAccess,
+    pub byte_range: Option<(u64, u64)>,
+}
+
 pub(crate) struct BoundOperand {
     pub operand: MatMulOperand,
     pub resource: crate::task_graph::ResourceId,
     pub slot: u32,
-    /// The operand's buffer as a semantic parcel, when `slot` is its whole-buffer view.
+    /// The operand's storage as a semantic parcel, when `slot` is its whole-storage view.
     pub parcel: Option<crate::semantic_fusion::SiteParcel>,
+    /// Set when the operand binds a scheme-local [`crate::Temporary`].
+    pub temporary: Option<BoundTemporaryUse>,
 }
 
 impl<'a> MatMulBuilder<'a> {
@@ -864,6 +873,40 @@ fn bind_operand(
         NodeAccess::Write | NodeAccess::Overwrite => crate::types::ResourceAccess::Write,
         NodeAccess::ReadWrite => crate::types::ResourceAccess::ReadWrite,
     };
+    if let Some(temp) = bindable.temporary() {
+        if temp.scheme_id != scheme.scheme_id() {
+            return Err("matmul: the temporary belongs to another scheme. \
+                 hint: temporaries are scheme-local; declare one on this scheme or bind a Buffer"
+                .into());
+        }
+        let byte_range = bindable.temporary_byte_range();
+        let base_bytes = byte_range.map_or(0, |(offset, _)| offset);
+        if !base_bytes.is_multiple_of(4) {
+            return Err(format!(
+                "matmul: temporary range offset {base_bytes} is not f32-aligned"
+            ));
+        }
+        let offset_elements = base_bytes / 4 + view.offset_elements;
+        let leading_dim = view.leading_dim.unwrap_or(packed_ld);
+        if leading_dim == 0 {
+            return Err("matmul: leading dimension must be greater than zero".into());
+        }
+        return Ok(BoundOperand {
+            operand: MatMulOperand {
+                buffer: BufferHandle::default(),
+                offset_elements,
+                leading_dim,
+            },
+            resource: temp.resource_id(),
+            slot: crate::temporary::TEMPORARY_SLOT_PLACEHOLDER,
+            parcel: Some(crate::semantic_fusion::SiteParcel::temporary(temp.id)),
+            temporary: Some(BoundTemporaryUse {
+                temporary: temp.id,
+                descriptor: descriptor_access,
+                byte_range,
+            }),
+        });
+    }
     let (resource_identity, slot) = bindable.resolve(scheme, descriptor_access);
     let slot = slot.ok_or_else(|| format!("matmul: resource has no descriptor for {access:?} access"))?;
     let (resource, maybe_stamp) =
@@ -887,7 +930,10 @@ fn bind_operand(
     let parcel = bindable
         .buffer_parcel()
         .and_then(|p| crate::semantic_fusion::SiteParcel::of(&p))
-        .filter(|p| p.buffer == buffer && (p.srv == Some(slot) || p.uav == Some(slot)));
+        .filter(|p| {
+            p.resource == crate::semantic_fusion::SiteResource::Buffer(buffer)
+                && (p.srv == Some(slot) || p.uav == Some(slot))
+        });
     Ok(BoundOperand {
         operand: MatMulOperand {
             buffer,
@@ -897,6 +943,7 @@ fn bind_operand(
         resource,
         slot,
         parcel,
+        temporary: None,
     })
 }
 

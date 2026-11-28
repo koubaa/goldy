@@ -41,7 +41,7 @@ use crate::runtime::Runtime;
 use crate::scheme::NodeId;
 use crate::semantic_fusion::{
     description_contracts, lift_kernel, synthesize, target as semantic_target, Description, SemanticProgram,
-    SemanticSite, SiteScalar,
+    SemanticSite, SiteResource, SiteScalar,
 };
 use crate::shader::ShaderProvenance;
 use crate::task_graph::{
@@ -420,7 +420,7 @@ impl Program {
     fn locality(&self) -> (usize, usize) {
         match self {
             Program::Composed(definition) => (definition.forwarded.len(), definition.elided.len()),
-            Program::Semantic(program) => (program.forwarded(), 0),
+            Program::Semantic(program) => (program.forwarded(), program.elided()),
         }
     }
 
@@ -727,7 +727,7 @@ impl FusionPlanner {
         self.regions.clear();
         self.rejected.clear();
         self.faulted.clear();
-        let taken = self.match_semantic(ir, sites, semantic, described, target);
+        let taken = self.match_semantic(ir, sites, semantic, described, temporaries, target);
         let view = |i: usize| -> Option<StageView<'_>> {
             if taken[i] {
                 return None;
@@ -816,9 +816,36 @@ impl FusionPlanner {
         sites: &HashMap<u32, KernelSite>,
         semantic: &HashMap<u32, SemanticSite>,
         described: &HashMap<u32, Description>,
+        temporaries: &[TemporaryUse],
         target: &Target,
     ) -> Vec<bool> {
         let n = ir.nodes.len();
+        let mut temp_spans: HashMap<u32, (usize, usize)> = HashMap::new();
+        for u in temporaries {
+            let node = u.node as usize;
+            temp_spans
+                .entry(u.temporary)
+                .and_modify(|span| *span = (span.0.min(node), span.1.max(node)))
+                .or_insert((node, node));
+        }
+        for (&node, desc) in described {
+            let node = node as usize;
+            for b in &desc.bindings {
+                if let ResourceId::TransientBuffer(TransientId(temp)) = b.resource {
+                    temp_spans
+                        .entry(temp)
+                        .and_modify(|span| *span = (span.0.min(node), span.1.max(node)))
+                        .or_insert((node, node));
+                }
+            }
+        }
+        let local_temps_in = |range: Range<usize>| -> HashSet<u32> {
+            temp_spans
+                .iter()
+                .filter_map(|(&temp, &(lo, hi))| (range.contains(&lo) && range.contains(&hi)).then_some(temp))
+                .collect()
+        };
+        let empty_locals = HashSet::new();
         let lifted: HashMap<usize, SemanticSite> = sites
             .iter()
             .filter(|(i, _)| !semantic.contains_key(i) && !described.contains_key(i))
@@ -871,6 +898,7 @@ impl FusionPlanner {
                         let run: Vec<(usize, &SemanticSite)> = s.iter().map(|&s| (0, s)).collect();
                         synthesize(
                             &run,
+                            &empty_locals,
                             &recorded_target,
                             ContractionPrecision::Exact,
                             ArithmeticPolicy::MatchRecorded,
@@ -904,7 +932,15 @@ impl FusionPlanner {
                 let Some(next) = site(end) else { break };
                 unfused_ns += alone_ns(end, &next);
                 run.extend(next.into_iter().map(|s| (end - start, s)));
-                match synthesize(&run, target, self.precision, self.arithmetic, self.resource_limit) {
+                let locals = local_temps_in(start..end + 1);
+                match synthesize(
+                    &run,
+                    &locals,
+                    target,
+                    self.precision,
+                    self.arithmetic,
+                    self.resource_limit,
+                ) {
                     Ok(program) => {
                         end += 1;
                         if !recorded(start..end) {
@@ -1172,6 +1208,7 @@ fn fused_node(
                     slot: resource_slots.len() as u32,
                     descriptor: want.unwrap_or(descriptor),
                     temporary,
+                    byte_range: None,
                 });
                 resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);
             } else {
@@ -1235,27 +1272,32 @@ fn semantic_node(
     arithmetic: ArithmeticPolicy,
 ) -> Result<DraftNode, String> {
     let pipeline = kernel.pipeline_for(arithmetic)?;
-    let untouched = |buffer| {
-        nodes
+    let untouched = |resource: SiteResource| {
+        let demoted = nodes
             .clone()
             .filter_map(|i| described.get(&(i as u32)))
             .flat_map(|d| &d.sites)
-            .any(|s| s.private.contains(&buffer))
+            .any(|s| s.private.contains(&resource))
+            || matches!(resource, SiteResource::Temporary(t) if program.elided_temporaries.contains(&t));
+        demoted
             && !program
                 .lowered
                 .parcels
                 .iter()
-                .any(|&(p, _)| program.parcels[p.0 as usize].buffer == buffer)
+                .any(|&(p, _)| program.parcels[p.0 as usize].resource == resource)
     };
     let mut bindings: Vec<ResourceBinding> = Vec::new();
     for i in nodes.clone() {
         let describing = described.get(&(i as u32)).map_or(&[][..], |d| d.bindings.as_slice());
         for binding in ir.nodes[i].bindings.iter().chain(describing) {
             let parent = match binding.resource {
-                ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
+                ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => {
+                    SiteResource::Buffer(buffer)
+                }
+                ResourceId::TransientBuffer(TransientId(temp)) => SiteResource::Temporary(temp),
                 _ => continue,
             };
-            if !program.parcels.iter().any(|p| p.buffer == parent) || untouched(parent) {
+            if !program.parcels.iter().any(|p| p.resource == parent) || untouched(parent) {
                 continue;
             }
             match bindings.iter_mut().find(|b| b.resource == binding.resource) {
@@ -1267,14 +1309,53 @@ fn semantic_node(
     }
 
     let mut resource_slots = Vec::with_capacity(program.lowered.parcels.len());
+    let mut temporaries = Vec::new();
     for (at, &(parcel, written)) in program.lowered.parcels.iter().enumerate() {
         let site = program.parcels[parcel.0 as usize];
         let uav = pipeline.slot_access.get(at).copied().flatten().map_or(written, is_uav);
-        let slot = if uav { site.uav } else { site.srv };
-        resource_slots.push(slot.ok_or_else(|| {
-            let view = if uav { "writable" } else { "read-only" };
-            format!("a parcel of the synthesized kernel has no {view} view")
-        })?);
+        match site.resource {
+            SiteResource::Buffer(_) => {
+                let slot = if uav { site.uav } else { site.srv };
+                resource_slots.push(slot.ok_or_else(|| {
+                    let view = if uav { "writable" } else { "read-only" };
+                    format!("a parcel of the synthesized kernel has no {view} view")
+                })?);
+            }
+            SiteResource::Temporary(temporary) => {
+                let target = ResourceId::TransientBuffer(TransientId(temporary));
+                let access = if uav { NodeAccess::ReadWrite } else { NodeAccess::Read };
+                let binding = match bindings.iter().position(|b| b.resource == target) {
+                    Some(idx) => {
+                        if uav && bindings[idx].access == NodeAccess::Read {
+                            bindings[idx].access = NodeAccess::ReadWrite;
+                        }
+                        idx as u32
+                    }
+                    None => {
+                        let idx = bindings.len() as u32;
+                        bindings.push(ResourceBinding {
+                            resource: target,
+                            access,
+                        });
+                        idx
+                    }
+                };
+                let descriptor = pipeline.slot_access.get(at).copied().flatten().unwrap_or(if uav {
+                    ResourceAccess::ReadWrite
+                } else {
+                    ResourceAccess::Read
+                });
+                temporaries.push(TemporaryUse {
+                    node: u32::MAX,
+                    binding,
+                    slot: resource_slots.len() as u32,
+                    descriptor,
+                    temporary,
+                    byte_range: None,
+                });
+                resource_slots.push(TEMPORARY_SLOT_PLACEHOLDER);
+            }
+        }
     }
 
     let mut scalar_slots: Vec<Vec<Option<usize>>> = nodes
@@ -1322,7 +1403,7 @@ fn semantic_node(
     Ok(DraftNode {
         node,
         scalar_slots,
-        temporaries: Vec::new(),
+        temporaries,
     })
 }
 

@@ -35,22 +35,30 @@ use crate::ops::matmul::{MatMulDType, MatMulFallback, MatMulOperand};
 use crate::ops::matmul_kernel::GEMV_ORDER;
 use crate::ops::MatMulDesc;
 use crate::parcel::Parcel;
-use crate::task_graph::{DispatchDim, NodeKind, ResourceBinding, ResourceId, TaskNode};
+use crate::task_graph::{DispatchDim, NodeKind, ResourceBinding, ResourceId, TaskNode, TransientId};
 use crate::types::ResourceAccess;
 use goldy_shader_ir::algebra::{
     self, Affine, BinaryOp, Contraction, ContractionPrecision, Graph, IndexSource, IndexVar, Lowered, Map, Op, OpKind,
-    Operand, Params, ParcelId, ReduceOrder, Storage, Sym, Target, Term, UnaryOp,
+    Operand, Params, ParcelId, ReduceOrder, Role, Storage, Sym, Target, Term, UnaryOp,
 };
 use goldy_shader_ir::{
     BinOp, BuiltinFn, ElementType, Expr, FusionRejection, KernelDef, KernelId, ParamCategory, ScalarType, Stmt,
     UnaryOp as IrUnaryOp,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// A buffer a semantic site reads or writes, with its whole-buffer descriptors.
+/// Storage identity of a parcel a semantic site reads or writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SiteResource {
+    Buffer(BufferHandle),
+    Temporary(u32),
+}
+
+/// A buffer or scheme-local temporary a semantic site reads or writes, with its
+/// whole-buffer descriptors when backed by a retained buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SiteParcel {
-    pub(crate) buffer: BufferHandle,
+    pub(crate) resource: SiteResource,
     pub(crate) srv: Option<u32>,
     pub(crate) uav: Option<u32>,
 }
@@ -62,10 +70,19 @@ impl SiteParcel {
             return None;
         };
         Some(Self {
-            buffer,
+            resource: SiteResource::Buffer(buffer),
             srv: parcel.resource_index(ResourceAccess::Read),
             uav: parcel.resource_index(ResourceAccess::Write),
         })
+    }
+
+    /// Scheme-local temporary `id`.
+    pub(crate) fn temporary(id: u32) -> Self {
+        Self {
+            resource: SiteResource::Temporary(id),
+            srv: None,
+            uav: None,
+        }
     }
 }
 
@@ -83,9 +100,9 @@ pub(crate) struct SemanticSite {
     /// sums in its own, so its site joins a region only under a
     /// [`ContractionPrecision`] that lets contractions reassociate.
     pub(crate) exact: bool,
-    /// Buffers whose stores nothing outside the region observes: a fused region does
+    /// Storage whose stores nothing outside the region observes: a fused region does
     /// not store them.
-    pub(crate) private: Vec<BufferHandle>,
+    pub(crate) private: Vec<SiteResource>,
 }
 
 /// What a scalar parameter of a [`SemanticSite`] binds.
@@ -132,10 +149,16 @@ impl Description {
         semantic: &HashMap<u32, SemanticSite>,
         exact: bool,
     ) -> Result<Self, String> {
-        let bound = |buffer: BufferHandle| {
-            described.bindings.iter().any(|b| {
+        let bound = |resource: SiteResource| {
+            match resource {
+            SiteResource::Buffer(buffer) => described.bindings.iter().any(|b| {
                 matches!(b.resource, ResourceId::Buffer(h) | ResourceId::BufferRange { parent: h, .. } if h == buffer)
-            })
+            }),
+            SiteResource::Temporary(temp) => described
+                .bindings
+                .iter()
+                .any(|b| b.resource == ResourceId::TransientBuffer(TransientId(temp))),
+        }
         };
         let mut sites = Vec::with_capacity(ir.nodes.len());
         let mut bindings: Vec<ResourceBinding> = Vec::new();
@@ -149,13 +172,16 @@ impl Description {
                     *scalar = SiteScalar::Bits(*user_slots.get(slot).ok_or_else(|| node.label.to_string())?);
                 }
             }
-            site.private = site.parcels.iter().map(|p| p.buffer).filter(|&b| !bound(b)).collect();
+            site.private = site.parcels.iter().map(|p| p.resource).filter(|&r| !bound(r)).collect();
             for binding in &node.bindings {
                 let parent = match binding.resource {
-                    ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => buffer,
+                    ResourceId::Buffer(buffer) | ResourceId::BufferRange { parent: buffer, .. } => {
+                        SiteResource::Buffer(buffer)
+                    }
+                    ResourceId::TransientBuffer(TransientId(temp)) => SiteResource::Temporary(temp),
                     _ => continue,
                 };
-                if site.parcels.iter().any(|p| p.buffer == parent) && !bindings.contains(binding) {
+                if site.parcels.iter().any(|p| p.resource == parent) && !bindings.contains(binding) {
                     bindings.push(binding.clone());
                 }
             }
@@ -176,7 +202,7 @@ pub(crate) struct SiteBuilder {
 
 impl SiteBuilder {
     pub(crate) fn parcel(&mut self, parcel: SiteParcel) -> ParcelId {
-        let at = match self.parcels.iter().position(|p| p.buffer == parcel.buffer) {
+        let at = match self.parcels.iter().position(|p| p.resource == parcel.resource) {
             Some(at) => at,
             None => {
                 self.parcels.push(parcel);
@@ -393,11 +419,26 @@ pub(crate) fn lift_kernel(site: &KernelSite, node: &TaskNode) -> Option<Semantic
                 let bindless = *resource_slots.get(slot)?;
                 let read = descriptor == ResourceAccess::Read;
                 let parcel = s.parcel(SiteParcel {
-                    buffer,
+                    resource: SiteResource::Buffer(buffer),
                     srv: read.then_some(bindless),
                     uav: (!read).then_some(bindless),
                 });
                 Formal::Buffer(parcel)
+            }
+            (
+                SiteArg::Resource {
+                    resource: Some(ResourceId::TransientBuffer(TransientId(temp))),
+                    ..
+                },
+                None,
+            ) if !param.is_tensor
+                && param.slang_type == ElementType::F32.slang_name()
+                && matches!(
+                    param.category,
+                    ParamCategory::BufferRead | ParamCategory::BufferReadWrite | ParamCategory::BufferWrite
+                ) =>
+            {
+                Formal::Buffer(s.parcel(SiteParcel::temporary(temp)))
             }
             (SiteArg::Scalar { slot }, Some(ScalarType::F32)) => Formal::F32(slot),
             (SiteArg::Scalar { slot }, Some(ScalarType::U32 | ScalarType::I32)) => Formal::Int(*user_slots.get(slot)?),
@@ -661,6 +702,8 @@ pub(crate) struct SemanticProgram {
     pub(crate) scalars: Vec<(usize, SiteScalar)>,
     /// The constituents' operations, composed; operands are named `p{parcel}`.
     pub(crate) graph: Graph,
+    /// Scheme-local temporaries demoted into registers within this region.
+    pub(crate) elided_temporaries: HashSet<u32>,
 }
 
 impl SemanticProgram {
@@ -671,6 +714,11 @@ impl SemanticProgram {
     /// Inputs that read a value an earlier constituent defines rather than storage.
     pub(crate) fn forwarded(&self) -> usize {
         self.graph.edges().len()
+    }
+
+    /// Scheme-local temporaries elided into registers.
+    pub(crate) fn elided(&self) -> usize {
+        self.elided_temporaries.len()
     }
 
     /// The composition's contractions with their prologues and epilogues, one per line.
@@ -711,9 +759,10 @@ struct Composition {
     scalars: Vec<(usize, SiteScalar)>,
     /// Each site's operation on the graph's parcels.
     ops: Vec<algebra::Op>,
+    elided_temporaries: HashSet<u32>,
 }
 
-fn compose(sites: &[(usize, &SemanticSite)]) -> Result<Composition, FusionRejection> {
+fn compose(sites: &[(usize, &SemanticSite)], local_temporaries: &HashSet<u32>) -> Result<Composition, FusionRejection> {
     let mut parcels: Vec<SiteParcel> = Vec::new();
     let mut graph = Graph::default();
     let mut sources = Vec::new();
@@ -723,7 +772,7 @@ fn compose(sites: &[(usize, &SemanticSite)]) -> Result<Composition, FusionReject
         let map: Vec<ParcelId> = site
             .parcels
             .iter()
-            .map(|p| match parcels.iter_mut().position(|q| q.buffer == p.buffer) {
+            .map(|p| match parcels.iter_mut().position(|q| q.resource == p.resource) {
                 Some(at) => {
                     let q = &mut parcels[at];
                     q.srv = q.srv.or(p.srv);
@@ -761,9 +810,21 @@ fn compose(sites: &[(usize, &SemanticSite)]) -> Result<Composition, FusionReject
     if graph.ops().is_empty() {
         return Err(FusionRejection::Empty);
     }
+    let mut elided_temporaries = HashSet::new();
     for (at, parcel) in parcels.iter().enumerate() {
-        if sites.iter().any(|(_, s)| s.private.contains(&parcel.buffer)) {
-            graph.demote(ParcelId(at as u32));
+        let pid = ParcelId(at as u32);
+        if sites.iter().any(|(_, s)| s.private.contains(&parcel.resource)) {
+            graph.demote(pid);
+            continue;
+        }
+        if let SiteResource::Temporary(temp) = parcel.resource {
+            let read_from_storage = graph
+                .region()
+                .values()
+                .any(|(_, v)| v.role == Role::Input && v.storage.as_ref().is_some_and(|s| s.parcel == pid));
+            if local_temporaries.contains(&temp) && !read_from_storage && graph.demote(pid) > 0 {
+                elided_temporaries.insert(temp);
+            }
         }
     }
     Ok(Composition {
@@ -772,6 +833,7 @@ fn compose(sites: &[(usize, &SemanticSite)]) -> Result<Composition, FusionReject
         sources,
         scalars,
         ops,
+        elided_temporaries,
     })
 }
 
@@ -791,7 +853,8 @@ fn contracted_stage(ops: &[algebra::Op], contraction: algebra::FpContraction) ->
 /// results are kernel-internal there, so they count as unrounded.
 pub(crate) fn description_contracts(description: &Description, target: &Target) -> bool {
     let sites: Vec<(usize, &SemanticSite)> = description.sites.iter().map(|s| (0, s)).collect();
-    compose(&sites).is_ok_and(|c| algebra::contracted_output(c.graph.region(), target.contraction, false).is_some())
+    compose(&sites, &HashSet::new())
+        .is_ok_and(|c| algebra::contracted_output(c.graph.region(), target.contraction, false).is_some())
 }
 
 /// Compose `sites`, in execution order, and lower the composition to one kernel for
@@ -799,6 +862,7 @@ pub(crate) fn description_contracts(description: &Description, target: &Target) 
 /// the position of the node it describes in the run.
 pub(crate) fn synthesize(
     sites: &[(usize, &SemanticSite)],
+    local_temporaries: &HashSet<u32>,
     target: &Target,
     precision: ContractionPrecision,
     arithmetic: crate::ArithmeticPolicy,
@@ -810,7 +874,8 @@ pub(crate) fn synthesize(
         sources,
         scalars,
         ops,
-    } = compose(sites)?;
+        elided_temporaries,
+    } = compose(sites, local_temporaries)?;
     let lowered = match arithmetic {
         crate::ArithmeticPolicy::MatchRecorded => algebra::lower_graph(&graph, &sources, target, precision),
         crate::ArithmeticPolicy::Relaxed => algebra::lower_graph_relaxed(&graph, &sources, target, precision),
@@ -849,5 +914,6 @@ pub(crate) fn synthesize(
         parcels,
         scalars,
         graph,
+        elided_temporaries,
     })
 }

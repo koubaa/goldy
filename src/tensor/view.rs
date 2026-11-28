@@ -112,7 +112,7 @@ impl Tensor {
 
     pub fn view(&self) -> TensorView<'_> {
         TensorView {
-            buffer: &self.buffer,
+            backing: TensorBacking::Buffer(&self.buffer),
             layout: self.layout,
         }
     }
@@ -148,14 +148,17 @@ fn validate_fits(buffer: &Buffer, layout: TensorLayout) -> Result<(), GoldyError
             "tensor: partitioned buffers cannot back a tensor; bind individual parcels".into(),
         ));
     }
+    validate_byte_capacity(buffer.byte_size(), layout)
+}
+
+fn validate_byte_capacity(capacity_bytes: u64, layout: TensorLayout) -> Result<(), GoldyError> {
     let (byte_off, byte_len) = layout.byte_envelope()?;
     let end = byte_off
         .checked_add(byte_len)
         .ok_or_else(|| GoldyError::Validation("tensor: view envelope overflow".into()))?;
-    if end > buffer.byte_size() {
+    if end > capacity_bytes {
         return Err(GoldyError::Validation(format!(
-            "tensor: view envelope [{byte_off}, {end}) exceeds buffer size {}",
-            buffer.byte_size()
+            "tensor: view envelope [{byte_off}, {end}) exceeds buffer size {capacity_bytes}"
         )));
     }
     if byte_off % layout.dtype().size_bytes() as u64 != 0 {
@@ -166,10 +169,26 @@ fn validate_fits(buffer: &Buffer, layout: TensorLayout) -> Result<(), GoldyError
     Ok(())
 }
 
-/// Metadata lens over a parent [`Buffer`]. Copying a view does not copy data or identity.
+#[derive(Clone, Copy)]
+pub(crate) enum TensorBacking<'a> {
+    Buffer(&'a Buffer),
+    Temporary(crate::Temporary),
+}
+
+impl TensorBacking<'_> {
+    pub(crate) fn byte_size(self) -> u64 {
+        match self {
+            Self::Buffer(buffer) => buffer.byte_size(),
+            Self::Temporary(temp) => temp.byte_size(),
+        }
+    }
+}
+
+/// Metadata lens over a parent [`Buffer`] or scheme-local [`crate::Temporary`].
+/// Copying a view does not copy data or identity.
 #[derive(Clone, Copy)]
 pub struct TensorView<'a> {
-    buffer: &'a Buffer,
+    pub(crate) backing: TensorBacking<'a>,
     layout: TensorLayout,
 }
 
@@ -179,7 +198,8 @@ impl std::fmt::Debug for TensorView<'_> {
             .field("dtype", &self.layout.dtype())
             .field("shape", &self.layout.shape())
             .field("layout", &self.layout)
-            .field("buffer_bytes", &self.buffer.byte_size())
+            .field("buffer_bytes", &self.backing.byte_size())
+            .field("temporary", &self.is_temporary())
             .finish()
     }
 }
@@ -187,7 +207,25 @@ impl std::fmt::Debug for TensorView<'_> {
 impl<'a> TensorView<'a> {
     pub fn new(buffer: &'a Buffer, layout: TensorLayout) -> Result<Self, GoldyError> {
         validate_fits(buffer, layout)?;
-        Ok(Self { buffer, layout })
+        Ok(Self {
+            backing: TensorBacking::Buffer(buffer),
+            layout,
+        })
+    }
+
+    pub(crate) fn from_temporary(temporary: crate::Temporary, layout: TensorLayout) -> Result<Self, GoldyError> {
+        validate_byte_capacity(temporary.byte_size(), layout)?;
+        Ok(Self {
+            backing: TensorBacking::Temporary(temporary),
+            layout,
+        })
+    }
+
+    fn with_layout(self, layout: TensorLayout) -> Result<Self, GoldyError> {
+        match self.backing {
+            TensorBacking::Buffer(buffer) => Self::new(buffer, layout),
+            TensorBacking::Temporary(temporary) => Self::from_temporary(temporary, layout),
+        }
     }
 
     /// The same bytes viewed as a packed `u32` vector. Used by matmuls that
@@ -202,7 +240,7 @@ impl<'a> TensorView<'a> {
         let mut byte_len = byte_len;
         if !byte_len.is_multiple_of(4) {
             let rounded = byte_len.next_multiple_of(4);
-            if byte_off + rounded > self.buffer.byte_size() {
+            if byte_off + rounded > self.backing.byte_size() {
                 return Err(GoldyError::Validation(
                     "tensor packed_u32_words: buffer is shorter than a trailing u32".into(),
                 ));
@@ -212,7 +250,8 @@ impl<'a> TensorView<'a> {
         let words = u32::try_from(byte_len / 4)
             .map_err(|_| GoldyError::Validation("tensor packed_u32_words: range does not fit u32".into()))?;
         let shape = TensorShape::vector(words.max(1));
-        Self::packed_at(self.buffer, TensorDType::U32, byte_off / 4, shape)
+        let layout = TensorLayout::packed(TensorDType::U32, shape, byte_off / 4)?;
+        self.with_layout(layout)
     }
 
     /// Packed window of `shape` starting at element `storage_offset` in `buffer`.
@@ -226,7 +265,34 @@ impl<'a> TensorView<'a> {
     }
 
     pub fn buffer(self) -> &'a Buffer {
-        self.buffer
+        match self.backing {
+            TensorBacking::Buffer(buffer) => buffer,
+            TensorBacking::Temporary(_) => {
+                panic!("TensorView::buffer called on a scheme-local temporary tensor")
+            }
+        }
+    }
+
+    pub fn try_buffer(self) -> Option<&'a Buffer> {
+        match self.backing {
+            TensorBacking::Buffer(buffer) => Some(buffer),
+            TensorBacking::Temporary(_) => None,
+        }
+    }
+
+    pub fn is_temporary(self) -> bool {
+        matches!(self.backing, TensorBacking::Temporary(_))
+    }
+
+    pub(crate) fn backing(self) -> TensorBacking<'a> {
+        self.backing
+    }
+
+    pub(crate) fn site_parcel(self) -> Option<crate::semantic_fusion::SiteParcel> {
+        match self.backing {
+            TensorBacking::Buffer(buffer) => crate::semantic_fusion::SiteParcel::of(buffer.whole()),
+            TensorBacking::Temporary(temp) => Some(crate::semantic_fusion::SiteParcel::temporary(temp.id)),
+        }
     }
 
     pub fn layout(self) -> TensorLayout {
@@ -297,7 +363,7 @@ impl<'a> TensorView<'a> {
         let mut strides = [0i64; MAX_TENSOR_RANK];
         strides[..shape.rank()].copy_from_slice(self.layout.strides());
         let layout = self.layout.with_shape_strides(shape, strides, new_off as u64);
-        Self::new(self.buffer, layout)
+        self.with_layout(layout)
     }
 
     /// Packed-only reshape. Element count must match; the result is contiguous row-major.
@@ -316,7 +382,7 @@ impl<'a> TensorView<'a> {
             )));
         }
         let layout = TensorLayout::packed(self.dtype(), shape, self.storage_offset())?;
-        Self::new(self.buffer, layout)
+        self.with_layout(layout)
     }
 
     /// Permute axes. `axes` is a permutation of `0..rank`.
@@ -344,7 +410,7 @@ impl<'a> TensorView<'a> {
         }
         let shape = TensorShape::from_dims(&dims)?;
         let layout = self.layout.with_shape_strides(shape, strides, self.storage_offset());
-        Self::new(self.buffer, layout)
+        self.with_layout(layout)
     }
 
     /// Swap the last two axes (no-op for rank < 2).
@@ -389,7 +455,7 @@ impl<'a> TensorView<'a> {
         }
         let shape = TensorShape::from_dims(&dims)?;
         let layout = self.layout.with_shape_strides(shape, strides, self.storage_offset());
-        Self::new(self.buffer, layout)
+        self.with_layout(layout)
     }
 
     /// Flatten to a rank-1 packed view of the same elements (contiguous only).
@@ -409,7 +475,7 @@ impl<'a> TensorView<'a> {
             )));
         }
         let layout = TensorLayout::strided(dtype, self.shape(), self.storage_offset(), self.layout.strides())?;
-        Self::new(self.buffer, layout)
+        self.with_layout(layout)
     }
 }
 
