@@ -2351,19 +2351,12 @@ pub(super) fn int(value: i64) -> Result<Expr, LowerError> {
         .map_err(|_| LowerError::IndexRange)
 }
 
-/// An f32 literal; non-finite values, which have no literal, as quotients.
+/// An f32 literal; non-finite values, which have no literal, as bit-pattern constants.
 pub(super) fn float(value: f32) -> Expr {
     if value.is_finite() {
         return Expr::LitF32(value);
     }
-    let numerator = if value.is_nan() {
-        0.0
-    } else if value > 0.0 {
-        1.0
-    } else {
-        -1.0
-    };
-    bin(BinOp::Div, Expr::LitF32(numerator), Expr::LitF32(0.0))
+    call(BuiltinFn::AsFloat, vec![Expr::LitU32(value.to_bits())])
 }
 
 fn combine(op: ReduceOp, acc: Expr, x: Expr) -> Expr {
