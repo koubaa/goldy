@@ -295,6 +295,24 @@ fn tensor_cyclic_store_f32(
     }
 }
 
+/// Store one value per row in the position-addressed slot of a row-major history whose
+/// last axis is the slots. A position past the last slot stores nothing.
+#[goldy::compute(workgroup_size = [256, 1, 1])]
+fn tensor_store_at_f32(
+    src: goldy::gpu::Tensor<f32>,
+    state: goldy::gpu::TensorMut<f32>,
+    position: goldy::gpu::Tensor<u32>,
+) {
+    let row = goldy::gpu::global_id().x;
+    if row < src.len() {
+        let width = state.len() / src.len();
+        let at = position[0];
+        if at < width {
+            state[row * width + at] = src[row];
+        }
+    }
+}
+
 /// Dot each row with its causal cyclic window, newest element last in `weight`.
 ///
 /// Positions before the beginning of the sequence contribute zero. The current
@@ -365,4 +383,5 @@ pub use tensor_cyclic_store_f32::Kernel as CyclicStoreF32Kernel;
 pub use tensor_gather_f32::Kernel as GatherF32Kernel;
 pub use tensor_reduce_f32::Kernel as ReduceF32Kernel;
 pub use tensor_scatter_f32::Kernel as ScatterF32Kernel;
+pub use tensor_store_at_f32::Kernel as StoreAtF32Kernel;
 pub use tensor_unary_f32::Kernel as UnaryF32Kernel;
