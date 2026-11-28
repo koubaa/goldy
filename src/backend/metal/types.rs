@@ -32,11 +32,17 @@ use mtl::{
     MTLResourceOptions, RenderPipelineState, SamplerState, SharedEvent, Texture as MTLTexture,
 };
 
-/// Maximum size of the argument buffer.
-/// 5 categories × 4096 slots × 8 bytes per resource ID = 163840 bytes.
-/// Categories: storageBuffers(0..4K), uniformBuffers(4K..8K), textures(8K..12K),
-///             storageImages(12K..16K), samplers(16K..20K).
-pub const ARGUMENT_BUFFER_SIZE: u64 = 24 * 1024 * 8; // 6 × MAX_RESOURCES_PER_CATEGORY × 8
+/// Maximum resources per access-pattern category (must match
+/// `GOLDY_MAX_RESOURCES` in `bindless_resources.slang`).
+///
+/// Raised from 4,096 to 16,384 so long-lived workloads can retain more than
+/// 4,096 storage buffers. The six-category argument buffer occupies 768 KiB,
+/// while Metal Argument Buffers Tier 2 supports at least 500,000 resources per
+/// argument buffer.
+pub const MAX_RESOURCES_PER_CATEGORY: u32 = 16_384;
+
+/// Maximum size of the six-category argument buffer.
+pub const ARGUMENT_BUFFER_SIZE: u64 = 6 * MAX_RESOURCES_PER_CATEGORY as u64 * std::mem::size_of::<u64>() as u64;
 
 /// Buffer slot for resource binding indices in shaders.
 /// Slang assigns uniform entry-point params to [[buffer(1)]] (gGoldy ParameterBlock takes [[buffer(0)]]).
@@ -819,15 +825,6 @@ impl LogicalDevice {
         }
     }
 }
-
-/// Maximum resources per access pattern category (must match GOLDY_MAX_RESOURCES in shaders).
-///
-/// Raised from 64 to 4096 in issue #125. The previous 64-slot limit only
-/// supported ~2 frames in flight with typical per-frame buffer counts; 4096
-/// comfortably handles hundreds of in-flight frames. The argument buffer
-/// cost is 5 × 4096 × 8 B ≈ 160 KB — negligible vs Metal Tier 2's 500K
-/// limit. Vulkan and DX12 already use 16 384.
-pub const MAX_RESOURCES_PER_CATEGORY: u32 = 4096;
 
 use super::super::shared::SlotAllocator;
 
@@ -1729,6 +1726,23 @@ impl MetalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn argument_buffer_layout_matches_category_capacity() {
+        assert_eq!(MAX_RESOURCES_PER_CATEGORY, 16_384);
+        assert_eq!(
+            ARGUMENT_BUFFER_SIZE,
+            6 * u64::from(MAX_RESOURCES_PER_CATEGORY) * std::mem::size_of::<u64>() as u64
+        );
+    }
+
+    #[test]
+    fn storage_registry_can_cross_previous_capacity() {
+        let mut reg = ResourceRegistry::new();
+        for handle in 0..=8192 {
+            assert_eq!(reg.register_storage_buffer(handle), handle as u32);
+        }
+    }
 
     /// Regression test for the "black screen after ~540 frames" bug.
     ///
